@@ -225,62 +225,6 @@ xcrun stapler staple /tmp/OmniPlay.dmg
 xcodebuild -resolvePackageDependencies -project OmniPlay.xcodeproj
 ```
 
-### 2. WebDAV 预扫描找不到设备
-
-可直接使用“添加 WebDAV 媒体源”手动输入地址。预扫描依赖局域网服务发现，以下情况可能无法发现：
-
-- NAS 和电脑不在同一局域网。
-- 路由器阻止 Bonjour/mDNS。
-- WebDAV 服务未广播 `_webdav._tcp` 或 `_webdavs._tcp`。
-- 使用公网域名或反向代理。
-
-### 3. WebDAV 可以登录但扫描不到文件
-
-请检查：
-
-- 星标挂载的是具体媒体文件夹，而不是空目录。
-- 目录下存在支持的视频格式。
-- WebDAV 用户对该目录有读取权限。
-- NAS WebDAV 服务允许 `PROPFIND`。
-
-支持的视频扩展名包括但不限于：
-
-```text
-mp4, mkv, mov, avi, rmvb, flv, webm, m2ts, ts, iso, m4v, wmv
-```
-
-### 4. 刮削结果不准确
-
-建议：
-
-- 文件名包含片名和年份。
-- 剧集使用 `S01E01`、`S01E02` 等规范命名。
-- 在设置中配置自己的 TMDB API。
-- 手动搜索或编辑元数据。
-
-### 5. 分集副标题为什么不自动显示文件名片段
-
-当前行为是有意设计：分集自定义副标题默认留空，不再从文件名自动提取。只有用户在编辑弹窗中手动输入并保存后，副标题才会显示在分集剧照下面。
-
-### 6. 播放 WebDAV 文件失败
-
-请检查：
-
-- WebDAV 地址是否仍可访问。
-- 用户名和密码是否正确。
-- NAS WebDAV 服务是否启用。
-- 文件是否被移动或删除。
-- 应用是否有网络访问权限。
-
-### 7. 数据库和缓存在哪里
-
-数据库默认位置：
-
-```text
-~/Library/Application Support/OmniPlay/omniplay.sqlite
-```
-
-海报、剧照、离线缓存等数据由应用内部管理，离线缓存目录可在偏好设置中更改。
 
 ## 开发说明
 
