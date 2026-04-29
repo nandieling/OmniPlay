@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/OmniPlay.Core/OmniPlay.Core.csproj" />
+    <Project Path="src/OmniPlay.Desktop/OmniPlay.Desktop.csproj" />
+    <Project Path="src/OmniPlay.Infrastructure/OmniPlay.Infrastructure.csproj" />
+    <Project Path="src/OmniPlay.Player.Mpv/OmniPlay.Player.Mpv.csproj" />
+    <Project Path="src/OmniPlay.UI/OmniPlay.UI.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/OmniPlay.Tests/OmniPlay.Tests.csproj" />
+  </Folder>
+</Solution>

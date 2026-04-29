@@ -1,0 +1,347 @@
+<Window
+    x:Class="OmniPlay.Desktop.Windows.StandalonePlayerWindow"
+    x:Name="RootWindow"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:player="using:OmniPlay.UI.Controls.Player"
+    Width="1280"
+    Height="720"
+    MinWidth="1100"
+    MinHeight="680"
+    Background="#000000"
+    KeyDown="Window_OnKeyDown"
+    Opened="Window_OnOpened"
+    PointerMoved="Window_OnPointerMoved"
+    Title="{Binding Title}">
+  <Window.Styles>
+    <Style Selector="Button.overlayButton">
+      <Setter Property="MinHeight" Value="38" />
+      <Setter Property="Padding" Value="14,0" />
+      <Setter Property="Background" Value="#B3000000" />
+      <Setter Property="BorderBrush" Value="#33FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Foreground" Value="#F5F5F5" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.overlayButton:pointerover">
+      <Setter Property="Background" Value="#E0181818" />
+      <Setter Property="BorderBrush" Value="#52FFFFFF" />
+    </Style>
+    <Style Selector="Button.roundButton">
+      <Setter Property="Width" Value="58" />
+      <Setter Property="Height" Value="58" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Background" Value="#99000000" />
+      <Setter Property="BorderBrush" Value="#30FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="29" />
+      <Setter Property="Foreground" Value="#FFFFFF" />
+    </Style>
+    <Style Selector="Button.roundButton:pointerover">
+      <Setter Property="Background" Value="#D81C1C1C" />
+      <Setter Property="BorderBrush" Value="#5CFFFFFF" />
+    </Style>
+    <Style Selector="Button.playButton">
+      <Setter Property="Width" Value="76" />
+      <Setter Property="Height" Value="76" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Background" Value="#F3F1EC" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="38" />
+      <Setter Property="Foreground" Value="#111111" />
+    </Style>
+    <Style Selector="Button.playButton:pointerover">
+      <Setter Property="Background" Value="#FFFFFF" />
+    </Style>
+    <Style Selector="ComboBox.controlMenu">
+      <Setter Property="MinHeight" Value="38" />
+      <Setter Property="Padding" Value="10,0" />
+      <Setter Property="Background" Value="#B3000000" />
+      <Setter Property="BorderBrush" Value="#33FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Foreground" Value="#F5F5F5" />
+    </Style>
+    <Style Selector="Button.episodeNavButton">
+      <Setter Property="Margin" Value="0,0,0,10" />
+      <Setter Property="Padding" Value="14,12" />
+      <Setter Property="Background" Value="#B3000000" />
+      <Setter Property="BorderBrush" Value="#2EFFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    </Style>
+    <Style Selector="Button.episodeNavButton:pointerover">
+      <Setter Property="Background" Value="#E01A1A1A" />
+      <Setter Property="BorderBrush" Value="#4BFFFFFF" />
+    </Style>
+    <Style Selector="Button.episodeNavButton.current">
+      <Setter Property="Background" Value="#D81F3150" />
+      <Setter Property="BorderBrush" Value="#6EA4FF" />
+    </Style>
+  </Window.Styles>
+
+  <Grid Background="#000000" RowDefinitions="44,*">
+    <Border
+        Grid.Row="0"
+        Background="#000000"
+        PointerMoved="WindowControlsHotZone_OnPointerMoved">
+      <StackPanel
+          x:Name="WindowControlsPanel"
+          HorizontalAlignment="Right"
+          VerticalAlignment="Top"
+          Orientation="Horizontal"
+          IsVisible="False">
+        <Button Width="46" Height="34" Padding="0" Background="#00000000" BorderThickness="0" Foreground="#EDEDED" Click="MinimizeButton_OnClick" ToolTip.Tip="最小化">
+          <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="18" Text="-" />
+        </Button>
+        <Button Width="46" Height="34" Padding="0" Background="#00000000" BorderThickness="0" Foreground="#EDEDED" Click="MaximizeButton_OnClick" ToolTip.Tip="最大化或还原">
+          <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="14" Text="□" />
+        </Button>
+        <Button Width="46" Height="34" Padding="0" Background="#00000000" BorderThickness="0" Foreground="#EDEDED" Click="CloseButton_OnClick" ToolTip.Tip="关闭播放页">
+          <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="18" Text="×" />
+        </Button>
+      </StackPanel>
+    </Border>
+
+    <ContentControl x:Name="PlayerSurfaceHostContainer" Grid.Row="1" />
+
+    <Border
+        x:Name="TapSurface"
+        Grid.Row="1"
+        Background="#01000000"
+        PointerPressed="TapSurface_OnPointerPressed" />
+
+    <Border
+        Grid.Row="1"
+        HorizontalAlignment="Center"
+        VerticalAlignment="Center"
+        MaxWidth="520"
+        Padding="16,11"
+        CornerRadius="14"
+        Background="#B3000000"
+        BorderBrush="#22FFFFFF"
+        BorderThickness="1"
+        IsVisible="{Binding !IsPlaying}">
+      <TextBlock
+          Foreground="#F5F5F5"
+          Text="{Binding StatusMessage}"
+          TextAlignment="Center"
+          TextWrapping="Wrap" />
+    </Border>
+
+    <Grid Grid.Row="1" IsVisible="{Binding AreControlsVisible}" RowDefinitions="*,Auto">
+      <Border
+          Grid.Row="0"
+          Width="320"
+          Margin="0,0,24,0"
+          Padding="16"
+          HorizontalAlignment="Right"
+          VerticalAlignment="Stretch"
+          Background="#B8101010"
+          BorderBrush="#2EFFFFFF"
+          BorderThickness="1"
+          CornerRadius="18"
+          IsVisible="{Binding HasPlaybackNavigation}">
+        <StackPanel Spacing="12">
+          <StackPanel Spacing="4">
+            <TextBlock FontSize="18" FontWeight="SemiBold" Foreground="#F5F5F5" Text="{Binding PlaybackNavigationTitle}" />
+            <TextBlock FontSize="12" Foreground="#A8A8A8" Text="切换分集时会保留当前播放进度" TextWrapping="Wrap" />
+          </StackPanel>
+
+          <ComboBox
+              Classes="controlMenu"
+              IsVisible="{Binding HasPlaybackNavigationSeasons}"
+              ItemsSource="{Binding PlaybackNavigationSeasons}"
+              SelectedItem="{Binding SelectedPlaybackNavigationSeason, Mode=TwoWay}" />
+
+          <Grid ColumnDefinitions="*,*">
+            <Button
+                Classes="overlayButton"
+                Margin="0,0,10,0"
+                Command="{Binding PlayPreviousEpisodeCommand}"
+                Content="{Binding PreviousEpisodeActionText}"
+                IsVisible="{Binding HasPreviousEpisodeAction}" />
+            <Button
+                Grid.Column="1"
+                Classes="overlayButton"
+                Command="{Binding PlayNextEpisodeCommand}"
+                Content="{Binding NextEpisodeActionText}"
+                IsVisible="{Binding HasNextEpisodeAction}" />
+          </Grid>
+
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <ItemsControl ItemsSource="{Binding PlaybackNavigationItems}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Button
+                      Classes="episodeNavButton"
+                      Classes.current="{Binding IsCurrent}"
+                      Command="{Binding #RootWindow.DataContext.SelectPlaybackNavigationItemCommand}"
+                      CommandParameter="{Binding}">
+                    <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+                      <StackPanel Spacing="4">
+                        <TextBlock FontSize="14" FontWeight="SemiBold" Foreground="#F5F5F5" Text="{Binding Title}" />
+                        <TextBlock FontSize="12" Foreground="#AEAEAE" Text="{Binding Subtitle}" TextWrapping="Wrap" />
+                      </StackPanel>
+                      <Border Grid.Column="1" Padding="10,4" CornerRadius="999" Background="#1F262F">
+                        <TextBlock FontSize="11" Foreground="#D8E6FF" Text="{Binding StatusText}" />
+                      </Border>
+                    </Grid>
+                  </Button>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </ScrollViewer>
+        </StackPanel>
+      </Border>
+
+      <Border Grid.Row="1">
+        <Border.Background>
+          <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+            <GradientStop Color="#00000000" Offset="0" />
+            <GradientStop Color="#C2000000" Offset="0.28" />
+            <GradientStop Color="#F2000000" Offset="1" />
+          </LinearGradientBrush>
+        </Border.Background>
+
+        <StackPanel Margin="30,48,30,28" Spacing="14">
+          <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" IsVisible="{Binding ShouldShowNextEpisodeAction}">
+            <Button
+                Classes="overlayButton"
+                Command="{Binding PlayNextEpisodeCommand}"
+                Content="{Binding NextEpisodeActionText}"
+                ToolTip.Tip="播放下一集" />
+          </StackPanel>
+
+          <StackPanel HorizontalAlignment="Center" Orientation="Horizontal" Spacing="34">
+            <Button
+                Classes="roundButton"
+                PointerPressed="SeekBackwardButton_OnPointerPressed"
+                PointerReleased="SeekRepeatButton_OnPointerReleased"
+                PointerCaptureLost="SeekRepeatButton_OnPointerCaptureLost"
+                ToolTip.Tip="后退 10 秒">
+              <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="30" FontWeight="SemiBold" Text="&lt;" />
+            </Button>
+            <Button Classes="playButton" Command="{Binding TogglePlayPauseCommand}" ToolTip.Tip="播放或暂停">
+              <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="34" Text="{Binding PlayPauseGlyph}" />
+            </Button>
+            <Button
+                Classes="roundButton"
+                PointerPressed="SeekForwardButton_OnPointerPressed"
+                PointerReleased="SeekRepeatButton_OnPointerReleased"
+                PointerCaptureLost="SeekRepeatButton_OnPointerCaptureLost"
+                ToolTip.Tip="前进 10 秒">
+              <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="30" FontWeight="SemiBold" Text="&gt;" />
+            </Button>
+          </StackPanel>
+
+          <Grid ColumnDefinitions="Auto,*,Auto">
+            <TextBlock
+                MinWidth="54"
+                VerticalAlignment="Center"
+                FontFamily="Consolas"
+                FontSize="12"
+                Foreground="#D0D0D0"
+                Text="{Binding CurrentPositionText}" />
+            <Slider
+                x:Name="PositionSlider"
+                Grid.Column="1"
+                Margin="12,0"
+                Minimum="0"
+                Maximum="{Binding DurationSeconds}"
+                Value="{Binding SeekPositionSeconds, Mode=TwoWay}"
+                PropertyChanged="PositionSlider_OnPropertyChanged" />
+            <TextBlock
+                Grid.Column="2"
+                MinWidth="58"
+                VerticalAlignment="Center"
+                FontFamily="Consolas"
+                FontSize="12"
+                Foreground="#D0D0D0"
+                Text="{Binding RemainingTimeText}" />
+          </Grid>
+
+          <Grid ColumnDefinitions="*,Auto">
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10">
+              <ComboBox
+                  Classes="controlMenu"
+                  Width="176"
+                  IsVisible="{Binding HasAudioTrackSelection}"
+                  ItemsSource="{Binding AudioTracks}"
+                  SelectedItem="{Binding SelectedAudioTrack, Mode=TwoWay}"
+                  ToolTip.Tip="音轨">
+                <ComboBox.ItemTemplate>
+                  <DataTemplate>
+                    <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                  </DataTemplate>
+                </ComboBox.ItemTemplate>
+              </ComboBox>
+
+              <ComboBox
+                  Classes="controlMenu"
+                  Width="176"
+                  IsVisible="{Binding HasSubtitleTrackSelection}"
+                  ItemsSource="{Binding SubtitleTracks}"
+                  SelectedItem="{Binding SelectedSubtitleTrack, Mode=TwoWay}"
+                  ToolTip.Tip="字幕">
+                <ComboBox.ItemTemplate>
+                  <DataTemplate>
+                    <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                  </DataTemplate>
+                </ComboBox.ItemTemplate>
+              </ComboBox>
+
+              <Button
+                  Classes="overlayButton"
+                  Command="{Binding LoadExternalSubtitleCommand}"
+                  Content="外挂字幕"
+                  IsVisible="{Binding HasExternalSubtitlePicker}"
+                  ToolTip.Tip="加载外挂字幕" />
+
+              <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding HasSubtitleStyleControls}">
+                <Button Classes="overlayButton" Width="38" Padding="0" Command="{Binding DecreaseSubtitleDelayCommand}" ToolTip.Tip="字幕提前 0.5 秒">
+                  <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="18" Text="−" />
+                </Button>
+                <Border Height="38" MinWidth="62" Padding="10,0" CornerRadius="10" Background="#99000000" BorderBrush="#33FFFFFF" BorderThickness="1">
+                  <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontFamily="Consolas" FontSize="12" Foreground="#F5F5F5" Text="{Binding SubtitleDelayText}" />
+                </Border>
+                <Button Classes="overlayButton" Width="38" Padding="0" Command="{Binding IncreaseSubtitleDelayCommand}" ToolTip.Tip="字幕延后 0.5 秒">
+                  <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="18" Text="+" />
+                </Button>
+              </StackPanel>
+
+              <ComboBox
+                  Classes="controlMenu"
+                  Width="106"
+                  IsVisible="{Binding HasSubtitleStyleControls}"
+                  ItemsSource="{Binding SubtitleSizeOptions}"
+                  SelectedItem="{Binding SelectedSubtitleSizeOption, Mode=TwoWay}"
+                  ToolTip.Tip="字幕字号">
+                <ComboBox.ItemTemplate>
+                  <DataTemplate>
+                    <TextBlock Text="{Binding Label}" />
+                  </DataTemplate>
+                </ComboBox.ItemTemplate>
+              </ComboBox>
+
+              <Button Width="44" Height="38" Padding="0" Classes="overlayButton" Command="{Binding DecreaseVolumeCommand}" ToolTip.Tip="降低音量">
+                <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16" Text="−" />
+              </Button>
+              <Border Height="38" MinWidth="58" Padding="10,0" CornerRadius="10" Background="#99000000" BorderBrush="#33FFFFFF" BorderThickness="1">
+                <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="12" Foreground="#F5F5F5" Text="{Binding VolumeText}" />
+              </Border>
+              <Button Width="44" Height="38" Padding="0" Classes="overlayButton" Command="{Binding IncreaseVolumeCommand}" ToolTip.Tip="提高音量">
+                <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16" Text="+" />
+              </Button>
+              <Button Width="44" Height="38" Padding="0" Classes="overlayButton" Command="{Binding ToggleMuteCommand}" ToolTip.Tip="静音切换">
+                <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="15" Text="{Binding MuteGlyph}" />
+              </Button>
+            </StackPanel>
+          </Grid>
+        </StackPanel>
+      </Border>
+    </Grid>
+  </Grid>
+</Window>

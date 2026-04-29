@@ -1,0 +1,11 @@
+<Project>
+  <PropertyGroup>
+    <!--
+      Solution-wide build graph execution is unstable in this environment when MSBuild
+      fans out restore/build project calls in parallel. Keep the solution metaproj
+      sequential; project-level builds remain available through the normal csproj entrypoints.
+    -->
+    <BuildInParallel>false</BuildInParallel>
+    <RestoreBuildInParallel>false</RestoreBuildInParallel>
+  </PropertyGroup>
+</Project>

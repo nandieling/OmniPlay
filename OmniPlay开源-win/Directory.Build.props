@@ -1,0 +1,19 @@
+<Project>
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <RootNamespace>OmniPlay</RootNamespace>
+    <BuildInParallel>false</BuildInParallel>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug' and '$(ContinuousIntegrationBuild)' != 'true'">
+    <!-- Local Debug builds stay usable in offline/restricted environments. -->
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release' or '$(ContinuousIntegrationBuild)' == 'true'">
+    <NuGetAudit>true</NuGetAudit>
+  </PropertyGroup>
+</Project>

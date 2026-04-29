@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>setup</AssemblyName>
+    <ApplicationIcon>..\..\src\OmniPlay.Desktop\app.ico</ApplicationIcon>
+    <AssemblyTitle>OmniPlay Setup</AssemblyTitle>
+    <Product>OmniPlay</Product>
+    <Company>OmniPlay</Company>
+    <FileDescription>OmniPlay Setup</FileDescription>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup Condition="Exists('..\..\tmp\package\payload\OmniPlayPayload.zip')">
+    <EmbeddedResource Include="..\..\tmp\package\payload\OmniPlayPayload.zip" LogicalName="OmniPlay.Payload.zip" />
+  </ItemGroup>
+
+</Project>

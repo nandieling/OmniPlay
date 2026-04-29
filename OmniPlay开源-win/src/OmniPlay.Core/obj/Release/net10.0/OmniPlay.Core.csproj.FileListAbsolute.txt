@@ -1,0 +1,12 @@
+C:\软件\OmniPlay开源-mac\windows\src\OmniPlay.Core\bin\Release\net10.0\OmniPlay.Core.deps.json
+C:\软件\OmniPlay开源-mac\windows\src\OmniPlay.Core\bin\Release\net10.0\OmniPlay.Core.dll
+C:\软件\OmniPlay开源-mac\windows\src\OmniPlay.Core\bin\Release\net10.0\OmniPlay.Core.pdb
+C:\软件\OmniPlay开源-mac\windows\src\OmniPlay.Core\obj\Release\net10.0\OmniPlay.Core.csproj.AssemblyReference.cache
+C:\软件\OmniPlay开源-mac\windows\src\OmniPlay.Core\obj\Release\net10.0\OmniPlay.Core.GeneratedMSBuildEditorConfig.editorconfig
+C:\软件\OmniPlay开源-mac\windows\src\OmniPlay.Core\obj\Release\net10.0\OmniPlay.Core.AssemblyInfoInputs.cache
+C:\软件\OmniPlay开源-mac\windows\src\OmniPlay.Core\obj\Release\net10.0\OmniPlay.Core.AssemblyInfo.cs
+C:\软件\OmniPlay开源-mac\windows\src\OmniPlay.Core\obj\Release\net10.0\OmniPlay.Core.csproj.CoreCompileInputs.cache
+C:\软件\OmniPlay开源-mac\windows\src\OmniPlay.Core\obj\Release\net10.0\OmniPlay.Core.dll
+C:\软件\OmniPlay开源-mac\windows\src\OmniPlay.Core\obj\Release\net10.0\refint\OmniPlay.Core.dll
+C:\软件\OmniPlay开源-mac\windows\src\OmniPlay.Core\obj\Release\net10.0\OmniPlay.Core.pdb
+C:\软件\OmniPlay开源-mac\windows\src\OmniPlay.Core\obj\Release\net10.0\ref\OmniPlay.Core.dll
