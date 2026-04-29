@@ -19,7 +19,7 @@
 
 
 ### 自动扫描与刮削
-- 支持公共 TMDB 源，也支持自定义 TMDB API Key / v4 Token。公共源API做了限制，建议注册TMDB后获取API。
+- 支持公共 TMDB 源，也支持自定义 TMDB API Key / v4 Token。公共源API做了限制，建议注册TMDB后获取API。如果TMDB api连通测试失败，请挂代理或改host。
 
 ### 离线缓存
 
