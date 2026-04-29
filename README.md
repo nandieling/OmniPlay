@@ -2,6 +2,9 @@
 
 觅影 OmniPlay 是一款原生开发的海报墙播放器，支持mac、win双系统。mac采用swift开发，win采用C# + .net + Avalonia UI。底层播放器核心为 MPVKit-GPL / libmpv / FFmpeg 相关组件。 ios版正在开发中。
 
+## 软件截图
+![览影首页](https://img2.pixhost.to/images/7534/720265527_2.jpg)
+![览影详情页](https://img2.pixhost.to/images/7534/720265534_3.jpg)
 ## 功能特色
 
 ### UI
@@ -15,8 +18,7 @@
 ### 媒体源管理
 
 - 支持添加本地文件夹、WebDAV、SMB。mac版因为开发一直有bug，不支持SMB直连，请在访达中挂载SMB，再在软件中添加本地文件夹，间接连接SMB。可以将访达挂载的SMB添加到开机自启
-
-
+- 不需要将电影、剧集分不同文件夹进行挂载，软件自动识别。
 
 ### 自动扫描与刮削
 - 支持公共 TMDB 源，也支持自定义 TMDB API Key / v4 Token。公共源API做了限制，建议注册TMDB后获取API。如果TMDB api连通测试失败，请挂代理或改host。
