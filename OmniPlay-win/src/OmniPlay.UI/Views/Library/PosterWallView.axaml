@@ -1,0 +1,1136 @@
+﻿<UserControl
+    x:Class="OmniPlay.UI.Views.Library.PosterWallView"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:brand="using:OmniPlay.UI.Controls.Brand"
+    xmlns:converters="using:OmniPlay.UI.Converters"
+    xmlns:player="using:OmniPlay.UI.Controls.Player">
+  <UserControl.Resources>
+    <converters:ImagePathToBitmapConverter x:Key="ImagePathToBitmapConverter" />
+  </UserControl.Resources>
+  <UserControl.Styles>
+    <!-- 全局去焦点框 -->
+    <Style Selector="Button">
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
+    </Style>
+    
+    <!-- 强制浅色背景层 -->
+    <Style Selector="Border.homeSurface">
+      <Setter Property="Background" Value="#F8F9FA" />
+    </Style>
+    <Style Selector="Border.detailSurface">
+      <Setter Property="Background">
+        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+          <GradientStop Color="#FFFFFF" Offset="0" />
+          <GradientStop Color="#F3F4F6" Offset="0.5" />
+          <GradientStop Color="#EAECEF" Offset="1" />
+        </LinearGradientBrush>
+      </Setter>
+    </Style>
+    
+    <Style Selector="Border.toolbarGroup"><Setter Property="Background" Value="#00000000" /><Setter Property="Padding" Value="0" /></Style>
+    <Style Selector="Border.sectionDivider"><Setter Property="Background" Value="#E5E5E5" /><Setter Property="Height" Value="1" /></Style>
+    
+    <!-- 海报卡片样式 -->
+    <Style Selector="Border.posterShell">
+      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="ClipToBounds" Value="True" />
+      <Setter Property="BoxShadow" Value="0 4 14 0 #1A000000" />
+      <Setter Property="Background" Value="#EAEAEA" />
+    </Style>
+    <Style Selector="Border.ratingBadge">
+      <Setter Property="Background" Value="#E6FFFFFF" />
+      <Setter Property="CornerRadius" Value="4" />
+      <Setter Property="Padding" Value="6,4" />
+      <Setter Property="BorderBrush" Value="#E5E5E5" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
+    
+    <!-- 观看状态图标 -->
+    <Style Selector="Border.watchStateBadge"><Setter Property="Background" Value="#00000000" /><Setter Property="BorderThickness" Value="0" /><Setter Property="CornerRadius" Value="0" /><Setter Property="Width" Value="18" /><Setter Property="Height" Value="18" /></Style>
+    <Style Selector="Path.watchStateIcon"><Setter Property="Stroke" Value="#8A8886" /><Setter Property="StrokeThickness" Value="1.9" /><Setter Property="StrokeLineCap" Value="Round" /><Setter Property="Stretch" Value="Uniform" /><Setter Property="Width" Value="18" /><Setter Property="Height" Value="18" /></Style>
+    <Style Selector="Ellipse.watchStateRing"><Setter Property="Stroke" Value="#8A8886" /><Setter Property="StrokeThickness" Value="1.9" /><Setter Property="Width" Value="17" /><Setter Property="Height" Value="17" /></Style>
+    <Style Selector="Ellipse.watchStateDot"><Setter Property="Fill" Value="#8A8886" /><Setter Property="Width" Value="7" /><Setter Property="Height" Value="7" /></Style>
+    
+    <Style Selector="Button.watchStateButton">
+      <Setter Property="Background" Value="#00000000" /><Setter Property="BorderBrush" Value="#00000000" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Width" Value="30" /><Setter Property="Height" Value="30" /><Setter Property="CornerRadius" Value="15" /><Setter Property="Padding" Value="0" />
+      <Setter Property="Template"><ControlTemplate><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" /></Border></ControlTemplate></Setter>
+    </Style>
+    <Style Selector="Button.watchStateButton:pointerover"><Setter Property="Background" Value="#0D000000" /></Style>
+    <Style Selector="Button.watchStateButton:pressed"><Setter Property="Background" Value="#1A000000" /></Style>
+    
+    <Style Selector="Border.detailMetaBadge"><Setter Property="Background" Value="#FFFFFF" /><Setter Property="BorderBrush" Value="#E5E5E5" /><Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="6" /><Setter Property="Padding" Value="12,6" /></Style>
+    
+    <!-- ====== 精美重绘的线框图标规范 ====== -->
+    <Style Selector="Path.iconStroke">
+      <Setter Property="Stroke" Value="#323130" />
+      <Setter Property="StrokeThickness" Value="1.6" />
+      <Setter Property="StrokeLineCap" Value="Round" />
+      <Setter Property="StrokeJoin" Value="Round" />
+      <Setter Property="Stretch" Value="Uniform" />
+    </Style>
+    <Style Selector="Path.iconFill">
+      <Setter Property="Fill" Value="#323130" />
+      <Setter Property="Width" Value="22" />
+      <Setter Property="Height" Value="22" />
+      <Setter Property="Stretch" Value="Uniform" />
+    </Style>
+    
+    <!-- 详情页圆形返回按钮 -->
+    <Style Selector="Button.iconCircle">
+      <Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Width" Value="44" /><Setter Property="Height" Value="44" /><Setter Property="CornerRadius" Value="22" /><Setter Property="Padding" Value="0" />
+      <Setter Property="Template"><ControlTemplate><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" /></Border></ControlTemplate></Setter>
+    </Style>
+    <Style Selector="Button.iconCircle:pointerover /template/ ContentPresenter"><Setter Property="Background" Value="#E5E5E5" /></Style>
+    <Style Selector="Button.iconCircle:pressed /template/ ContentPresenter"><Setter Property="Background" Value="#D1D1D1" /></Style>
+
+    <!-- 精致的流式按钮底座（带微阴影） -->
+    <Style Selector="Button.flatIcon">
+      <Setter Property="Background" Value="#FFFFFF" />
+      <Setter Property="BorderBrush" Value="#E5E5E5" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Padding" Value="8" />
+      <Setter Property="Width" Value="40" />
+      <Setter Property="Height" Value="40" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}" BoxShadow="0 2 4 0 #0A000000">
+            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" />
+          </Border>
+        </ControlTemplate>
+      </Setter>
+    </Style>
+    <Style Selector="Button.flatIcon:pointerover">
+      <Setter Property="Background" Value="#F8F9FA" />
+      <Setter Property="BorderBrush" Value="#D1D1D1" />
+    </Style>
+    <Style Selector="Button.flatIcon:pointerover /template/ Border">
+      <Setter Property="BoxShadow" Value="0 4 8 0 #14000000" />
+    </Style>
+    <Style Selector="Button.flatIcon:pointerover Path.iconStroke">
+      <Setter Property="Stroke" Value="#0067C0" />
+    </Style>
+    
+    <!-- 海报快捷操作按钮 (浅色磨玻璃) -->
+    <Style Selector="Button.posterQuickAction">
+      <Setter Property="Background" Value="#D9FFFFFF" /><Setter Property="BorderBrush" Value="#E5E5E5" /><Setter Property="BorderThickness" Value="1" /><Setter Property="Width" Value="32" /><Setter Property="Height" Value="32" /><Setter Property="CornerRadius" Value="16" /><Setter Property="Padding" Value="0" />
+      <Setter Property="Template"><ControlTemplate><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" /></Border></ControlTemplate></Setter>
+    </Style>
+    <Style Selector="Button.posterQuickAction:pointerover"><Setter Property="Background" Value="#FFFFFFFF" /><Setter Property="BorderBrush" Value="#D1D1D1" /></Style>
+    <Style Selector="Button.posterQuickAction Path">
+      <Setter Property="Stroke" Value="#323130" />
+      <Setter Property="StrokeThickness" Value="1.6" />
+      <Setter Property="StrokeLineCap" Value="Round" />
+      <Setter Property="StrokeJoin" Value="Round" />
+      <Setter Property="Stretch" Value="Uniform" />
+      <Setter Property="HorizontalAlignment" Value="Center" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="StackPanel.posterQuickActions"><Setter Property="Opacity" Value="0" /><Setter Property="IsHitTestVisible" Value="False" /></Style>
+    <Style Selector="Grid.posterInteractive:pointerover StackPanel.posterQuickActions"><Setter Property="Opacity" Value="1" /><Setter Property="IsHitTestVisible" Value="True" /></Style>
+    
+    <Style Selector="Button.cardButton">
+      <Setter Property="Background" Value="#00000000" /><Setter Property="BorderBrush" Value="#00000000" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Padding" Value="0" /><Setter Property="HorizontalContentAlignment" Value="Left" /><Setter Property="VerticalContentAlignment" Value="Top" />
+      <Setter Property="Template"><ControlTemplate><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"><ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" /></Border></ControlTemplate></Setter>
+    </Style>
+    
+    <!-- 主操作按钮 (流畅蓝) -->
+    <Style Selector="Button.heroAction">
+      <Setter Property="Background" Value="#0067C0" /><Setter Property="BorderBrush" Value="#0067C0" /><Setter Property="BorderThickness" Value="0" /><Setter Property="CornerRadius" Value="6" /><Setter Property="Padding" Value="24,10" /><Setter Property="Foreground" Value="#FFFFFF" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="FontSize" Value="18" />
+      <Setter Property="Template"><ControlTemplate><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"><ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" /></Border></ControlTemplate></Setter>
+    </Style>
+    <Style Selector="Button.heroAction:pointerover"><Setter Property="Background" Value="#0054A6" /><Setter Property="BorderBrush" Value="#0054A6" /></Style>
+    
+    <!-- 次级按钮 (纯白底色) -->
+    <Style Selector="Button.heroSecondary">
+      <Setter Property="Background" Value="#FFFFFF" /><Setter Property="BorderBrush" Value="#D1D1D1" /><Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="6" /><Setter Property="Padding" Value="20,10" /><Setter Property="Foreground" Value="#1A1A1A" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="FontSize" Value="16" />
+      <Setter Property="Template"><ControlTemplate><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"><ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" /></Border></ControlTemplate></Setter>
+    </Style>
+    <Style Selector="Button.heroSecondary:pointerover"><Setter Property="Background" Value="#F3F3F3" /></Style>
+    
+    <Style Selector="Button.sourceAction">
+      <Setter Property="Background" Value="#FFFFFF" /><Setter Property="BorderBrush" Value="#D1D1D1" /><Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="4" /><Setter Property="Padding" Value="14,8" /><Setter Property="Foreground" Value="#1A1A1A" /><Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="Template"><ControlTemplate><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"><ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" /></Border></ControlTemplate></Setter>
+    </Style>
+    <Style Selector="Button.sourceAction:pointerover"><Setter Property="Background" Value="#F3F3F3" /></Style>
+    
+    <Style Selector="Button.networkLinkAction">
+      <Setter Property="Background" Value="#00000000" /><Setter Property="BorderBrush" Value="#00000000" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Padding" Value="0" /><Setter Property="Foreground" Value="#0067C0" /><Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="Template"><ControlTemplate><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"><ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" /></Border></ControlTemplate></Setter>
+    </Style>
+    <Style Selector="Button.networkLinkAction:pointerover"><Setter Property="Foreground" Value="#0054A6" /></Style>
+    
+    <Style Selector="Button.sortOption">
+      <Setter Property="Background" Value="#00000000" /><Setter Property="BorderBrush" Value="#00000000" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Padding" Value="12,10" /><Setter Property="HorizontalContentAlignment" Value="Left" /><Setter Property="CornerRadius" Value="4" />
+      <Setter Property="Template"><ControlTemplate><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"><ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" /></Border></ControlTemplate></Setter>
+    </Style>
+    <Style Selector="Button.sortOption:pointerover"><Setter Property="Background" Value="#F3F3F3" /></Style>
+    
+    <!-- 弹出浮层 (干净纯白) -->
+    <Style Selector="Border.popupPanel"><Setter Property="Background" Value="#FFFFFF" /><Setter Property="BorderBrush" Value="#E5E5E5" /><Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="8" /><Setter Property="BoxShadow" Value="0 8 24 0 #1A000000" /></Style>
+    
+    <Style Selector="TextBox.popupSearchBox"><Setter Property="Background" Value="#FAFAFA" /><Setter Property="BorderBrush" Value="#E5E5E5" /><Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="4" /><Setter Property="Padding" Value="12,8" /><Setter Property="Foreground" Value="#1A1A1A" /></Style>
+    <Style Selector="ComboBox.popupSelect"><Setter Property="Background" Value="#FAFAFA" /><Setter Property="BorderBrush" Value="#E5E5E5" /><Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="4" /><Setter Property="Padding" Value="12,8" /><Setter Property="Foreground" Value="#1A1A1A" /></Style>
+    
+    <Style Selector="Button.dangerAction">
+      <Setter Property="Background" Value="#FDF3F4" /><Setter Property="BorderBrush" Value="#FBCBCB" /><Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="4" /><Setter Property="Padding" Value="12,8" /><Setter Property="Foreground" Value="#D13438" /><Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Template"><ControlTemplate><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"><ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" /></Border></ControlTemplate></Setter>
+    </Style>
+    <Style Selector="Button.dangerAction:pointerover"><Setter Property="Background" Value="#FBE3E4" /></Style>
+    
+    <!-- 播放页悬浮按钮高级样式 -->
+    <Style Selector="Button.overlayCtrl">
+      <Setter Property="Background" Value="#4D000000" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Template"><ControlTemplate><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" /></Border></ControlTemplate></Setter>
+    </Style>
+    <Style Selector="Button.overlayCtrl:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#80000000" />
+    </Style>
+
+    <!-- 播放页 Win11 窗口按钮样式 -->
+    <Style Selector="Button.WinCaptionBtnOverlay">
+      <Setter Property="Width" Value="46"/>
+      <Setter Property="Height" Value="32"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="CornerRadius" Value="4"/>
+      <Setter Property="VerticalAlignment" Value="Top"/>
+    </Style>
+    <Style Selector="Button.WinCaptionBtnOverlay:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#33FFFFFF"/>
+    </Style>
+    <Style Selector="Button.WinCloseBtnOverlay:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#E81123"/>
+    </Style>
+
+    <!-- 进度条 -->
+    <Style Selector="Border.progressTrack"><Setter Property="Background" Value="#E5E5E5" /><Setter Property="CornerRadius" Value="3" /><Setter Property="Height" Value="6" /></Style>
+    <Style Selector="ProgressBar.libraryProgress"><Setter Property="Foreground" Value="#0067C0" /><Setter Property="Background" Value="#E5E5E5" /><Setter Property="Height" Value="4" /><Setter Property="CornerRadius" Value="2" /></Style>
+    
+    <Style Selector="Border.detailPanel"><Setter Property="Background" Value="#FFFFFF" /><Setter Property="BorderBrush" Value="#E5E5E5" /><Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="8" /><Setter Property="BoxShadow" Value="0 4 12 0 #0D000000" /></Style>
+  </UserControl.Styles>
+
+  <Grid RowDefinitions="*,Auto">
+    <!-- 主页海报墙 -->
+    <Border Grid.Row="0" Classes="homeSurface" IsVisible="{Binding !IsDetailOpen}">
+      <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <StackPanel x:Name="HomeContentStack" Margin="52,52,52,40" Spacing="6">
+          <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+            <StackPanel HorizontalAlignment="Left" VerticalAlignment="Center" Orientation="Horizontal" Spacing="8" IsHitTestVisible="False" IsVisible="{Binding HasStatusMessage}">
+              <ProgressBar Width="24" Height="3" Minimum="0" Maximum="100" IsIndeterminate="True" IsVisible="{Binding IsLibraryScanInProgress}" />
+              <TextBlock FontSize="15" FontWeight="SemiBold" Foreground="#323130" Text="{Binding HomeStatusMessage}" TextTrimming="CharacterEllipsis" MaxWidth="560" />
+            </StackPanel>
+            <Border Grid.Column="1" Classes="toolbarGroup">
+              <StackPanel Orientation="Horizontal" Spacing="10">
+                <Button x:Name="SourceButton" Classes="flatIcon" Command="{Binding ToggleSourcePopupCommand}" ToolTip.Tip="媒体库">
+                  <Path Classes="iconStroke" Width="20" Height="20" Data="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                </Button>
+                <Button Classes="flatIcon" Command="{Binding ScanCommand}" ToolTip.Tip="扫描媒体库">
+                  <Path Classes="iconStroke" Width="20" Height="20" Data="M21 3v5h-5 M3 21v-5h5 M3.5 9a9 9 0 0 1 14.5-3.5L21 8 M20.5 15a9 9 0 0 1-14.5 3.5L3 16" />
+                </Button>
+                <Button x:Name="SettingsButton" Classes="flatIcon" Command="{Binding ToggleSettingsPopupCommand}" ToolTip.Tip="设置">
+                  <Path Classes="iconStroke" Width="20" Height="20" Data="M12 9a3 3 0 1 0 0 6 3 3 0 1 0 0-6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                </Button>
+              </StackPanel>
+            </Border>
+          </Grid>
+
+          <Popup IsLightDismissEnabled="True" IsOpen="{Binding IsSearchPopupOpen}" Placement="Bottom" PlacementTarget="{Binding #SearchButton}">
+            <Border Classes="popupPanel" Width="340" Padding="16">
+              <StackPanel Spacing="12">
+                <TextBlock FontSize="18" FontWeight="SemiBold" Foreground="#1A1A1A" Text="&#x641C;&#x7D22;" />
+                <TextBox Classes="popupSearchBox" Watermark="&#x8F93;&#x5165;&#x7535;&#x5F71;&#x6216;&#x5267;&#x96C6;&#x6807;&#x9898;" Text="{Binding SearchText}" />
+              </StackPanel>
+            </Border>
+          </Popup>
+
+          <Popup IsLightDismissEnabled="True" IsOpen="{Binding IsSortPopupOpen}" Placement="Bottom" PlacementTarget="{Binding #SortButton}">
+            <Border Classes="popupPanel" Width="220" Padding="12">
+              <StackPanel Spacing="6">
+                <TextBlock Margin="8,4,8,8" FontSize="18" FontWeight="SemiBold" Foreground="#1A1A1A" Text="&#x6392;&#x5E8F;" />
+                <ItemsControl ItemsSource="{Binding SortOptions}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <Button Classes="sortOption" Command="{Binding $parent[UserControl].DataContext.SelectSortOptionCommand}" CommandParameter="{Binding}">
+                        <TextBlock FontSize="15" Foreground="#323130" Text="{Binding Label}" />
+                      </Button>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+            </Border>
+          </Popup>
+
+          <Popup IsLightDismissEnabled="True" IsOpen="{Binding IsSourcePopupOpen}" Placement="Bottom" PlacementTarget="{Binding #SourceButton}">
+            <Border Classes="popupPanel" Width="560" MaxHeight="760" Padding="20">
+              <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel Spacing="16">
+                  <TextBlock FontSize="18" FontWeight="SemiBold" Foreground="#1A1A1A" Text="已挂载媒体源" />
+                  <StackPanel Spacing="10">
+                    <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="14" IsVisible="{Binding !HasMediaSources}">
+                      <TextBlock Opacity="0.66" Foreground="#605E5C" Text="暂无媒体源" />
+                    </Border>
+                    <ItemsControl ItemsSource="{Binding MediaSources}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                          <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,0,8">
+                            <Grid ColumnDefinitions="*,Auto,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
+                              <TextBlock FontSize="15" FontWeight="SemiBold" Foreground="#1A1A1A" Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                              <Button Grid.Column="1" Margin="10,0,10,0" Classes="sourceAction" Command="{Binding $parent[UserControl].DataContext.ToggleSourceEnabledCommand}" CommandParameter="{Binding}" Content="{Binding ToggleActionText}" />
+                              <Button Grid.Column="2" Classes="dangerAction" Command="{Binding $parent[UserControl].DataContext.RemoveSourceCommand}" CommandParameter="{Binding}" Content="移除" />
+                              <StackPanel Grid.Row="1" Grid.ColumnSpan="3" Margin="0,8,0,0" Orientation="Horizontal" Spacing="8">
+                                <TextBlock Opacity="0.72" Foreground="#605E5C" Text="{Binding ProtocolLabel}" />
+                                <TextBlock Opacity="0.72" Foreground="#605E5C" Text="·" />
+                                <TextBlock Opacity="0.72" Foreground="#605E5C" Text="{Binding SourceStateText}" />
+                              </StackPanel>
+                              <TextBlock Grid.Row="2" Grid.ColumnSpan="3" Margin="0,6,0,0" IsVisible="{Binding $parent[UserControl].DataContext.ShowMediaSourceRealPath}" Opacity="0.62" Foreground="#605E5C" Text="{Binding BaseUrl}" TextWrapping="Wrap" />
+                            </Grid>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </StackPanel>
+
+                  <StackPanel Spacing="10">
+                    <Button Classes="sourceAction" Command="{Binding AddFolderSourceCommand}" Content="添加本地文件夹" />
+                    <Button Classes="sourceAction" Command="{Binding OpenManualNetworkLoginCommand}" Content="添加 SMB/WebDAV" />
+                  </StackPanel>
+                  <Border Height="1" Background="#E5E5E5" />
+
+                  <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="16" IsVisible="{Binding IsNetworkLoginPanelOpen}">
+                    <StackPanel Spacing="12">
+                      <Grid ColumnDefinitions="*,Auto">
+                        <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="{Binding NetworkLoginTitle}" />
+                        <Button Grid.Column="1" Classes="dangerAction" Command="{Binding CloseNetworkLoginCommand}" Content="取消" />
+                      </Grid>
+                      <TextBox Classes="popupSearchBox" Watermark="SMB 路径或 WebDAV 地址" Text="{Binding PendingNetworkBaseUrl}" />
+                      <Grid ColumnDefinitions="*,*">
+                        <TextBox Classes="popupSearchBox" Watermark="用户名（可选）" Text="{Binding PendingNetworkUsername}" />
+                        <TextBox Grid.Column="1" Margin="10,0,0,0" Classes="popupSearchBox" Watermark="密码（可选）" Text="{Binding PendingNetworkPassword}" />
+                      </Grid>
+                      <Button Classes="sourceAction" HorizontalAlignment="Left" Command="{Binding SaveNetworkLoginCommand}" Content="保存并读取共享文件夹" />
+                      <ItemsControl ItemsSource="{Binding NetworkShareFolders}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate>
+                            <Border Background="#FFFFFF" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,8">
+                              <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+                                <TextBlock FontSize="14" FontWeight="SemiBold" Foreground="#1A1A1A" Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                                <Button Grid.Column="1" Classes="sourceAction" Command="{Binding $parent[UserControl].DataContext.MountNetworkFolderCommand}" CommandParameter="{Binding}" Content="★" ToolTip.Tip="挂载到媒体源" />
+                              </Grid>
+                            </Border>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
+                  </Border>
+
+                  <StackPanel Spacing="10">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <TextBlock FontSize="16" FontWeight="SemiBold" Foreground="#1A1A1A" Text="预扫描 SMB / WebDAV" />
+                      <Button Grid.Column="1" Classes="sourceAction" Command="{Binding RefreshNetworkSourcesCommand}" Content="重新扫描" />
+                    </Grid>
+                    <TextBlock Opacity="0.62" Foreground="#605E5C" TextWrapping="Wrap" Text="{Binding NetworkSourceStatus}" />
+                    <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="14" IsVisible="{Binding !HasDiscoveredNetworkSources}">
+                      <TextBlock Opacity="0.66" Foreground="#605E5C" Text="暂无预扫描结果" />
+                    </Border>
+                    <ItemsControl ItemsSource="{Binding DiscoveredNetworkSources}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                          <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,0,8">
+                            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+                              <Button Grid.Column="0" Classes="networkLinkAction" Command="{Binding $parent[UserControl].DataContext.OpenNetworkLoginCommand}" CommandParameter="{Binding}">
+                                <TextBlock FontSize="15" FontWeight="SemiBold" Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                              </Button>
+                              <TextBlock Grid.Column="1" Opacity="0.68" Foreground="#605E5C" Text="{Binding ProtocolLabel}" />
+                              <Button Grid.Row="1" Grid.ColumnSpan="2" Margin="0,6,0,0" Classes="networkLinkAction" HorizontalAlignment="Left" Command="{Binding $parent[UserControl].DataContext.OpenNetworkLoginCommand}" CommandParameter="{Binding}">
+                                <TextBlock FontSize="13" Foreground="#605E5C" Text="{Binding BaseUrl}" TextWrapping="Wrap" />
+                              </Button>
+                            </Grid>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </StackPanel>
+                </StackPanel>
+              </ScrollViewer>
+            </Border>
+          </Popup>
+
+          <Popup IsLightDismissEnabled="True" IsOpen="{Binding IsSettingsPopupOpen}" Placement="Bottom" PlacementTarget="{Binding #SettingsButton}">
+            <Border Classes="popupPanel" Width="460" MaxHeight="720" Padding="20">
+              <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel Spacing="16">
+                  <Grid ColumnDefinitions="*,Auto">
+                    <TextBlock FontSize="18" FontWeight="SemiBold" Foreground="#1A1A1A" Text="&#x8BBE;&#x7F6E;" VerticalAlignment="Center" />
+                    <Button Grid.Column="1" Classes="heroAction" Command="{Binding Settings.SaveCommand}" Content="保存设置" Padding="18,9" FontSize="15" HorizontalAlignment="Right" />
+                  </Grid>
+
+                  <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="16">
+                    <StackPanel Spacing="14">
+                      <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="&#x57FA;&#x7840;&#x8BBE;&#x7F6E;" />
+                      <CheckBox Foreground="#323130" IsChecked="{Binding Settings.AutoScanOnStartup}" Content="&#x542F;&#x52A8;&#x65F6;&#x81EA;&#x52A8;&#x626B;&#x63CF;&#x5E76;&#x540C;&#x6B65;&#x5E93;" />
+                      <CheckBox Foreground="#323130" IsChecked="{Binding Settings.ShowMediaSourceRealPath}" Content="&#x5A92;&#x4F53;&#x6E90;&#x663E;&#x793A;&#x771F;&#x5B9E;&#x8DEF;&#x5F84;" />
+                    </StackPanel>
+                  </Border>
+
+                  <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="16">
+                    <StackPanel Spacing="14">
+                      <CheckBox Foreground="#323130" IsChecked="{Binding Settings.EnableBuiltInPublicTmdbSource}" Content="启用内置公共 TMDB 源（受限）" />
+                      <StackPanel Spacing="8">
+                        <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="自定义 TMDB API" />
+                        <TextBox Classes="popupSearchBox" Watermark="API Key 或 Read Access Token" Text="{Binding Settings.CustomTmdbCredential}" />
+                      </StackPanel>
+                      <StackPanel Spacing="10">
+                        <TextBlock Opacity="0.72" Foreground="#605E5C" TextWrapping="Wrap" Text="{Binding Settings.TmdbConnectionStatusMessage}" />
+                        <Button Classes="sourceAction" Command="{Binding Settings.TestTmdbConnectionCommand}" Content="测试连通性" />
+                      </StackPanel>
+                      <StackPanel Spacing="8">
+                        <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="软件和刮削语言" />
+                        <ComboBox Classes="popupSelect" HorizontalAlignment="Stretch" ItemsSource="{Binding Settings.TmdbLanguageOptions}" SelectedItem="{Binding Settings.SelectedTmdbLanguageOption, Mode=TwoWay}">
+                          <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+                        </ComboBox>
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+
+                  <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="16">
+                    <StackPanel Spacing="14">
+                      <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="播放偏好" />
+                      <StackPanel Spacing="8">
+                        <TextBlock Foreground="#323130" Text="默认音轨" />
+                        <ComboBox Classes="popupSelect" HorizontalAlignment="Stretch" ItemsSource="{Binding Settings.DefaultAudioTrackOptions}" SelectedItem="{Binding Settings.SelectedDefaultAudioTrackOption, Mode=TwoWay}">
+                          <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+                        </ComboBox>
+                      </StackPanel>
+                      <StackPanel Spacing="8">
+                        <TextBlock Foreground="#323130" Text="默认字幕" />
+                        <ComboBox Classes="popupSelect" HorizontalAlignment="Stretch" ItemsSource="{Binding Settings.DefaultSubtitleTrackOptions}" SelectedItem="{Binding Settings.SelectedDefaultSubtitleTrackOption, Mode=TwoWay}">
+                          <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+                        </ComboBox>
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+
+                  <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="16">
+                    <StackPanel Spacing="12">
+                      <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="播放器内核" />
+                      <TextBlock Opacity="0.72" Foreground="#605E5C" TextWrapping="Wrap" Text="{Binding Player.BackendName}" />
+                      <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Margin="0,6,0,0" Text="开源组件" />
+                      <ItemsControl ItemsSource="{Binding Settings.CreditLinks}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate>
+                            <Grid Margin="0,0,0,6" ColumnDefinitions="*,Auto,Auto">
+                              <TextBlock Foreground="#323130" Text="{Binding Title}" TextTrimming="CharacterEllipsis" />
+                              <TextBlock Grid.Column="1" Margin="10,0,0,0" Opacity="0.62" Foreground="#605E5C" Text="{Binding License}" />
+                              <Button Grid.Column="2" Margin="8,0,0,0" Classes="sourceAction" Padding="10,6" Command="{Binding $parent[UserControl].DataContext.Settings.OpenCreditLinkCommand}" CommandParameter="{Binding}" Content="网页" />
+                            </Grid>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                      <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Classes="sourceAction" Command="{Binding Settings.OpenAboutCommand}" Content="关于" />
+                        <Button Classes="sourceAction" Command="{Binding Settings.OpenThirdPartyNoticesCommand}" Content="第三方声明" />
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+
+                  <TextBlock Foreground="#A0A0A0" TextWrapping="Wrap" Text="{Binding Settings.StatusMessage}" />
+                </StackPanel>
+              </ScrollViewer>
+            </Border>
+          </Popup>
+
+          <Popup IsLightDismissEnabled="True" IsOpen="{Binding Settings.IsAboutPopupOpen}" Placement="Bottom" PlacementTarget="{Binding #SettingsButton}">
+            <Border Classes="popupPanel" Width="560" MaxHeight="780" Padding="20">
+              <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel Spacing="16">
+                  <Grid ColumnDefinitions="*,Auto">
+                    <StackPanel Spacing="4">
+                      <TextBlock FontSize="20" FontWeight="SemiBold" Foreground="#1A1A1A" Text="关于 / Credits" />
+                      <TextBlock Opacity="0.68" Foreground="#605E5C" TextWrapping="Wrap" Text="Windows 版移植的版本信息、运行环境、TMDB 归属和第三方组件鸣谢。" />
+                    </StackPanel>
+                    <Button Grid.Column="1" Margin="12,0,0,0" Classes="sourceAction" Command="{Binding Settings.CloseAboutCommand}" Content="关闭" VerticalAlignment="Top" />
+                  </Grid>
+
+                  <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="16">
+                    <StackPanel Spacing="10">
+                      <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="应用信息" />
+                      <Border Background="#FFFFFF" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="6" Padding="12">
+                        <StackPanel Spacing="6">
+                          <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="览影" />
+                          <TextBlock Opacity="0.74" Foreground="#605E5C" Text="{Binding Settings.AppVersionText, StringFormat=版本 {0}}" />
+                          <TextBlock Opacity="0.68" Foreground="#605E5C" TextWrapping="Wrap" Text="{Binding Settings.RuntimeText}" />
+                          <TextBlock Opacity="0.68" Foreground="#605E5C" TextWrapping="Wrap" Text="{Binding Settings.PlatformText}" />
+                          <TextBlock Opacity="0.58" Foreground="#605E5C" TextWrapping="Wrap" Text="{Binding Settings.SettingsDirectoryPath, StringFormat=设置目录：{0}}" />
+                          <TextBlock Opacity="0.58" Foreground="#605E5C" TextWrapping="Wrap" Text="{Binding Settings.ThirdPartyNoticesPath, StringFormat=第三方声明：{0}}" />
+                          <StackPanel Orientation="Horizontal" Margin="0,6,0,0" Spacing="8">
+                            <Button Classes="sourceAction" Command="{Binding Settings.OpenSettingsDirectoryCommand}" Content="打开设置目录" />
+                            <Button Classes="sourceAction" Command="{Binding Settings.OpenThirdPartyNoticesCommand}" Content="查看声明文件" />
+                          </StackPanel>
+                        </StackPanel>
+                      </Border>
+                    </StackPanel>
+                  </Border>
+
+                  <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="16">
+                    <StackPanel Spacing="12">
+                      <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="TMDB Credits" />
+                      <Border Background="#FFFFFF" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="6" Padding="14,12">
+                        <StackPanel Spacing="8">
+                          <brand:TmdbLogo Height="26" HorizontalAlignment="Left" />
+                          <TextBlock Opacity="0.58" Foreground="#605E5C" Text="Official approved logo" />
+                        </StackPanel>
+                      </Border>
+                      <Border Background="#FFF6E7" BorderBrush="#F0D7A1" BorderThickness="1" CornerRadius="6" Padding="12">
+                        <StackPanel Spacing="6">
+                          <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="TMDB 归属与限制" />
+                          <TextBlock Opacity="0.82" Foreground="#323130" TextWrapping="Wrap" Text="内置公共源是共享 TMDB Key，仅提供低频、轻量刮削。为遵守 TMDB 官方要求，公共源会限制搜索请求量，不补全单集剧照；大批量扫库或完整刮削请填写你自己的 API Key。" />
+                          <TextBlock Opacity="0.72" Foreground="#323130" TextWrapping="Wrap" Text="This product uses the TMDB API but is not endorsed or certified by TMDB." />
+                        </StackPanel>
+                      </Border>
+                      <TextBlock Opacity="0.62" Foreground="#605E5C" TextWrapping="Wrap" Text="按 TMDB FAQ 建议，这里保留归属声明、官方 logo 和官方链接入口，方便查看 FAQ、官网与 API 条款。" />
+                      <StackPanel Spacing="8">
+                        <Button Classes="sourceAction" Command="{Binding Settings.OpenTmdbWebsiteCommand}" Content="打开 TMDB 官网" />
+                        <Button Classes="sourceAction" Command="{Binding Settings.OpenTmdbFaqCommand}" Content="打开 TMDB FAQ / Attribution" />
+                        <Button Classes="sourceAction" Command="{Binding Settings.OpenTmdbApiTermsCommand}" Content="打开 TMDB API 条款" />
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+
+                  <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="16">
+                    <StackPanel Spacing="12">
+                      <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="开源与服务鸣谢" />
+                      <TextBlock Opacity="0.66" Foreground="#605E5C" TextWrapping="Wrap" Text="以下组件为 Windows 版界面、数据库、日志、测试和播放能力提供支持。列表包含组件名称、许可证和官网入口；完整说明见 THIRD_PARTY_NOTICES。" />
+                      <ItemsControl ItemsSource="{Binding Settings.CreditLinks}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate>
+                            <Border Margin="0,0,0,10" Background="#FFFFFF" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="6" Padding="12">
+                              <StackPanel Spacing="8">
+                                <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="{Binding Title}" />
+                                <TextBlock Opacity="0.68" Foreground="#605E5C" TextWrapping="Wrap" Text="{Binding Description}" />
+                                <TextBlock Opacity="0.58" Foreground="#888888" Text="{Binding License, StringFormat=许可证：{0}}" />
+                                <Button Classes="sourceAction" Command="{Binding $parent[UserControl].DataContext.Settings.OpenCreditLinkCommand}" CommandParameter="{Binding}" Content="{Binding ButtonText}" />
+                              </StackPanel>
+                            </Border>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
+                  </Border>
+                </StackPanel>
+              </ScrollViewer>
+            </Border>
+          </Popup>
+
+          <StackPanel Margin="0,-18,0,0" Spacing="14" IsVisible="{Binding HasContinueWatching}">
+            <TextBlock FontSize="32" FontWeight="Bold" Foreground="#1A1A1A" Text="&#x7EE7;&#x7EED;&#x64AD;&#x653E;" />
+            <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+              <ItemsControl ItemsSource="{Binding ContinueWatchingItems}">
+                <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <Grid Width="204" Margin="0,0,20,0">
+                      <StackPanel Width="204" Spacing="0">
+                        <Grid Classes="posterInteractive" Width="204" Height="306" ClipToBounds="True">
+                          <Button Classes="cardButton" Command="{Binding $parent[UserControl].DataContext.OpenDetailCommand}" CommandParameter="{Binding}">
+                            <Grid Width="204" Height="306">
+                              <Border Classes="posterShell" />
+                              <Rectangle RadiusX="6" RadiusY="6">
+                                <Rectangle.Fill><ImageBrush Source="{Binding PosterPath, Converter={StaticResource ImagePathToBitmapConverter}}" Stretch="UniformToFill" /></Rectangle.Fill>
+                              </Rectangle>
+                              <Border Classes="ratingBadge" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="10">
+                                <TextBlock Foreground="#B45309" FontSize="13" FontWeight="Bold" Text="{Binding VoteAverage, StringFormat={}{0:F1}}" />
+                              </Border>
+                            </Grid>
+                          </Button>
+                          <StackPanel Classes="posterQuickActions" HorizontalAlignment="Right" VerticalAlignment="Top" Orientation="Horizontal" Spacing="6" Margin="0,8,8,0">
+                            <Button Classes="posterQuickAction" Command="{Binding $parent[UserControl].DataContext.OpenPosterScrapeCommand}" CommandParameter="{Binding}" ToolTip.Tip="搜索刮削">
+                              <Path Width="15" Height="15" Data="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                            </Button>
+                            <Button Classes="posterQuickAction" Command="{Binding $parent[UserControl].DataContext.OpenPosterEditCommand}" CommandParameter="{Binding}" ToolTip.Tip="自定义编辑">
+                              <Path Width="15" Height="15" Data="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                            </Button>
+                          </StackPanel>
+                        </Grid>
+                        <StackPanel Width="204" Spacing="0">
+                          <Button Classes="cardButton" Command="{Binding $parent[UserControl].DataContext.OpenDetailCommand}" CommandParameter="{Binding}">
+                            <TextBlock Margin="0,10,0,0" Width="204" MinHeight="34" FontSize="16" FontWeight="SemiBold" LineHeight="21" Foreground="#1A1A1A" Text="{Binding Title}" MaxLines="2" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" />
+                          </Button>
+                          <Grid Margin="0,2,0,0" ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+                            <Button Classes="cardButton" Command="{Binding $parent[UserControl].DataContext.OpenDetailCommand}" CommandParameter="{Binding}">
+                              <TextBlock Width="166" FontSize="13" Foreground="#605E5C" VerticalAlignment="Center" Text="{Binding Subtitle}" TextTrimming="CharacterEllipsis" />
+                            </Button>
+                            <Button Grid.Column="1" Classes="watchStateButton" Margin="8,0,0,0" Command="{Binding $parent[UserControl].DataContext.OpenPosterWatchStateConfirmationCommand}" CommandParameter="{Binding}" ToolTip.Tip="{Binding WatchStateText}">
+                              <Grid Width="18" Height="18" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <Grid IsVisible="{Binding IsWatchedState}"><Ellipse Classes="watchStateRing" HorizontalAlignment="Center" VerticalAlignment="Center" /><Ellipse Classes="watchStateDot" HorizontalAlignment="Center" VerticalAlignment="Center" /></Grid>
+                                <Path Classes="watchStateIcon" Data="M9,1.8 A7.2,7.2 0 1 1 9,16.2 A7.2,7.2 0 1 1 9,1.8" IsVisible="{Binding IsInProgressState}" />
+                                <Path Classes="watchStateIcon" Data="M9,1.8 A7.2,7.2 0 1 1 9,16.2 A7.2,7.2 0 1 1 9,1.8" IsVisible="{Binding IsUnwatchedState}" />
+                              </Grid>
+                            </Button>
+                          </Grid>
+                        </StackPanel>
+                      </StackPanel>
+                    </Grid>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+          </StackPanel>
+
+          <Border Classes="sectionDivider" Margin="0,8,0,6" IsVisible="{Binding HasContinueWatching}" />
+
+          <StackPanel Spacing="20">
+            <Grid ColumnDefinitions="Auto,Auto,*" VerticalAlignment="Center" Margin="0,4,0,0">
+              <TextBlock FontSize="32" FontWeight="Bold" Foreground="#1A1A1A" VerticalAlignment="Center" Text="所有影视" />
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" Margin="18,0,0,0" VerticalAlignment="Center">
+                <Button x:Name="SearchButton" Classes="flatIcon" Command="{Binding ToggleSearchPopupCommand}" ToolTip.Tip="搜索标题">
+                  <Path Classes="iconStroke" Width="18" Height="18" Data="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </Button>
+                <Button x:Name="SortButton" Classes="flatIcon" Command="{Binding ToggleSortPopupCommand}" ToolTip.Tip="排序方式">
+                  <Path Classes="iconStroke" Width="18" Height="18" Data="M4 6h16 M4 12h10 M4 18h4" />
+                </Button>
+                <Button Classes="flatIcon" Command="{Binding ToggleSortDirectionCommand}" ToolTip.Tip="{Binding SortDirectionToolTip}">
+                  <Panel Width="18" Height="18">
+                    <Path Classes="iconStroke" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="{Binding IsSortAscending}" Data="M12 19V5m0 0l-6 6m6-6l6 6" />
+                    <Path Classes="iconStroke" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="{Binding IsSortDescending}" Data="M12 5v14m0 0l-6-6m6 6l6-6" />
+                  </Panel>
+                </Button>
+              </StackPanel>
+            </Grid>
+
+              <ItemsControl x:Name="LibraryItemsControl" ItemsSource="{Binding LibraryItems}">
+                <ItemsControl.ItemsPanel>
+                  <ItemsPanelTemplate><WrapPanel Orientation="Horizontal" ItemWidth="224" ItemHeight="420" /></ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <Grid Width="204">
+                      <StackPanel Width="204" Margin="0,0,0,22" Spacing="0">
+                        <Grid Classes="posterInteractive" Width="204" Height="306" ClipToBounds="True">
+                          <Button Classes="cardButton" Command="{Binding $parent[UserControl].DataContext.OpenDetailCommand}" CommandParameter="{Binding}">
+                            <Grid Width="204" Height="306">
+                              <Border Classes="posterShell" />
+                              <Rectangle RadiusX="6" RadiusY="6">
+                                <Rectangle.Fill><ImageBrush Source="{Binding PosterPath, Converter={StaticResource ImagePathToBitmapConverter}}" Stretch="UniformToFill" /></Rectangle.Fill>
+                              </Rectangle>
+                              <Border Classes="ratingBadge" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="10">
+                                <TextBlock Foreground="#B45309" FontSize="13" FontWeight="Bold" Text="{Binding VoteAverage, StringFormat={}{0:F1}}" />
+                              </Border>
+                            </Grid>
+                          </Button>
+                          <StackPanel Classes="posterQuickActions" HorizontalAlignment="Right" VerticalAlignment="Top" Orientation="Horizontal" Spacing="6" Margin="0,8,8,0">
+                            <Button Classes="posterQuickAction" Command="{Binding $parent[UserControl].DataContext.OpenPosterScrapeCommand}" CommandParameter="{Binding}" ToolTip.Tip="搜索刮削">
+                              <Path Width="15" Height="15" Data="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                            </Button>
+                            <Button Classes="posterQuickAction" Command="{Binding $parent[UserControl].DataContext.OpenPosterEditCommand}" CommandParameter="{Binding}" ToolTip.Tip="自定义编辑">
+                              <Path Width="15" Height="15" Data="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                            </Button>
+                          </StackPanel>
+                        </Grid>
+                        <StackPanel Width="204" Spacing="0">
+                          <Button Classes="cardButton" Command="{Binding $parent[UserControl].DataContext.OpenDetailCommand}" CommandParameter="{Binding}">
+                            <TextBlock Margin="0,10,0,0" Width="204" MinHeight="34" FontSize="16" FontWeight="SemiBold" LineHeight="21" Foreground="#1A1A1A" Text="{Binding Title}" MaxLines="2" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" />
+                          </Button>
+                          <Grid Margin="0,2,0,0" ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+                            <Button Classes="cardButton" Command="{Binding $parent[UserControl].DataContext.OpenDetailCommand}" CommandParameter="{Binding}">
+                              <TextBlock Width="166" FontSize="13" Foreground="#605E5C" VerticalAlignment="Center" Text="{Binding Subtitle}" TextTrimming="CharacterEllipsis" />
+                            </Button>
+                            <Button Grid.Column="1" Classes="watchStateButton" Margin="8,0,0,0" Command="{Binding $parent[UserControl].DataContext.OpenPosterWatchStateConfirmationCommand}" CommandParameter="{Binding}" ToolTip.Tip="{Binding WatchStateText}">
+                              <Grid Width="18" Height="18" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <Grid IsVisible="{Binding IsWatchedState}"><Ellipse Classes="watchStateRing" HorizontalAlignment="Center" VerticalAlignment="Center" /><Ellipse Classes="watchStateDot" HorizontalAlignment="Center" VerticalAlignment="Center" /></Grid>
+                                <Path Classes="watchStateIcon" Data="M9,1.8 A7.2,7.2 0 1 1 9,16.2 A7.2,7.2 0 1 1 9,1.8" IsVisible="{Binding IsInProgressState}" />
+                                <Path Classes="watchStateIcon" Data="M9,1.8 A7.2,7.2 0 1 1 9,16.2 A7.2,7.2 0 1 1 9,1.8" IsVisible="{Binding IsUnwatchedState}" />
+                              </Grid>
+                            </Button>
+                          </Grid>
+                        </StackPanel>
+                      </StackPanel>
+                    </Grid>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+        </StackPanel>
+      </ScrollViewer>
+    </Border>
+
+    <!-- 详情页 -->
+    <Border Grid.Row="0" Classes="detailSurface" IsVisible="{Binding IsDetailOpen}">
+      <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="58,44,58,48" Spacing="42">
+          
+          <!-- ====== 重绘详情页精美返回按钮 ====== -->
+          <Grid ColumnDefinitions="Auto,*">
+            <Button Classes="iconCircle" Command="{Binding CloseDetailCommand}">
+              <Path Data="M19 12H5 M12 19l-7-7 7-7" Stroke="#1A1A1A" StrokeThickness="2" StrokeLineCap="Round" StrokeJoin="Round" Width="18" Height="18" Stretch="Uniform" />
+            </Button>
+          </Grid>
+
+          <Grid ColumnDefinitions="460,*">
+            <Grid Width="460" Height="690" HorizontalAlignment="Left">
+              <Border Classes="posterShell" CornerRadius="12" />
+              <Rectangle RadiusX="12" RadiusY="12">
+                <Rectangle.Fill><ImageBrush Source="{Binding DetailPosterPath, Converter={StaticResource ImagePathToBitmapConverter}, TargetNullValue={x:Null}, FallbackValue={x:Null}}" Stretch="UniformToFill" /></Rectangle.Fill>
+              </Rectangle>
+            </Grid>
+
+            <StackPanel Grid.Column="1" Margin="54,0,0,0" Spacing="20" VerticalAlignment="Top">
+              <TextBlock FontSize="64" FontWeight="Bold" LineHeight="72" Foreground="#1A1A1A" Text="{Binding DetailTitle}" TextWrapping="Wrap" MaxWidth="1180" />
+              <WrapPanel Orientation="Horizontal">
+                <Border Classes="detailMetaBadge" Margin="0,0,14,12">
+                  <TextBlock FontSize="18" FontWeight="SemiBold" Foreground="#323130" Text="{Binding DetailMeta}" />
+                </Border>
+                <Border Classes="detailMetaBadge" Margin="0,0,14,12">
+                  <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock FontSize="18" Foreground="#F5A000" Text="&#x2605;" />
+                    <TextBlock FontSize="18" FontWeight="Bold" Foreground="#F5A000" Text="{Binding DetailRatingText}" />
+                  </StackPanel>
+                </Border>
+              </WrapPanel>
+
+              <Border Classes="detailPanel" Padding="24">
+                <TextBlock FontSize="18" LineHeight="30" Foreground="#323130" MaxWidth="1240" Text="{Binding DetailOverview}" TextWrapping="Wrap" />
+              </Border>
+
+              <StackPanel Orientation="Horizontal" Spacing="16" Margin="0,10,0,0">
+                <Button Classes="heroAction" Command="{Binding PlayPrimaryCommand}">
+                  <StackPanel Orientation="Horizontal" Spacing="12">
+                    <Path Classes="iconFill" Width="18" Height="18" Fill="#FFFFFF" Data="M6,4 L23,14 L6,24 Z" />
+                    <TextBlock FontSize="20" FontWeight="Bold" Foreground="#FFFFFF" Text="{Binding DetailPrimaryActionText}" />
+                  </StackPanel>
+                </Button>
+                <Button Classes="heroSecondary" Command="{Binding ToggleDetailWatchedCommand}" CommandParameter="{Binding DetailPrimaryFile}">
+                  <StackPanel Orientation="Horizontal" Spacing="12">
+                    <Ellipse Width="16" Height="16" Stroke="#1A1A1A" StrokeThickness="2" />
+                    <TextBlock FontSize="18" FontWeight="Bold" Foreground="#1A1A1A" Text="{Binding DetailWatchedActionText}" />
+                  </StackPanel>
+                </Button>
+                <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center" IsVisible="{Binding CanShowDetailPrimaryProgress}">
+                  <ProgressBar Classes="libraryProgress" Width="160" Height="4" Minimum="0" Maximum="1" Value="{Binding DetailPlaybackProgressRatio}" />
+                  <TextBlock FontSize="14" Foreground="#605E5C" Text="{Binding DetailPrimaryTimeText}" VerticalAlignment="Center" />
+                </StackPanel>
+              </StackPanel>
+            </StackPanel>
+          </Grid>
+
+          <StackPanel Spacing="20" IsVisible="{Binding IsDetailSeries}">
+            <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+              <!-- ====== 修改季数下拉框宽度 ====== -->
+              <ComboBox Classes="popupSelect" MinWidth="100" Padding="12,6" ItemsSource="{Binding AvailableSeasons}" SelectedItem="{Binding SelectedSeasonOption, Mode=TwoWay}" IsVisible="{Binding HasSeasonTabs}">
+                <ComboBox.ItemTemplate><DataTemplate><TextBlock FontSize="15" FontWeight="Bold" Text="{Binding StringFormat=第 {0} 季}" /></DataTemplate></ComboBox.ItemTemplate>
+              </ComboBox>
+              <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center" IsVisible="{Binding !HasSeasonTabs}">
+                <TextBlock FontSize="24" FontWeight="Bold" Foreground="#1A1A1A" Text="{Binding StringFormat=第 {0} 季, Path=SelectedSeason}" />
+              </StackPanel>
+            </StackPanel>
+
+            <ItemsControl ItemsSource="{Binding DetailFiles}">
+              <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel Orientation="Horizontal" ItemWidth="430" ItemHeight="340" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <StackPanel Width="398" Margin="0,0,26,20" Spacing="12">
+                    <StackPanel Spacing="10">
+                      <Grid Classes="posterInteractive" Width="398" Height="224" ClipToBounds="True">
+                        <Button Classes="cardButton" Command="{Binding $parent[UserControl].DataContext.SelectDetailFileCommand}" CommandParameter="{Binding}">
+                          <Grid Width="398" Height="224">
+                          <Border Classes="posterShell" CornerRadius="8" />
+                          <Rectangle RadiusX="8" RadiusY="8">
+                            <Rectangle.Fill><ImageBrush Source="{Binding PreviewImagePath, Converter={StaticResource ImagePathToBitmapConverter}}" Stretch="UniformToFill" /></Rectangle.Fill>
+                          </Rectangle>
+                          <Border Background="#000000" CornerRadius="8" Opacity="{Binding EpisodeThumbnailDimOpacity}" />
+                          </Grid>
+                        </Button>
+                        <StackPanel Classes="posterQuickActions" HorizontalAlignment="Right" VerticalAlignment="Top" Orientation="Horizontal" Spacing="8" Margin="0,14,14,0">
+                          <Button Classes="posterQuickAction" Command="{Binding $parent[UserControl].DataContext.OpenEpisodeEditCommand}" CommandParameter="{Binding}" ToolTip.Tip="自定义编辑">
+                            <Path Width="15" Height="15" Data="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                          </Button>
+                        </StackPanel>
+                      </Grid>
+                      <StackPanel Spacing="6" MinHeight="58">
+                        <TextBlock FontSize="18" FontWeight="SemiBold" MinHeight="26" HorizontalAlignment="Center" TextAlignment="Center" Foreground="#1A1A1A" Text="{Binding EpisodeDisplayTitle}" TextWrapping="NoWrap" />
+                        <TextBlock FontSize="14" Foreground="#605E5C" MinHeight="20" HorizontalAlignment="Center" TextAlignment="Center" Text="{Binding EpisodeDisplaySubtitle}" TextWrapping="Wrap" MaxLines="2" IsVisible="{Binding HasEpisodeDisplaySubtitle}" />
+                        <ProgressBar Classes="libraryProgress" Width="398" Height="4" Minimum="0" Maximum="1" Value="{Binding ProgressRatio}" IsVisible="{Binding ShouldShowEpisodeProgress}" />
+                      </StackPanel>
+                    </StackPanel>
+                  </StackPanel>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+
+          <Border IsVisible="{Binding !HasDetailFiles}" Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="12" Padding="24">
+            <StackPanel Spacing="8">
+              <TextBlock FontSize="20" FontWeight="Bold" Foreground="#1A1A1A" Text="&#x8FD8;&#x6CA1;&#x6709;&#x53EF;&#x64AD;&#x653E;&#x6587;&#x4EF6;" />
+              <TextBlock FontSize="16" Foreground="#605E5C" Text="&#x8BF7;&#x5148;&#x6DFB;&#x52A0;&#x89C6;&#x9891;&#x76EE;&#x5F55;&#x5E76;&#x6267;&#x884C;&#x626B;&#x63CF;&#x3002;" />
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+    </Border>
+
+    <Border Grid.RowSpan="2" ZIndex="85" Background="#88000000" IsVisible="{Binding IsPosterWatchStateConfirmationOpen}">
+      <Grid>
+        <Border Classes="popupPanel" Width="520" Padding="24" HorizontalAlignment="Center" VerticalAlignment="Center">
+          <StackPanel Spacing="16">
+            <TextBlock FontSize="22" FontWeight="Bold" Foreground="#1A1A1A" Text="{Binding PosterWatchStateConfirmationTitle}" />
+            <TextBlock FontSize="15" LineHeight="24" Foreground="#605E5C" Text="{Binding PosterWatchStateConfirmationMessage}" TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="12" Margin="0,8,0,0">
+              <Button Classes="sourceAction" Command="{Binding CancelPosterWatchStateConfirmationCommand}" Content="取消" />
+              <Button Classes="heroAction" Command="{Binding ConfirmPosterWatchStateCommand}" Padding="20,10">
+                <TextBlock FontSize="16" FontWeight="SemiBold" Foreground="#FFFFFF" Text="{Binding PosterWatchStateConfirmationActionText}" />
+              </Button>
+            </StackPanel>
+          </StackPanel>
+        </Border>
+      </Grid>
+    </Border>
+
+    <Border Grid.RowSpan="2" ZIndex="80" Background="#88000000" IsVisible="{Binding IsPosterScrapePanelOpen}">
+      <Grid>
+        <Border Classes="popupPanel" Width="800" MaxHeight="720" Padding="24" HorizontalAlignment="Center" VerticalAlignment="Center">
+          <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Spacing="16">
+              <Grid ColumnDefinitions="*,Auto">
+                <StackPanel Spacing="6">
+                  <TextBlock FontSize="22" FontWeight="Bold" Foreground="#1A1A1A" Text="{Binding PosterPanelTitle}" />
+                  <TextBlock Foreground="#605E5C" Text="按当前条目重新搜索 TMDB，选择候选结果后会直接关联并更新海报、简介、评分和年份。" TextWrapping="Wrap" />
+                </StackPanel>
+                <Button Grid.Column="1" Classes="sourceAction" Command="{Binding ClosePosterScrapeCommand}" Content="关闭" VerticalAlignment="Top" />
+              </Grid>
+
+              <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="14,12">
+                <StackPanel Spacing="6">
+                  <TextBlock FontSize="13" FontWeight="SemiBold" Foreground="#8A8886" Text="源文件" />
+                  <TextBlock FontSize="15" Foreground="#1A1A1A" Text="{Binding PosterSourceFileText}" TextWrapping="Wrap" />
+                </StackPanel>
+              </Border>
+
+              <Grid ColumnDefinitions="*,120,Auto">
+                <TextBox Classes="popupSearchBox" Watermark="输入正确片名或剧名" Text="{Binding PosterScrapeQuery}" />
+                <TextBox Grid.Column="1" Margin="10,0,0,0" Classes="popupSearchBox" Watermark="上映年份" Text="{Binding PosterScrapeYear}" />
+                <Button Grid.Column="2" Margin="10,0,0,0" Classes="heroAction" Command="{Binding SearchPosterMetadataCandidatesCommand}" Content="搜索候选" Padding="16,8" FontSize="15" />
+              </Grid>
+
+              <TextBlock Foreground="#605E5C" Text="{Binding PosterScrapeStatus}" TextWrapping="Wrap" />
+
+              <ItemsControl ItemsSource="{Binding PosterMetadataCandidates}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,0,10">
+                      <Grid ColumnDefinitions="76,*,Auto">
+                        <Border Width="76" Height="114" CornerRadius="6" ClipToBounds="True" Background="#EAEAEA">
+                          <Rectangle><Rectangle.Fill><ImageBrush Source="{Binding PreviewImagePath, Converter={StaticResource ImagePathToBitmapConverter}}" Stretch="UniformToFill" /></Rectangle.Fill></Rectangle>
+                        </Border>
+                        <StackPanel Grid.Column="1" Margin="16,0,16,0" Spacing="6">
+                          <TextBlock FontSize="16" FontWeight="Bold" Foreground="#1A1A1A" Text="{Binding Title}" TextWrapping="Wrap" />
+                          <TextBlock FontSize="14" Foreground="#605E5C" Text="{Binding OriginalTitleText}" TextWrapping="Wrap" IsVisible="{Binding HasOriginalTitle}" />
+                          <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Border Classes="detailMetaBadge" Padding="8,4"><TextBlock FontSize="12" FontWeight="Bold" Foreground="#323130" Text="{Binding MediaTypeText}" /></Border>
+                            <TextBlock FontSize="14" VerticalAlignment="Center" Foreground="#8A8886" Text="{Binding MatchMetaText}" />
+                          </StackPanel>
+                          <TextBlock FontSize="14" Foreground="#323130" Text="{Binding OverviewText}" TextWrapping="Wrap" MaxLines="3" TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                        <Button Grid.Column="2" Classes="sourceAction" Command="{Binding $parent[UserControl].DataContext.ApplyPosterMetadataCandidateCommand}" CommandParameter="{Binding}" Content="关联此项" VerticalAlignment="Center" />
+                      </Grid>
+                    </Border>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </StackPanel>
+          </ScrollViewer>
+        </Border>
+      </Grid>
+    </Border>
+
+    <Border Grid.RowSpan="2" ZIndex="80" Background="#88000000" IsVisible="{Binding IsPosterEditPanelOpen}">
+      <Grid>
+        <Border Classes="popupPanel" Width="640" MaxHeight="720" Padding="24" HorizontalAlignment="Center" VerticalAlignment="Center">
+          <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Spacing="16">
+              <Grid ColumnDefinitions="*,Auto">
+                <StackPanel Spacing="6">
+                  <TextBlock FontSize="22" FontWeight="Bold" Foreground="#1A1A1A" Text="{Binding PosterPanelTitle}" />
+                  <TextBlock Foreground="#605E5C" Text="保存后会锁定此条目，后续自动刮削不会覆盖手动资料。" TextWrapping="Wrap" />
+                </StackPanel>
+                <Button Grid.Column="1" Classes="sourceAction" Command="{Binding ClosePosterEditCommand}" Content="取消" VerticalAlignment="Top" />
+              </Grid>
+
+              <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="14,12">
+                <StackPanel Spacing="5">
+                  <TextBlock FontSize="13" FontWeight="SemiBold" Foreground="#8A8886" Text="源文件" />
+                  <TextBlock FontSize="15" Foreground="#1A1A1A" Text="{Binding PosterSourceFileText}" TextWrapping="Wrap" />
+                </StackPanel>
+              </Border>
+
+              <StackPanel Spacing="8">
+                <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="名称" />
+                <TextBox Classes="popupSearchBox" Watermark="影视名称" Text="{Binding PosterEditTitle}" />
+              </StackPanel>
+
+              <Grid ColumnDefinitions="*,140">
+                <StackPanel Spacing="8">
+                  <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="年份 / 日期" />
+                  <TextBox Classes="popupSearchBox" Watermark="例如 2025 或 2025-01-01" Text="{Binding PosterEditDate}" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="8">
+                  <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="评分" />
+                  <TextBox Classes="popupSearchBox" Watermark="0.0 - 10.0" Text="{Binding PosterEditVoteAverage}" />
+                </StackPanel>
+              </Grid>
+
+              <StackPanel Spacing="8">
+                <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="简介" />
+                <TextBox Classes="popupSearchBox" MinHeight="100" AcceptsReturn="True" TextWrapping="Wrap" Watermark="剧情简介" Text="{Binding PosterEditOverview}" />
+              </StackPanel>
+
+              <StackPanel Spacing="8">
+                <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="海报" />
+                <Grid ColumnDefinitions="*,Auto">
+                  <TextBox Classes="popupSearchBox" Watermark="海报本地路径" Text="{Binding PosterEditPosterPath}" />
+                  <Button Grid.Column="1" Margin="10,0,0,0" Classes="sourceAction" Command="{Binding ChoosePosterImageCommand}" Content="选择图片..." />
+                </Grid>
+              </StackPanel>
+
+              <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="12" Margin="0,10,0,0">
+                <Button Classes="sourceAction" Command="{Binding ClosePosterEditCommand}" Content="取消" />
+                <Button Classes="heroAction" Command="{Binding SavePosterMetadataEditCommand}" Padding="20,10">
+                  <TextBlock FontSize="16" FontWeight="SemiBold" Foreground="#FFFFFF" Text="保存并锁定" />
+                </Button>
+              </StackPanel>
+            </StackPanel>
+          </ScrollViewer>
+        </Border>
+      </Grid>
+    </Border>
+
+    <Border Grid.RowSpan="2" ZIndex="80" Background="#88000000" IsVisible="{Binding IsEpisodeEditPanelOpen}">
+      <Grid>
+        <Border Classes="popupPanel" Width="600" MaxHeight="700" Padding="24" HorizontalAlignment="Center" VerticalAlignment="Center">
+          <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Spacing="16">
+              <Grid ColumnDefinitions="*,Auto">
+                <StackPanel Spacing="6">
+                  <TextBlock FontSize="22" FontWeight="Bold" Foreground="#1A1A1A" Text="{Binding EpisodeEditPanelTitle}" />
+                  <TextBlock Foreground="#605E5C" Text="保存后会覆盖此分集的资料；剧照刮削会按季数和集数匹配。" TextWrapping="Wrap" />
+                </StackPanel>
+                <Button Grid.Column="1" Classes="sourceAction" Command="{Binding CloseEpisodeEditCommand}" Content="取消" VerticalAlignment="Top" />
+              </Grid>
+
+              <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="14,12">
+                <StackPanel Spacing="5">
+                  <TextBlock FontSize="13" FontWeight="SemiBold" Foreground="#8A8886" Text="源文件" />
+                  <TextBlock FontSize="15" Foreground="#1A1A1A" Text="{Binding EpisodeEditSourceFileText}" TextWrapping="Wrap" />
+                </StackPanel>
+              </Border>
+
+              <Grid ColumnDefinitions="*,*">
+                <StackPanel Spacing="8">
+                  <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="季数" />
+                  <TextBox Classes="popupSearchBox" Watermark="例如 1；特别篇可填 0" Text="{Binding EpisodeEditSeason}" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="8">
+                  <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="集数" />
+                  <TextBox Classes="popupSearchBox" Watermark="例如 1" Text="{Binding EpisodeEditEpisode}" />
+                </StackPanel>
+              </Grid>
+
+              <StackPanel Spacing="8">
+                <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="年份" />
+                <TextBox Classes="popupSearchBox" Watermark="例如 2025" Text="{Binding EpisodeEditYear}" />
+              </StackPanel>
+
+              <StackPanel Spacing="8">
+                <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="副标题" />
+                <TextBox Classes="popupSearchBox" Watermark="例如 嘉宾名 /主题 / 上半场" Text="{Binding EpisodeEditSubtitle}" />
+              </StackPanel>
+
+              <StackPanel Spacing="8">
+                <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="分集剧照" />
+                <Grid ColumnDefinitions="*,Auto">
+                  <TextBox Classes="popupSearchBox" Watermark="分集剧照本地路径" Text="{Binding EpisodeEditThumbnailPath}" />
+                  <Button Grid.Column="1" Margin="10,0,0,0" Classes="sourceAction" Command="{Binding ChooseEpisodeThumbnailImageCommand}" Content="选择图片..." />
+                </Grid>
+              </StackPanel>
+
+              <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="12" Margin="0,10,0,0">
+                <Button Classes="sourceAction" Command="{Binding CloseEpisodeEditCommand}" Content="取消" />
+                <Button Classes="heroAction" Command="{Binding SaveEpisodeEditCommand}" Padding="20,10">
+                  <TextBlock FontSize="16" FontWeight="SemiBold" Foreground="#FFFFFF" Text="保存" />
+                </Button>
+              </StackPanel>
+            </StackPanel>
+          </ScrollViewer>
+        </Border>
+      </Grid>
+    </Border>
+
+    <!-- ====== 播放器悬浮层：统一 Win11 右上角控件 + 精细化 SVG 播放控制 ====== -->
+    <Border x:Name="OverlayPlaybackRoot" Grid.RowSpan="2" ZIndex="100" Background="#000000" Focusable="True" IsVisible="{Binding IsPlayerOverlayOpen}" PointerMoved="Overlay_OnPointerMoved">
+      <Grid Background="#000000">
+        <ContentControl x:Name="OverlayPlayerSurfaceHostContainer" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" />
+        <Border x:Name="OverlayTapSurface" Background="#01000000" PointerPressed="OverlayTapSurface_OnPointerPressed" />
+        
+        <!-- 锚点放置在右上角，用于弹出 Win11 窗口按钮 -->
+        <Border x:Name="OverlayWindowControlsAnchor" Width="1" Height="1" HorizontalAlignment="Right" VerticalAlignment="Top" IsHitTestVisible="False" Opacity="0" />
+        <Border x:Name="OverlayBottomPopupAnchor" Height="1" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" IsHitTestVisible="False" Opacity="0" />
+
+        <!-- 统一的 Windows 11 播放页右上角控制器 -->
+        <Popup x:Name="OverlayWindowControlsPopup" IsLightDismissEnabled="False" Placement="BottomEdgeAlignedLeft" PlacementTarget="{Binding #OverlayWindowControlsAnchor}" Topmost="True">
+          <Border x:Name="OverlayWindowControlsPanel" Width="{Binding #OverlayPlaybackRoot.Bounds.Width}" Height="40" Background="Transparent" PointerEntered="OverlayWindowControlsPanel_OnPointerEntered" PointerExited="OverlayWindowControlsPanel_OnPointerExited" PointerMoved="OverlayWindowControlsPanel_OnPointerMoved" IsVisible="False">
+            <StackPanel Margin="0,4,4,0" HorizontalAlignment="Right" VerticalAlignment="Top" Orientation="Horizontal">
+              <Button Classes="WinCaptionBtnOverlay" Click="OverlayMinimizeButton_OnClick" ToolTip.Tip="最小化">
+                <Path Data="M 0,5 H 10 V 6 H 0 Z" Fill="#FFFFFF" Width="10" Height="10" Stretch="None" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Button>
+              <Button Classes="WinCaptionBtnOverlay" Click="OverlayMaximizeButton_OnClick" ToolTip.Tip="最大化或还原">
+                <Path Data="M 1,1 H 9 V 9 H 1 Z M 0,0 V 10 H 10 V 0 Z" Fill="#FFFFFF" Width="10" Height="10" Stretch="None" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Button>
+              <Button Classes="WinCaptionBtnOverlay WinCloseBtnOverlay" Click="OverlayCloseButton_OnClick" ToolTip.Tip="关闭播放页">
+                <Path Data="M 1,0 L 5,4 L 9,0 L 10,1 L 6,5 L 10,9 L 9,10 L 5,6 L 1,10 L 0,9 L 4,5 L 0,1 Z" Fill="#FFFFFF" Width="10" Height="10" Stretch="None" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Button>
+            </StackPanel>
+          </Border>
+        </Popup>
+
+        <Popup x:Name="OverlayWindowControlsHotZonePopup" IsLightDismissEnabled="False" Placement="BottomEdgeAlignedLeft" PlacementTarget="{Binding #OverlayWindowControlsAnchor}" Topmost="True">
+          <Border Width="{Binding #OverlayPlaybackRoot.Bounds.Width}" Height="48" Background="#01000000" PointerEntered="OverlayWindowControlsHotZone_OnPointerActivity" PointerMoved="OverlayWindowControlsHotZone_OnPointerActivity" />
+        </Popup>
+
+        <Popup x:Name="OverlayStatusPopup" IsLightDismissEnabled="False" Placement="Center" PlacementTarget="{Binding #OverlayPlaybackRoot}" Topmost="True">
+          <Border MaxWidth="520" Padding="16,11" CornerRadius="8" Background="#CC000000" BorderBrush="#33FFFFFF" BorderThickness="1">
+            <TextBlock Foreground="#FFFFFF" Text="{Binding Player.StatusMessage}" TextAlignment="Center" TextWrapping="Wrap" />
+          </Border>
+        </Popup>
+
+        <Popup x:Name="OverlayControlsPopup" IsLightDismissEnabled="False" Placement="TopEdgeAlignedLeft" PlacementTarget="{Binding #OverlayBottomPopupAnchor}" Topmost="True">
+          <Border Width="{Binding #OverlayPlaybackRoot.Bounds.Width}" PointerMoved="OverlayControlsArea_OnPointerMoved">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                <GradientStop Color="#00000000" Offset="0" />
+                <GradientStop Color="#CC000000" Offset="0.34" />
+                <GradientStop Color="#F2000000" Offset="1" />
+              </LinearGradientBrush>
+            </Border.Background>
+
+            <Grid Margin="30,46,30,30" RowDefinitions="Auto,Auto,Auto,Auto">
+              <Button Grid.Row="0" MinHeight="42" Padding="18,0" HorizontalAlignment="Right" Background="#0067C0" BorderBrush="#0067C0" BorderThickness="1" CornerRadius="6" Foreground="#FFFFFF" FontWeight="SemiBold" Command="{Binding Player.PlayNextEpisodeCommand}" Content="{Binding Player.NextEpisodeActionText}" IsVisible="{Binding Player.ShouldShowNextEpisodeAction}" />
+
+              <Grid Grid.Row="1" Margin="0,0,0,8" ColumnDefinitions="*,Auto,*">
+                <StackPanel Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center" Orientation="Horizontal" Spacing="24">
+                  <!-- 后退按钮：双实心箭头 -->
+                  <Button Classes="overlayCtrl" Width="52" Height="52" CornerRadius="26" Command="{Binding Player.SeekBackwardCommand}" ToolTip.Tip="后退 10 秒">
+                    <Path Fill="#FFFFFF" Stretch="Uniform" Width="20" Height="20" Data="M11.99 12L21.5 18V6l-9.51 6zm-9.5 0L12 18V6L2.49 12z" />
+                  </Button>
+                  <!-- 播放/暂停按钮：纯净毛玻璃底座 -->
+                  <Button Width="68" Height="68" Padding="0" Background="#E6FFFFFF" BorderThickness="0" CornerRadius="34" Foreground="#111111" Command="{Binding Player.TogglePlayPauseCommand}" ToolTip.Tip="播放或暂停">
+                    <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="30" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets, Arial" Text="{Binding Player.PlayPauseGlyph}" />
+                  </Button>
+                  <!-- 前进按钮：双实心箭头 -->
+                  <Button Classes="overlayCtrl" Width="52" Height="52" CornerRadius="26" Command="{Binding Player.SeekForwardCommand}" ToolTip.Tip="前进 10 秒">
+                    <Path Fill="#FFFFFF" Stretch="Uniform" Width="20" Height="20" Data="M12.01 12L2.5 6v12l9.51-6zm9.5 0L12 6v12l9.51-6z" />
+                  </Button>
+                </StackPanel>
+
+              </Grid>
+
+              <Grid Grid.Row="2" Margin="0,14,0,0" ColumnDefinitions="Auto,*,Auto">
+                <TextBlock MinWidth="54" VerticalAlignment="Center" FontFamily="Consolas" FontSize="12" Foreground="#E0E0E0" Text="{Binding Player.CurrentPositionText}" />
+                <Slider x:Name="OverlayPositionSlider" Grid.Column="1" Margin="12,0" Minimum="0" Maximum="{Binding Player.DurationSeconds}" Value="{Binding Player.SeekPositionSeconds, Mode=TwoWay}" PropertyChanged="OverlaySlider_OnPropertyChanged" />
+                <TextBlock Grid.Column="2" MinWidth="58" VerticalAlignment="Center" FontFamily="Consolas" FontSize="12" Foreground="#E0E0E0" Text="{Binding Player.RemainingTimeText}" />
+              </Grid>
+
+              <Grid Grid.Row="3" Margin="0,12,0,0">
+                <!-- 左下角对齐：音量控制内联显示 -->
+                <StackPanel HorizontalAlignment="Left" VerticalAlignment="Center" Orientation="Horizontal" Spacing="8">
+                  <Button Classes="overlayCtrl" Width="40" Height="36" CornerRadius="6" Command="{Binding Player.ToggleMuteCommand}" ToolTip.Tip="静音切换">
+                    <Grid Width="20" Height="20">
+                      <!-- 正常音量 -->
+                      <Path Fill="#FFFFFF" Stretch="Uniform" IsVisible="{Binding !Player.IsMuted}" Data="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
+                      <!-- 静音 -->
+                      <Path Fill="#FFFFFF" Stretch="Uniform" IsVisible="{Binding Player.IsMuted}" Data="M16.5 12A4.5 4.5 0 0 0 14 7.97v1.78l2.45 2.45c.03-.07.05-.14.05-.2zM19 12c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.916 8.916 0 0 0 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z" />
+                    </Grid>
+                  </Button>
+                  <Slider x:Name="OverlayVolumeSlider" Width="100" VerticalAlignment="Center" Minimum="0" Maximum="100" Value="{Binding Player.VolumePercent, Mode=TwoWay}" PropertyChanged="OverlayVolumeSlider_OnPropertyChanged" ToolTip.Tip="{Binding Player.VolumeText}" />
+                </StackPanel>
+
+                <!-- 右下角对齐：音轨和字幕控制 -->
+                <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" Spacing="10">
+                  <!-- 音轨控制：音乐符号 -->
+                  <Grid>
+                    <Button x:Name="OverlayAudioButton" Classes="overlayCtrl" Width="40" Height="36" CornerRadius="6" Click="OverlayAudioButton_OnClick" IsVisible="{Binding Player.IsPlaying}" ToolTip.Tip="音频轨道">
+                      <Path Fill="#FFFFFF" Stretch="Uniform" Width="18" Height="18" Data="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z" />
+                    </Button>
+                    <Popup x:Name="OverlayAudioPopup" IsLightDismissEnabled="True" Placement="Top" PlacementTarget="{Binding #OverlayAudioButton}">
+                      <Border MinWidth="120" MaxWidth="360" Padding="8" Background="#E61A1A1A" BorderBrush="#33FFFFFF" BorderThickness="1" CornerRadius="6" PointerMoved="OverlayControlsArea_OnPointerMoved">
+                        <ItemsControl ItemsSource="{Binding Player.AudioTracks}">
+                          <ItemsControl.ItemTemplate><DataTemplate>
+                            <Button MinHeight="36" Padding="12,0" HorizontalContentAlignment="Stretch" Background="Transparent" BorderThickness="0" Foreground="#FFFFFF" Click="OverlayAudioTrackButton_OnClick">
+                              <Grid ColumnDefinitions="Auto,Auto">
+                                <TextBlock MaxWidth="320" Text="{Binding DisplayName}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center" FontWeight="Bold" Foreground="#0078D4" Text="✓" IsVisible="{Binding IsSelected}" />
+                              </Grid>
+                            </Button>
+                          </DataTemplate></ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </Border>
+                    </Popup>
+                  </Grid>
+
+                  <!-- 字幕控制：CC符号 -->
+                  <Grid>
+                    <Button x:Name="OverlaySubtitleButton" Classes="overlayCtrl" Width="40" Height="36" CornerRadius="6" Click="OverlaySubtitleButton_OnClick" IsVisible="{Binding Player.HasTrackControls}" ToolTip.Tip="字幕">
+                      <Path Fill="#FFFFFF" Stretch="Uniform" Width="20" Height="16" Data="M19 4H5c-1.11 0-2 .9-2 2v12c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-8 7H9.5v-.5h-2v3h2V13H11v1.5c0 .28-.22.5-.5.5h-3c-.28 0-.5-.22-.5-.5v-4c0-.28.22-.5.5-.5h3c.28 0 .5.22.5.5V11zm7 0h-1.5v-.5h-2v3h2V13H18v1.5c0 .28-.22.5-.5.5h-3c-.28 0-.5-.22-.5-.5v-4c0-.28.22-.5.5-.5h3c.28 0 .5.22.5.5V11z" />
+                    </Button>
+                    <Popup x:Name="OverlaySubtitlePopup" IsLightDismissEnabled="True" Placement="Top" PlacementTarget="{Binding #OverlaySubtitleButton}">
+                      <Border MinWidth="176" MaxWidth="360" Padding="12" Background="#E61A1A1A" BorderBrush="#33FFFFFF" BorderThickness="1" CornerRadius="6" PointerMoved="OverlayControlsArea_OnPointerMoved">
+                        <StackPanel Spacing="10">
+                          <ItemsControl ItemsSource="{Binding Player.SubtitleTracks}">
+                            <ItemsControl.ItemTemplate><DataTemplate>
+                              <Button MinHeight="36" Padding="12,0" HorizontalContentAlignment="Stretch" Background="Transparent" BorderThickness="0" Foreground="#FFFFFF" Click="OverlaySubtitleTrackButton_OnClick">
+                                <Grid ColumnDefinitions="Auto,Auto">
+                                  <TextBlock MaxWidth="320" Text="{Binding DisplayName}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                  <TextBlock Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center" FontWeight="Bold" Foreground="#0078D4" Text="✓" IsVisible="{Binding IsSelected}" />
+                                </Grid>
+                              </Button>
+                            </DataTemplate></ItemsControl.ItemTemplate>
+                          </ItemsControl>
+                          
+                          <Button MinWidth="132" Height="36" Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" HorizontalAlignment="Center" Background="#1AFFFFFF" BorderBrush="#33FFFFFF" BorderThickness="1" CornerRadius="4" Foreground="#FFFFFF" Command="{Binding Player.LoadExternalSubtitleCommand}" IsVisible="{Binding Player.HasExternalSubtitlePicker}">
+                            <TextBlock Margin="12,0" HorizontalAlignment="Center" VerticalAlignment="Center" Text="加载外挂字幕" />
+                          </Button>
+                          
+                          <StackPanel Spacing="8" HorizontalAlignment="Center" IsVisible="{Binding Player.HasSubtitleStyleControls}">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="6">
+                              <Button Width="32" Height="32" Padding="0" Background="#1AFFFFFF" BorderBrush="#33FFFFFF" BorderThickness="1" CornerRadius="4" Foreground="#FFFFFF" Command="{Binding Player.DecreaseSubtitleDelayCommand}"><TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16" Text="-" /></Button>
+                              <TextBlock Width="44" TextAlignment="Center" VerticalAlignment="Center" FontFamily="Consolas" FontSize="12" Foreground="#FFFFFF" Text="{Binding Player.SubtitleDelayText}" />
+                              <Button Width="32" Height="32" Padding="0" Background="#1AFFFFFF" BorderBrush="#33FFFFFF" BorderThickness="1" CornerRadius="4" Foreground="#FFFFFF" Command="{Binding Player.IncreaseSubtitleDelayCommand}"><TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16" Text="+" /></Button>
+                            </StackPanel>
+                            <Grid HorizontalAlignment="Center">
+                              <Button x:Name="OverlaySubtitleSizeMenuButton" MinWidth="54" MinHeight="32" Padding="12,0" HorizontalContentAlignment="Center" Background="#1AFFFFFF" BorderBrush="#33FFFFFF" BorderThickness="1" CornerRadius="4" Foreground="#FFFFFF" Click="OverlaySubtitleSizeMenuButton_OnClick" Content="大小" />
+                              <Popup x:Name="OverlaySubtitleSizePopup" IsLightDismissEnabled="True" Placement="Top" PlacementTarget="{Binding #OverlaySubtitleSizeMenuButton}">
+                                <Border Padding="6" Background="#E61A1A1A" BorderBrush="#33FFFFFF" BorderThickness="1" CornerRadius="6" PointerMoved="OverlayControlsArea_OnPointerMoved">
+                                  <ItemsControl ItemsSource="{Binding Player.SubtitleSizeOptions}">
+                                    <ItemsControl.ItemTemplate><DataTemplate><Button MinWidth="54" MinHeight="32" Padding="10,0" HorizontalContentAlignment="Center" Background="#1AFFFFFF" BorderBrush="#33FFFFFF" BorderThickness="1" CornerRadius="4" Foreground="#FFFFFF" Click="OverlaySubtitleSizeButton_OnClick" Content="{Binding Label}" /></DataTemplate></ItemsControl.ItemTemplate>
+                                  </ItemsControl>
+                                </Border>
+                              </Popup>
+                            </Grid>
+                          </StackPanel>
+                        </StackPanel>
+                      </Border>
+                    </Popup>
+                  </Grid>
+                </StackPanel>
+              </Grid>
+            </Grid>
+          </Border>
+        </Popup>
+
+        <Popup x:Name="OverlayBottomHotZonePopup" IsLightDismissEnabled="False" Placement="TopEdgeAlignedLeft" PlacementTarget="{Binding #OverlayBottomPopupAnchor}" Topmost="True">
+          <Border Width="{Binding #OverlayPlaybackRoot.Bounds.Width}" Height="180" Background="#01000000" PointerEntered="OverlayBottomHotZone_OnPointerActivity" PointerMoved="OverlayBottomHotZone_OnPointerActivity" PointerPressed="OverlayBottomHotZone_OnPointerPressed" />
+        </Popup>
+      </Grid>
+    </Border>
+  </Grid>
+</UserControl>

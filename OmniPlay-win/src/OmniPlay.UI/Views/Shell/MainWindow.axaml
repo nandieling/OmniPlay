@@ -1,0 +1,82 @@
+<Window
+    x:Class="OmniPlay.UI.Views.Shell.MainWindow"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:library="using:OmniPlay.UI.Views.Library"
+    Width="1440"
+    Height="900"
+    MinWidth="1024"
+    MinHeight="720"
+    Background="#FFFFFF"
+    Foreground="#1A1A1A"
+    SystemDecorations="None"
+    WindowStartupLocation="CenterScreen"
+    Title="览影">
+
+  <!-- Windows 浅色风格控制按钮样式 -->
+  <Window.Styles>
+    <Style Selector="Button.WinCaptionBtn">
+      <Setter Property="Width" Value="46"/>
+      <Setter Property="Height" Value="32"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="CornerRadius" Value="4"/>
+      <Setter Property="VerticalAlignment" Value="Top"/>
+    </Style>
+    <Style Selector="Button.WinCaptionBtn:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#E5E5E5"/>
+    </Style>
+    <Style Selector="Button.WinCloseBtn:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#E81123"/>
+      <Setter Property="Foreground" Value="White"/>
+    </Style>
+    <Style Selector="Button.WinCloseBtn:pointerover Path">
+      <Setter Property="Fill" Value="White"/>
+    </Style>
+  </Window.Styles>
+
+  <Grid>
+    <library:PosterWallView DataContext="{Binding PosterWall}" />
+
+    <Grid
+        x:Name="ShellWindowControlsLayer"
+        VerticalAlignment="Top"
+        IsVisible="{Binding !PosterWall.IsPlayerOverlayOpen}">
+      <Border
+          Height="12"
+          VerticalAlignment="Top"
+          Background="Transparent"
+          PointerEntered="ShellWindowControlsHotZone_OnPointerActivity"
+          PointerMoved="ShellWindowControlsHotZone_OnPointerActivity" />
+
+      <!-- 悬浮控制条：浅色微透 -->
+      <Border
+          x:Name="ShellWindowControlsBar"
+          Height="40"
+          VerticalAlignment="Top"
+          Background="#00000000"
+          IsVisible="True"
+          PointerEntered="ShellWindowControlsBar_OnPointerEntered"
+          PointerExited="ShellWindowControlsBar_OnPointerExited"
+          PointerMoved="ShellWindowControlsBar_OnPointerMoved"
+          PointerPressed="ShellWindowControlsBar_OnPointerPressed">
+        
+        <StackPanel
+            Margin="0,4,4,0"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Top"
+            Orientation="Horizontal">
+          <Button Classes="WinCaptionBtn" Click="ShellMinimizeButton_OnClick" ToolTip.Tip="最小化">
+            <Path Data="M 0,5 H 10 V 6 H 0 Z" Fill="#323130" Width="10" Height="10" Stretch="None" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Button>
+          <Button Classes="WinCaptionBtn" Click="ShellMaximizeButton_OnClick" ToolTip.Tip="最大化或还原">
+            <Path Data="M 1,1 H 9 V 9 H 1 Z M 0,0 V 10 H 10 V 0 Z" Fill="#323130" Width="10" Height="10" Stretch="None" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Button>
+          <Button Classes="WinCaptionBtn WinCloseBtn" Click="ShellCloseButton_OnClick" ToolTip.Tip="关闭">
+            <Path Data="M 1,0 L 5,4 L 9,0 L 10,1 L 6,5 L 10,9 L 9,10 L 5,6 L 1,10 L 0,9 L 4,5 L 0,1 Z" Fill="#323130" Width="10" Height="10" Stretch="None" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Button>
+        </StackPanel>
+      </Border>
+    </Grid>
+  </Grid>
+</Window>
