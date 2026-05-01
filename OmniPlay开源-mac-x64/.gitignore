@@ -1,0 +1,54 @@
+# macOS
+.DS_Store
+**/.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100/
+.Trashes/
+.fseventsd/
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xccheckout
+*.xcscmblueprint
+
+# Xcode build output
+DerivedData/
+build/
+Build/
+*.hmap
+*.ipa
+*.dSYM/
+*.xcarchive/
+
+# Swift Package Manager
+.build/
+.swiftpm/xcode/xcuserdata/
+
+# Local environment and secrets
+.env
+.env.*
+*.p12
+*.cer
+*.mobileprovision
+*.provisionprofile
+*.pem
+*.key
+*.crt
+
+# Logs and local databases
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Large local binary dependencies / generated vendor artifacts
+*.xcframework/
+*.framework/
+
+# After migrating GRDB to remote SwiftPM, uncomment this before uploading.
+# GRDB.swift-master/
