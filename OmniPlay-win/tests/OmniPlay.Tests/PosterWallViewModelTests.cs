@@ -15,7 +15,7 @@ namespace OmniPlay.Tests;
 public sealed class PosterWallViewModelTests
 {
     [Fact]
-    public void MediaServerProtocolSelection_UsesRecommendedPlexDefaults()
+    public void MediaServerProtocolSelection_UsesRecommendedDockerDefaults()
     {
         var viewModel = CreateViewModel(
             new FakeVideoFileRepository(),
@@ -24,6 +24,13 @@ public sealed class PosterWallViewModelTests
             new PlayerViewModel(new FakeMediaPlayer()));
 
         viewModel.OpenMediaServerPanelCommand.Execute(null);
+
+        Assert.Equal("http://127.0.0.1:45722", viewModel.PendingMediaServerBaseUrl);
+        Assert.Contains("OmniPlay Docker", viewModel.PendingMediaServerTokenWatermark, StringComparison.Ordinal);
+        Assert.False(viewModel.PendingMediaServerUsesUserId);
+        Assert.False(viewModel.PendingMediaServerUsesPlex);
+
+        viewModel.SelectedMediaServerProtocolOption = viewModel.MediaServerProtocolOptions.Single(option => option.Value == "plex");
 
         Assert.Equal("http://127.0.0.1:32400", viewModel.PendingMediaServerBaseUrl);
         Assert.Contains("X-Plex-Token", viewModel.PendingMediaServerTokenWatermark, StringComparison.Ordinal);

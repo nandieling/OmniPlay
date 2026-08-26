@@ -29,3 +29,6 @@ services:
       - ./data:/var/lib/omniplay
       - ./cache:/var/cache/omniplay
       - ./media:/media:ro
+      # Multiple disks/directories: give every host path a unique path under /media.
+      # - /mnt/disk1/movies:/media/disk1/movies:ro
+      # - /mnt/disk2/tv:/media/disk2/tv:ro

@@ -36,7 +36,8 @@ public sealed record EpisodeDetail(
     string? Overview,
     string? StillAssetId,
     string? AirDate,
-    VideoFileSummary? VideoFile);
+    VideoFileSummary? VideoFile,
+    IReadOnlyList<VideoFileSummary> VideoFiles);
 
 public sealed record VideoFileSummary(
     string Id,

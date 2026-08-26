@@ -28,6 +28,8 @@ import android.view.ViewConfiguration;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.ArrayAdapter;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
@@ -35,9 +37,11 @@ import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 
 import com.omniplay.tv.data.Models;
+import com.omniplay.tv.data.LuckyStunClient;
 import com.omniplay.tv.data.OmniPlayApi;
 import com.omniplay.tv.iso.RemoteIsoStreamServer;
 import com.omniplay.tv.player.MpvVideoView;
@@ -60,6 +64,7 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.Inet4Address;
 import java.net.InetAddress;
+import java.net.InterfaceAddress;
 import java.net.NetworkInterface;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -425,21 +430,33 @@ public final class MainActivity extends Activity {
                 continue;
             }
 
-            Enumeration<InetAddress> addresses = networkInterface.getInetAddresses();
-            while (addresses.hasMoreElements()) {
-                InetAddress address = addresses.nextElement();
-                if (!(address instanceof Inet4Address) || address.isLoopbackAddress() || !address.isSiteLocalAddress()) {
+            for (InterfaceAddress interfaceAddress : networkInterface.getInterfaceAddresses()) {
+                InetAddress address = interfaceAddress.getAddress();
+                if (!(address instanceof Inet4Address) || address.isLoopbackAddress() || !isLanIPv4(address)) {
                     continue;
                 }
 
                 byte[] bytes = address.getAddress();
-                int first = bytes[0] & 0xff;
-                int second = bytes[1] & 0xff;
-                int third = bytes[2] & 0xff;
-                int own = bytes[3] & 0xff;
-                for (int host = 1; host <= 254; host++) {
-                    if (host != own) {
-                        candidates.add(first + "." + second + "." + third + "." + host);
+                int prefixLength = interfaceAddress.getNetworkPrefixLength();
+                if (prefixLength < 0 || prefixLength > 32) {
+                    prefixLength = 24;
+                }
+                long ipValue = ((long) (bytes[0] & 0xff) << 24)
+                        | ((long) (bytes[1] & 0xff) << 16)
+                        | ((long) (bytes[2] & 0xff) << 8)
+                        | (long) (bytes[3] & 0xff);
+                long mask = prefixLength == 0 ? 0 : (0xffffffffL << (32 - prefixLength)) & 0xffffffffL;
+                long network = ipValue & mask;
+                long broadcast = network | (~mask & 0xffffffffL);
+                long hostCount = broadcast > network ? broadcast - network - 1 : 0;
+                if (hostCount > 0 && hostCount <= 1022) {
+                    for (long value = network + 1; value < broadcast; value++) {
+                        candidates.add(formatIPv4(value));
+                    }
+                } else {
+                    long local24 = ipValue & 0xffffff00L;
+                    for (int host = 1; host <= 254; host++) {
+                        candidates.add(formatIPv4(local24 | host));
                     }
                 }
             }
@@ -456,7 +473,7 @@ public final class MainActivity extends Activity {
             futures.add(completion.submit(() -> probeServer(host)));
         }
 
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
         try {
             for (int remaining = futures.size(); remaining > 0; remaining--) {
                 long waitNanos = deadline - System.nanoTime();
@@ -489,14 +506,17 @@ public final class MainActivity extends Activity {
         HttpURLConnection connection = null;
         try {
             connection = (HttpURLConnection) new URL(url + "/api/auth/status").openConnection();
-            connection.setConnectTimeout(280);
-            connection.setReadTimeout(650);
+            connection.setInstanceFollowRedirects(true);
+            connection.setConnectTimeout(1000);
+            connection.setReadTimeout(2500);
             connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("User-Agent", "OmniPlay-Android/1.5");
             int status = connection.getResponseCode();
             if (status >= 200 && status < 300) {
-                String body = readRemoteText(connection.getInputStream());
-                if (body.contains("requiresSetup") || body.contains("isAuthenticated")) {
+                String body = readRemoteText(connection.getInputStream()).toLowerCase(Locale.ROOT);
+                if (body.contains("\"issetuprequired\"")
+                        || body.contains("\"isauthenticated\"")
+                        || body.contains("\"service\":\"omniplay.server\"")) {
                     return url;
                 }
             }
@@ -507,6 +527,25 @@ public final class MainActivity extends Activity {
             }
         }
         return "";
+    }
+
+    private static boolean isLanIPv4(InetAddress address) {
+        if (!(address instanceof Inet4Address)) {
+            return false;
+        }
+        byte[] bytes = address.getAddress();
+        int first = bytes[0] & 0xff;
+        int second = bytes[1] & 0xff;
+        return address.isSiteLocalAddress()
+                || first == 100 && second >= 64 && second <= 127
+                || first == 169 && second == 254;
+    }
+
+    private static String formatIPv4(long value) {
+        return ((value >> 24) & 0xff) + "."
+                + ((value >> 16) & 0xff) + "."
+                + ((value >> 8) & 0xff) + "."
+                + (value & 0xff);
     }
 
     private void showHome() {
@@ -809,6 +848,89 @@ public final class MainActivity extends Activity {
         server.setEllipsize(TextUtils.TruncateAt.MIDDLE);
         panel.addView(server, margin(matchWidth(), 0, dp(6), 0, dp(16)));
 
+        panel.addView(text("Lucky STUN 穿透地址", 14, Typeface.BOLD, COLOR_MUTED), margin(matchWidth(), 0, 0, 0, dp(8)));
+        panel.addView(text("管理地址", 12, Typeface.BOLD, COLOR_MUTED), margin(matchWidth(), 0, 0, 0, dp(3)));
+        EditText luckyUrl = input("例如 http://192.168.1.1:16601", api.luckyStunManagementUrl());
+        panel.addView(luckyUrl, margin(matchWidth(), 0, dp(8), 0, 0));
+        panel.addView(text("账号", 12, Typeface.BOLD, COLOR_MUTED), margin(matchWidth(), 0, 0, 0, dp(3)));
+        EditText luckyUsername = input("Lucky 管理账号", api.luckyStunUsername());
+        panel.addView(luckyUsername, margin(matchWidth(), 0, dp(8), 0, 0));
+        panel.addView(text("密码", 12, Typeface.BOLD, COLOR_MUTED), margin(matchWidth(), 0, 0, 0, dp(3)));
+        EditText luckyPassword = input("Lucky 管理密码", api.luckyStunPassword());
+        luckyPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        panel.addView(luckyPassword, margin(matchWidth(), 0, dp(8), 0, 0));
+        ArrayList<String> luckyRuleIds = new ArrayList<>();
+        ArrayList<String> luckyRuleNames = new ArrayList<>();
+        ArrayList<String> luckyRuleLabels = new ArrayList<>();
+        Spinner luckyRuleSpinner = new Spinner(this);
+        ArrayAdapter<String> luckyRuleAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, luckyRuleLabels);
+        luckyRuleAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        luckyRuleSpinner.setAdapter(luckyRuleAdapter);
+        panel.addView(luckyRuleSpinner, margin(matchWidth(), 0, dp(8), 0, 0));
+        TextView luckyRuleList = text("登录后将在此显示规则列表。", 11, Typeface.NORMAL, COLOR_SUBTLE);
+        luckyRuleList.setMaxLines(6);
+        luckyRuleList.setEllipsize(TextUtils.TruncateAt.END);
+        panel.addView(luckyRuleList, margin(matchWidth(), 0, dp(8), 0, 0));
+        CheckBox luckyAutoUpdate = new CheckBox(this);
+        luckyAutoUpdate.setText("定期自动更新 Lucky STUN 地址");
+        luckyAutoUpdate.setTextColor(COLOR_TEXT);
+        luckyAutoUpdate.setChecked(api.luckyStunAutoUpdate());
+        panel.addView(luckyAutoUpdate, margin(matchWidth(), 0, dp(4), 0, 0));
+        EditText luckyInterval = input("更新周期（分钟，至少 5）", String.valueOf(api.luckyStunUpdateIntervalMinutes()));
+        luckyInterval.setInputType(InputType.TYPE_CLASS_NUMBER);
+        panel.addView(luckyInterval, margin(matchWidth(), 0, dp(8), 0, 0));
+        Button luckyUpdate = compactButton("登录检测并更新");
+        panel.addView(luckyUpdate, margin(matchWidth(), 0, dp(4), 0, 0));
+        TextView luckyStatus = text("选择规则后点击按钮同步 Docker 地址。", 12, Typeface.NORMAL, COLOR_SUBTLE);
+        luckyStatus.setMaxLines(3);
+        luckyStatus.setEllipsize(TextUtils.TruncateAt.END);
+        panel.addView(luckyStatus, margin(matchWidth(), 0, dp(14), 0, 0));
+        luckyUpdate.setOnClickListener(view -> {
+            int selectedIndex = luckyRuleSpinner.getSelectedItemPosition();
+            String selectedId = selectedIndex >= 0 && selectedIndex < luckyRuleIds.size() ? luckyRuleIds.get(selectedIndex) : api.luckyStunRuleId();
+            String selectedName = selectedIndex >= 0 && selectedIndex < luckyRuleNames.size() ? luckyRuleNames.get(selectedIndex) : "";
+            int interval;
+            try {
+                interval = Math.max(5, Math.min(1440, Integer.parseInt(luckyInterval.getText().toString().trim())));
+            } catch (NumberFormatException error) {
+                interval = 30;
+            }
+            luckyUpdate.setEnabled(false);
+            luckyStatus.setText("正在登录并读取 Lucky STUN 规则...");
+            api.saveLuckyStunSettings(luckyUrl.getText().toString(), luckyUsername.getText().toString(), luckyPassword.getText().toString(), selectedId, selectedName, luckyAutoUpdate.isChecked(), interval);
+            runAsync(
+                    () -> api.refreshLuckyStun(luckyUrl.getText().toString(), luckyUsername.getText().toString(), luckyPassword.getText().toString(), selectedId, selectedName),
+                    result -> {
+                        luckyRuleIds.clear();
+                        luckyRuleNames.clear();
+                        luckyRuleLabels.clear();
+                        for (LuckyStunClient.Rule rule : result.rules) {
+                            luckyRuleIds.add(rule.id);
+                            luckyRuleNames.add(rule.name);
+                            luckyRuleLabels.add(rule.name + " · " + rule.address);
+                        }
+                        luckyRuleAdapter.notifyDataSetChanged();
+                        StringBuilder ruleSummary = new StringBuilder("已登录规则：\n");
+                        for (LuckyStunClient.Rule rule : result.rules) {
+                            ruleSummary.append("• ").append(rule.name).append("：").append(rule.address).append("\n");
+                        }
+                        luckyRuleList.setText(ruleSummary.toString().trim());
+                        if (result.selectedRule != null) {
+                            int index = luckyRuleIds.indexOf(result.selectedRule.id);
+                            if (index >= 0) {
+                                luckyRuleSpinner.setSelection(index);
+                            }
+                        }
+                        server.setText(api.serverUrl());
+                        luckyStatus.setText(result.message + "\n当前服务端：" + api.serverUrl());
+                        luckyUpdate.setEnabled(true);
+                    },
+                    error -> {
+                        luckyStatus.setText("Lucky STUN 更新失败：" + error.getMessage());
+                        luckyUpdate.setEnabled(true);
+                    });
+        });
+
         panel.addView(text("4K DV/HDR播放模式", 14, Typeface.BOLD, COLOR_MUTED), margin(matchWidth(), 0, 0, 0, dp(8)));
         LinearLayout playbackModeRow = new LinearLayout(this);
         playbackModeRow.setOrientation(LinearLayout.VERTICAL);
@@ -840,7 +962,7 @@ public final class MainActivity extends Activity {
         disconnect.setTextColor(COLOR_DANGER);
         disconnect.setOnClickListener(view -> disconnectFromServer());
 
-        trapSettingsFocus(compatibleSubtitle, highPerformanceDirect, update, disconnect);
+        trapSettingsFocus(compatibleSubtitle, highPerformanceDirect, luckyUpdate, update, disconnect);
         panel.bringToFront();
         settingsInitialFocus = compatibleSubtitle;
         compatibleSubtitle.requestFocus();
@@ -858,7 +980,7 @@ public final class MainActivity extends Activity {
         openSettingsOverlay();
     }
 
-    private void trapSettingsFocus(Button compatibleSubtitle, Button highPerformanceDirect, Button update, Button disconnect) {
+    private void trapSettingsFocus(Button compatibleSubtitle, Button highPerformanceDirect, Button luckyUpdate, Button update, Button disconnect) {
         compatibleSubtitle.setNextFocusLeftId(compatibleSubtitle.getId());
         compatibleSubtitle.setNextFocusRightId(compatibleSubtitle.getId());
         compatibleSubtitle.setNextFocusUpId(compatibleSubtitle.getId());
@@ -867,11 +989,16 @@ public final class MainActivity extends Activity {
         highPerformanceDirect.setNextFocusLeftId(highPerformanceDirect.getId());
         highPerformanceDirect.setNextFocusRightId(highPerformanceDirect.getId());
         highPerformanceDirect.setNextFocusUpId(compatibleSubtitle.getId());
-        highPerformanceDirect.setNextFocusDownId(update.getId());
+        highPerformanceDirect.setNextFocusDownId(luckyUpdate.getId());
+
+        luckyUpdate.setNextFocusLeftId(luckyUpdate.getId());
+        luckyUpdate.setNextFocusRightId(luckyUpdate.getId());
+        luckyUpdate.setNextFocusUpId(highPerformanceDirect.getId());
+        luckyUpdate.setNextFocusDownId(update.getId());
 
         update.setNextFocusLeftId(update.getId());
         update.setNextFocusRightId(update.getId());
-        update.setNextFocusUpId(highPerformanceDirect.getId());
+        update.setNextFocusUpId(luckyUpdate.getId());
         update.setNextFocusDownId(disconnect.getId());
 
         disconnect.setNextFocusLeftId(disconnect.getId());
@@ -1346,6 +1473,39 @@ public final class MainActivity extends Activity {
 
         if ("tv".equals(detail.itemKind) && !detail.seasons.isEmpty()) {
             renderEpisodes(content, detail, mainFile, playButton);
+        } else if ("movie".equals(detail.itemKind)) {
+            renderMovieVersions(content, detail);
+        }
+    }
+
+    private void renderMovieVersions(LinearLayout content, Models.LibraryDetail detail) {
+        ArrayList<Models.VideoFile> files = moviePlaybackFiles(detail);
+        if (files.isEmpty()) {
+            return;
+        }
+
+        TextView heading = text("版本 / 文件（" + files.size() + "）", ssp(20), Typeface.BOLD, COLOR_TEXT);
+        content.addView(heading, margin(matchWidth(), 0, sdp(14), 0, sdp(18)));
+        for (int index = 0; index < files.size(); index++) {
+            Models.VideoFile file = files.get(index);
+            Button version = button((files.size() > 1 ? "版本 " + (index + 1) + " · " : "正片 · ") + file.fileName);
+            version.setAllCaps(false);
+            version.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+            version.setTag(file);
+            version.setOnClickListener(view -> {
+                Object tag = view.getTag();
+                if (tag instanceof Models.VideoFile) {
+                    playFile((Models.VideoFile) tag);
+                }
+            });
+            content.addView(version, margin(matchWidth(), 0, sdp(8), 0, 0));
+
+            TextView metadata = text((file.relativePath == null ? "" : file.relativePath) +
+                    (file.mediaSummary().isEmpty() ? "" : " · " + file.mediaSummary()) +
+                    " · " + fileProgressPercent(file) + "% 已播放", ssp(13), Typeface.NORMAL, COLOR_SUBTLE);
+            metadata.setMaxLines(2);
+            metadata.setEllipsize(TextUtils.TruncateAt.END);
+            content.addView(metadata, margin(matchWidth(), 0, sdp(16), 0, sdp(2)));
         }
     }
 
@@ -1450,6 +1610,26 @@ public final class MainActivity extends Activity {
                 card.addView(progressBar(progress, progressWidth, sdp(4)), margin(new LinearLayout.LayoutParams(progressWidth, sdp(4)), 0, sdp(12), 0, 0));
             }
             card.setOnClickListener(view -> playFile(playbackFile));
+        }
+
+        List<Models.VideoFile> versions = episodeVideoFiles(episode);
+        if (versions.size() > 1) {
+            TextView versionHeading = text("版本 / 文件（" + versions.size() + "）", ssp(12), Typeface.BOLD, COLOR_SUBTLE);
+            card.addView(versionHeading, margin(matchWidth(), 0, sdp(4), 0, sdp(8)));
+            for (int index = 0; index < versions.size(); index++) {
+                Models.VideoFile versionFile = versions.get(index);
+                Button versionButton = compactButton("版本 " + (index + 1) + " · " + versionFile.fileName);
+                versionButton.setAllCaps(false);
+                versionButton.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+                versionButton.setTag(versionFile.withEpisodeLabel(episodeDisplayLabel(episode.seasonNumber, episode.episodeNumber)));
+                versionButton.setOnClickListener(view -> {
+                    Object tag = view.getTag();
+                    if (tag instanceof Models.VideoFile) {
+                        playFile((Models.VideoFile) tag);
+                    }
+                });
+                card.addView(versionButton, margin(matchWidth(), 0, sdp(4), 0, 0));
+            }
         }
 
         return card;
@@ -1590,15 +1770,16 @@ public final class MainActivity extends Activity {
         return new ResolvedPlayback(playbackUrl, "", playbackCookieHeader, settings, streams, "", "", isIsoFile(file) && playbackUrl.equals(streamUrl));
     }
 
-    private String resolveIsoPlaybackUrl(String streamUrl, String cookieHeader) {
+    private String resolveIsoPlaybackUrl(String streamUrl, String cookieHeader) throws IOException {
         try {
             String proxyUrl = RemoteIsoStreamServer.shared().prepare(streamUrl, cookieHeader);
             if (proxyUrl != null && !proxyUrl.isEmpty()) {
                 return proxyUrl;
             }
-        } catch (Exception ignored) {
+        } catch (Exception error) {
+            throw new IOException("客户端 ISO Range 代理失败，未向 mpv 回退原始 ISO 字节流。", error);
         }
-        return streamUrl;
+        throw new IOException("客户端 ISO Range 代理没有返回播放地址。");
     }
 
     private Models.PlaybackFileStreams resolvePlaybackStreams(String videoFileId) {
@@ -4155,20 +4336,29 @@ public final class MainActivity extends Activity {
         ArrayList<Models.VideoFile> files = new ArrayList<>();
         for (Models.Season season : detail.seasons) {
             for (Models.Episode episode : season.episodes) {
-                Models.VideoFile file = episodePlaybackFile(episode);
-                if (file != null) {
-                    files.add(file);
-                }
+                files.addAll(episodeVideoFiles(episode));
             }
         }
         return files;
     }
 
     private Models.VideoFile episodePlaybackFile(Models.Episode episode) {
-        if (episode.videoFile == null) {
+        if (episode.videoFile == null && episode.videoFiles.isEmpty()) {
             return null;
         }
-        return episode.videoFile.withEpisodeLabel(episodeDisplayLabel(episode.seasonNumber, episode.episodeNumber));
+        Models.VideoFile file = episode.videoFile == null ? episode.videoFiles.get(0) : episode.videoFile;
+        return file.withEpisodeLabel(episodeDisplayLabel(episode.seasonNumber, episode.episodeNumber));
+    }
+
+    private List<Models.VideoFile> episodeVideoFiles(Models.Episode episode) {
+        ArrayList<Models.VideoFile> files = new ArrayList<>();
+        for (Models.VideoFile file : episode.videoFiles) {
+            files.add(file.withEpisodeLabel(episodeDisplayLabel(episode.seasonNumber, episode.episodeNumber)));
+        }
+        if (files.isEmpty() && episode.videoFile != null) {
+            files.add(episode.videoFile.withEpisodeLabel(episodeDisplayLabel(episode.seasonNumber, episode.episodeNumber)));
+        }
+        return files;
     }
 
     private boolean hasUnfinishedProgress(Models.VideoFile file) {

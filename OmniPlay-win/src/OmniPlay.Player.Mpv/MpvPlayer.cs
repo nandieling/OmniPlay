@@ -24,6 +24,7 @@ public sealed class MpvPlayer : IMediaPlayer
     private long? cachedSelectedSubtitleTrackId;
     private IReadOnlyList<PlayerTrackInfo> cachedAudioTracks = [];
     private IReadOnlyList<PlayerTrackInfo> cachedSubtitleTracks = [];
+    private readonly List<string> remoteIsoProxyRouteIds = [];
     private MountedIsoImage? mountedIsoImage;
     private string? temporaryPlaylistPath;
     private IReadOnlyList<double> activePlaylistSegmentDurations = [];
@@ -61,7 +62,7 @@ public sealed class MpvPlayer : IMediaPlayer
         try
         {
             return await Task.Run(
-                () => OpenCore(request.PlaybackPath),
+                () => OpenCore(request),
                 CancellationToken.None).ConfigureAwait(false);
         }
         finally
@@ -206,9 +207,10 @@ public sealed class MpvPlayer : IMediaPlayer
         }
     }
 
-    private MediaPlayerOpenResult OpenCore(string filePath)
+    private MediaPlayerOpenResult OpenCore(PlaybackOpenRequest request)
     {
         Initialize();
+        var filePath = request.PlaybackPath;
         filePath = MediaSourcePathResolver.ResolvePlayableLocation(filePath);
 
         if (!MediaSourcePathResolver.IsPlayableLocation(filePath))
@@ -247,7 +249,10 @@ public sealed class MpvPlayer : IMediaPlayer
             {
                 SetOption("http-header-fields", remoteHeaders);
             }
-            var bluRayTarget = ResolveBluRayPlaybackTarget(filePath);
+            var bluRayTarget = ResolveBluRayPlaybackTarget(
+                filePath,
+                request.MediaFileName,
+                request.EffectiveDisplayPath);
             if (!string.IsNullOrWhiteSpace(bluRayTarget?.DevicePath))
             {
                 SetOption("bluray-device", bluRayTarget.DevicePath);
@@ -344,10 +349,18 @@ public sealed class MpvPlayer : IMediaPlayer
         }
     }
 
-    private BluRayPlaybackTarget? ResolveBluRayPlaybackTarget(string filePath)
+    private BluRayPlaybackTarget? ResolveBluRayPlaybackTarget(
+        string filePath,
+        string? mediaFileName,
+        string? displayPath)
     {
         if (MediaSourcePathResolver.IsRemoteHttpUrl(filePath))
         {
+            if (IsRemoteIsoPlaybackPath(filePath, mediaFileName, displayPath))
+            {
+                return CreateRemoteIsoPlaybackTarget(filePath);
+            }
+
             return null;
         }
 
@@ -410,6 +423,77 @@ public sealed class MpvPlayer : IMediaPlayer
             DvdDevicePath: isoPath,
             PlaybackSegmentDurations: [],
             FallbackSegmentDurations: []);
+    }
+
+    private BluRayPlaybackTarget CreateRemoteIsoPlaybackTarget(string sourceUrl)
+    {
+        var registration = RemoteIsoStreamProxy.Shared
+            .PrepareAsync(sourceUrl)
+            .GetAwaiter()
+            .GetResult();
+        remoteIsoProxyRouteIds.AddRange(registration.RouteIds);
+
+        if (registration.Urls.Count == 0)
+        {
+            RemoteIsoStreamProxy.Shared.Unregister(registration.RouteIds);
+            remoteIsoProxyRouteIds.RemoveAll(registration.RouteIds.Contains);
+            throw new InvalidDataException("远程 ISO 代理没有生成可播放地址。");
+        }
+
+        var playbackPath = registration.Urls[0];
+        var usePlaylist = false;
+        if (registration.Urls.Count > 1)
+        {
+            if (!TryCreateTemporaryM3uPlaylist(registration.Urls, out playbackPath))
+            {
+                RemoteIsoStreamProxy.Shared.Unregister(registration.RouteIds);
+                remoteIsoProxyRouteIds.RemoveAll(registration.RouteIds.Contains);
+                throw new IOException("无法创建远程蓝光分段播放列表。");
+            }
+
+            usePlaylist = true;
+        }
+
+        return new BluRayPlaybackTarget(
+            DevicePath: null,
+            PlaybackPath: playbackPath,
+            UsePlaylist: usePlaylist,
+            IsIsoImage: true,
+            FallbackPlaybackPath: null,
+            FallbackUsesPlaylist: false,
+            FinalFallbackPlaybackPath: null,
+            DvdDevicePath: null,
+            PlaybackSegmentDurations: [],
+            FallbackSegmentDurations: []);
+    }
+
+    private static bool IsRemoteIsoPlaybackPath(
+        string filePath,
+        string? mediaFileName,
+        string? displayPath)
+    {
+        if (!string.IsNullOrWhiteSpace(mediaFileName) &&
+            mediaFileName.Trim().EndsWith(".iso", StringComparison.OrdinalIgnoreCase))
+        {
+            if (Uri.TryCreate(filePath, UriKind.Absolute, out var sourceUri))
+            {
+                var sourcePath = sourceUri.AbsolutePath.TrimEnd('/');
+                if (sourcePath.EndsWith(".iso", StringComparison.OrdinalIgnoreCase) ||
+                    (sourcePath.Contains("/api/playback/files/", StringComparison.OrdinalIgnoreCase) &&
+                     sourcePath.EndsWith("/stream", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return true;
+                }
+            }
+
+            if (Uri.TryCreate(displayPath, UriKind.Absolute, out var displayUri) &&
+                displayUri.AbsolutePath.EndsWith(".iso", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static BluRayPlaybackTarget CreateLocalDvdPlaybackTarget(
@@ -684,6 +768,7 @@ public sealed class MpvPlayer : IMediaPlayer
         if (playerHandle == IntPtr.Zero)
         {
             InvalidateTrackCache();
+            ReleaseRemoteIsoProxyRoutes();
             ReleaseMountedIsoImage();
             ReleaseTemporaryPlaylist();
             return;
@@ -698,9 +783,21 @@ public sealed class MpvPlayer : IMediaPlayer
         finally
         {
             InvalidateTrackCache();
+            ReleaseRemoteIsoProxyRoutes();
             ReleaseMountedIsoImage();
             ReleaseTemporaryPlaylist();
         }
+    }
+
+    private void ReleaseRemoteIsoProxyRoutes()
+    {
+        if (remoteIsoProxyRouteIds.Count == 0)
+        {
+            return;
+        }
+
+        RemoteIsoStreamProxy.Shared.Unregister(remoteIsoProxyRouteIds);
+        remoteIsoProxyRouteIds.Clear();
     }
 
     private void ReleaseTemporaryPlaylist()

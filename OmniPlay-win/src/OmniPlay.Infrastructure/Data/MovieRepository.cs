@@ -26,6 +26,7 @@ public sealed class MovieRepository : IMovieRepository
                                 movie.overview,
                                 movie.posterPath,
                                 movie.voteAverage,
+                                doubanMetadata.rating AS DoubanRating,
                                 movie.isLocked,
                                 movie.productionCountryCodes,
                                 movie.originalLanguage,
@@ -35,6 +36,8 @@ public sealed class MovieRepository : IMovieRepository
                 JOIN mediaSource ON mediaSource.id = videoFile.sourceId
                                 AND mediaSource.isEnabled = 1
                                 AND mediaSource.removedAt IS NULL
+                LEFT JOIN doubanMetadata ON doubanMetadata.itemKind = 'movie'
+                                        AND doubanMetadata.entityId = movie.id
                 ORDER BY movie.title COLLATE NOCASE ASC
                 """,
                 cancellationToken: cancellationToken));

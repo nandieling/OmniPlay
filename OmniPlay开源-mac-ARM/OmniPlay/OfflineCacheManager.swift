@@ -14,10 +14,32 @@ class OfflineCacheManager: ObservableObject {
     @Published var cachedFileNames: Set<String> = []
     @Published var cachedFileKeys: Set<String> = []
     @Published var cacheStatusMessage: String? = nil
+    @Published private(set) var queuedFileIDs: Set<String> = []
+    @Published private(set) var activeCacheTitle: String? = nil
+    @Published private(set) var currentCacheFileName: String? = nil
+    @Published private(set) var completedDownloadCount = 0
+    @Published private(set) var totalDownloadCount = 0
     
     // 无沙盒模式下，我们只需要存一个普通的字符串路径即可
     private let cachePathKey = "OfflineCacheDirectoryPath"
-    private let minimumFreeSpaceAfterCache: Int64 = 256 * 1024 * 1024
+    private let minimumFreeSpaceAfterCache: Int64 = 1 * 1024 * 1024 * 1024
+    private let downloadQueue = DispatchQueue(label: "com.omniplay.offline-cache.serial", qos: .utility)
+    private let cancellationLock = NSLock()
+    private var cancelledFileIDs: Set<String> = []
+    private var activeRemoteHandlers: [String: RemoteFileDownloadHandler] = [:]
+
+    var isCaching: Bool { totalDownloadCount > 0 }
+
+    var overallDownloadProgress: Double {
+        guard totalDownloadCount > 0 else { return 0 }
+        let currentProgress = downloadProgress.values.first ?? 0
+        return min(1, (Double(completedDownloadCount) + currentProgress) / Double(totalDownloadCount))
+    }
+
+    func progress(for file: VideoFile) -> Double? {
+        if let progress = downloadProgress[file.id] { return progress }
+        return queuedFileIDs.contains(file.id) ? 0 : nil
+    }
     
     private init() {
         loadCachePath()
@@ -64,6 +86,7 @@ class OfflineCacheManager: ObservableObject {
             while let url = enumerator?.nextObject() as? URL {
                 let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
                 guard values?.isRegularFile == true else { continue }
+                guard !url.lastPathComponent.hasSuffix(".part") else { continue }
                 fileNames.insert(url.lastPathComponent)
                 
                 let relativePath = url.path.replacingOccurrences(of: dir.path + "/", with: "")
@@ -88,7 +111,10 @@ class OfflineCacheManager: ObservableObject {
             return preferredURL
         }
         
-        let legacyURL = dir.appendingPathComponent(file.fileName)
+        let normalizedPath = file.relativePath.isEmpty
+            ? file.fileName
+            : file.relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let legacyURL = dir.appendingPathComponent(String(file.sourceId)).appendingPathComponent(normalizedPath)
         if FileManager.default.fileExists(atPath: legacyURL.path) {
             return legacyURL
         }
@@ -133,6 +159,22 @@ class OfflineCacheManager: ObservableObject {
     }
 
     @MainActor
+    func cancelDownloads(files: [VideoFile]) {
+        let requestedIDs = Set(files.map(\.id)).filter { fileID in
+            queuedFileIDs.contains(fileID) || downloadProgress[fileID] != nil
+        }
+        guard !requestedIDs.isEmpty else { return }
+
+        cancellationLock.lock()
+        cancelledFileIDs.formUnion(requestedIDs)
+        let handlers = requestedIDs.compactMap { activeRemoteHandlers[$0] }
+        cancellationLock.unlock()
+
+        handlers.forEach { $0.cancel() }
+        cacheStatusMessage = "正在取消离线缓存…"
+    }
+
+    @MainActor
     private func startDownloadsAfterPreflight(files: [VideoFile], groupTitle: String?) async {
         guard let cacheDir = cacheDirectory else {
             cacheStatusMessage = "请先在设置里选择离线缓存保存位置"
@@ -167,6 +209,16 @@ class OfflineCacheManager: ObservableObject {
                 cacheStatusMessage = "部分媒体源暂不支持离线缓存，已跳过"
             }
 
+            let trimmedTitle = groupTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if totalDownloadCount == 0 {
+                activeCacheTitle = trimmedTitle?.isEmpty == false ? trimmedTitle : "离线缓存"
+                completedDownloadCount = 0
+            } else if let trimmedTitle, !trimmedTitle.isEmpty, activeCacheTitle != trimmedTitle {
+                activeCacheTitle = "多个缓存任务"
+            }
+            totalDownloadCount += plan.files.count
+            queuedFileIDs.formUnion(plan.files.map(\.file.id))
+            cacheStatusMessage = nil
             for filePlan in plan.files {
                 startPreparedDownload(filePlan)
             }
@@ -178,47 +230,74 @@ class OfflineCacheManager: ObservableObject {
 
     private func startPreparedDownload(_ plan: CacheFilePlan) {
         let fileId = plan.file.id
-        DispatchQueue.main.async {
-            self.downloadProgress[fileId] = 0.01
-        }
-
-        DispatchQueue.global(qos: .utility).async {
+        downloadQueue.async {
+            let partialURL = plan.destinationURL.appendingPathExtension("part")
             do {
+                try self.throwIfCancellationRequested(fileId)
+                DispatchQueue.main.sync {
+                    self.queuedFileIDs.remove(fileId)
+                    self.currentCacheFileName = plan.file.fileName
+                    self.downloadProgress[fileId] = 0.01
+                }
                 try FileManager.default.createDirectory(at: plan.destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                if FileManager.default.fileExists(atPath: plan.destinationURL.path) {
-                    try FileManager.default.removeItem(at: plan.destinationURL)
+                if FileManager.default.fileExists(atPath: partialURL.path) {
+                    try FileManager.default.removeItem(at: partialURL)
                 }
 
                 switch plan.source {
                 case .local(let sourceURL):
                     try self.copyFileWithProgress(
                         from: sourceURL,
-                        to: plan.destinationURL,
+                        to: partialURL,
                         expectedBytes: plan.fileSize,
                         fileId: fileId
                     )
                 case .remote(let request):
                     try self.downloadRemoteFileWithProgress(
                         request: request,
-                        to: plan.destinationURL,
+                        to: partialURL,
                         expectedBytes: plan.fileSize,
                         fileId: fileId
                     )
                 }
+                try self.throwIfCancellationRequested(fileId)
+                try FileManager.default.moveItem(at: partialURL, to: plan.destinationURL)
+                self.clearCancellationRequest(fileId)
 
                 DispatchQueue.main.async {
                     self.downloadProgress.removeValue(forKey: fileId)
                     self.cachedFileNames.insert(plan.file.fileName)
                     self.cachedFileKeys.insert(self.cacheKey(for: plan.file))
+                    self.finishPreparedDownload()
                     self.cacheStatusMessage = "《\(plan.file.fileName)》缓存完成"
                 }
             } catch {
-                print("❌ 离线缓存物理拷贝失败: \(error)")
+                try? FileManager.default.removeItem(at: partialURL)
+                let wasCancelled = self.isCancellationRequested(fileId) || error is CacheTransferError
+                self.clearCancellationRequest(fileId)
+                if !wasCancelled {
+                    print("❌ 离线缓存物理拷贝失败: \(error)")
+                }
                 DispatchQueue.main.async {
                     self.downloadProgress.removeValue(forKey: fileId)
-                    self.cacheStatusMessage = "《\(plan.file.fileName)》缓存失败"
+                    self.queuedFileIDs.remove(fileId)
+                    self.finishPreparedDownload()
+                    self.cacheStatusMessage = wasCancelled
+                        ? "《\(plan.file.fileName)》已取消缓存"
+                        : "《\(plan.file.fileName)》缓存失败"
                 }
             }
+        }
+    }
+
+    private func finishPreparedDownload() {
+        completedDownloadCount += 1
+        currentCacheFileName = nil
+        if completedDownloadCount >= totalDownloadCount {
+            completedDownloadCount = 0
+            totalDownloadCount = 0
+            activeCacheTitle = nil
+            queuedFileIDs.removeAll()
         }
     }
 
@@ -241,6 +320,10 @@ class OfflineCacheManager: ObservableObject {
         var totalBytes: Int64 {
             files.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
         }
+    }
+
+    private enum CacheTransferError: Error {
+        case cancelled
     }
 
     private func buildCachePlan(files: [VideoFile], cacheDir: URL) async throws -> CachePlan {
@@ -274,12 +357,18 @@ class OfflineCacheManager: ObservableObject {
                     continue
                 }
                 let fileSize = fileSize(at: sourceURL)
+                guard fileSize > 0 else {
+                    throw cachePreparationError("无法读取《\(file.fileName)》的文件大小，未开始缓存。")
+                }
                 plannedFiles.append(CacheFilePlan(file: file, source: .local(sourceURL), destinationURL: destinationURL, fileSize: fileSize))
             case .webdav:
                 guard let request = webDAVDownloadRequest(for: file, mediaSource: source) else {
                     continue
                 }
                 let fileSize = await remoteFileSize(for: request, fallback: file.fileSize)
+                guard fileSize > 0 else {
+                    throw cachePreparationError("服务器未提供《\(file.fileName)》的文件大小，无法完成存储空间预检。")
+                }
                 plannedFiles.append(CacheFilePlan(file: file, source: .remote(request), destinationURL: destinationURL, fileSize: fileSize))
             case .plex, .emby, .jellyfin, .omniplayDocker:
                 skippedUnsupportedCount += 1
@@ -287,6 +376,14 @@ class OfflineCacheManager: ObservableObject {
         }
 
         return CachePlan(files: plannedFiles, skippedUnsupportedCount: skippedUnsupportedCount)
+    }
+
+    private func cachePreparationError(_ message: String) -> NSError {
+        NSError(
+            domain: "OfflineCacheManager.Preflight",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: message]
+        )
     }
 
     private func copyFileWithProgress(from sourceURL: URL, to destinationURL: URL, expectedBytes: Int64, fileId: String) throws {
@@ -300,6 +397,7 @@ class OfflineCacheManager: ObservableObject {
         var copiedBytes: Int64 = 0
         var lastReportedBytes: Int64 = 0
         while true {
+            try throwIfCancellationRequested(fileId)
             let data = try input.read(upToCount: bufferSize) ?? Data()
             if data.isEmpty { break }
             try output.write(contentsOf: data)
@@ -324,7 +422,36 @@ class OfflineCacheManager: ObservableObject {
                 self.downloadProgress[fileId] = progress
             }
         }
+        cancellationLock.lock()
+        activeRemoteHandlers[fileId] = handler
+        let shouldCancel = cancelledFileIDs.contains(fileId)
+        cancellationLock.unlock()
+        if shouldCancel { handler.cancel() }
+        defer {
+            cancellationLock.lock()
+            activeRemoteHandlers.removeValue(forKey: fileId)
+            cancellationLock.unlock()
+        }
         try handler.download(request: request, configuration: remoteSessionConfiguration())
+    }
+
+    private func throwIfCancellationRequested(_ fileId: String) throws {
+        if isCancellationRequested(fileId) {
+            throw CacheTransferError.cancelled
+        }
+    }
+
+    private func isCancellationRequested(_ fileId: String) -> Bool {
+        cancellationLock.lock()
+        defer { cancellationLock.unlock() }
+        return cancelledFileIDs.contains(fileId)
+    }
+
+    private func clearCancellationRequest(_ fileId: String) {
+        cancellationLock.lock()
+        cancelledFileIDs.remove(fileId)
+        activeRemoteHandlers.removeValue(forKey: fileId)
+        cancellationLock.unlock()
     }
 
     private func remoteFileSize(for request: URLRequest, fallback: Int64) async -> Int64 {
@@ -479,8 +606,7 @@ class OfflineCacheManager: ObservableObject {
     }
     
     private func cachedURL(for file: VideoFile, in dir: URL) -> URL {
-        let normalizedPath = file.relativePath.isEmpty ? file.fileName : file.relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        return dir.appendingPathComponent(String(file.sourceId)).appendingPathComponent(normalizedPath)
+        dir.appendingPathComponent(file.fileName)
     }
     
     private func sourceFileURL(for file: VideoFile, mediaSource: MediaSource) -> URL {
@@ -490,7 +616,7 @@ class OfflineCacheManager: ObservableObject {
     }
 }
 
-private final class RemoteFileDownloadHandler: NSObject, URLSessionDownloadDelegate {
+private final class RemoteFileDownloadHandler: NSObject, URLSessionDataDelegate {
     private let destinationURL: URL
     private let expectedBytes: Int64
     private let fileId: String
@@ -499,8 +625,13 @@ private final class RemoteFileDownloadHandler: NSObject, URLSessionDownloadDeleg
     private let lock = NSLock()
 
     private var session: URLSession?
+    private var dataTask: URLSessionDataTask?
     private var result: Result<Void, Error>?
     private var hasSignaled = false
+    private var isCancelled = false
+    private var outputHandle: FileHandle?
+    private var receivedBytes: Int64 = 0
+    private var responseExpectedBytes: Int64 = 0
 
     init(destinationURL: URL, expectedBytes: Int64, fileId: String, progressHandler: @escaping (Double) -> Void) {
         self.destinationURL = destinationURL
@@ -510,56 +641,95 @@ private final class RemoteFileDownloadHandler: NSObject, URLSessionDownloadDeleg
     }
 
     func download(request: URLRequest, configuration: URLSessionConfiguration) throws {
+        FileManager.default.createFile(atPath: destinationURL.path, contents: nil)
+        outputHandle = try FileHandle(forWritingTo: destinationURL)
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         self.session = session
-        session.downloadTask(with: request).resume()
+        let task = session.dataTask(with: request)
+        lock.lock()
+        dataTask = task
+        let shouldCancel = isCancelled
+        lock.unlock()
+        if shouldCancel {
+            task.cancel()
+            signalIfNeeded(.failure(URLError(.cancelled)))
+        } else {
+            task.resume()
+        }
         semaphore.wait()
         session.finishTasksAndInvalidate()
         self.session = nil
+        self.dataTask = nil
+        try? outputHandle?.close()
+        outputHandle = nil
 
         let finalResult = lockedResult() ?? .failure(downloadError(message: "远程下载未返回结果"))
-        try finalResult.get()
+        do {
+            try finalResult.get()
+        } catch {
+            try? FileManager.default.removeItem(at: destinationURL)
+            throw error
+        }
+    }
+
+    func cancel() {
+        lock.lock()
+        isCancelled = true
+        let task = dataTask
+        lock.unlock()
+        task?.cancel()
     }
 
     func urlSession(
         _ session: URLSession,
-        downloadTask: URLSessionDownloadTask,
-        didWriteData bytesWritten: Int64,
-        totalBytesWritten: Int64,
-        totalBytesExpectedToWrite: Int64
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
-        let resolvedExpected = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : expectedBytes
-        let progress = resolvedExpected > 0
-            ? min(0.999, max(0.01, Double(totalBytesWritten) / Double(resolvedExpected)))
-            : 0.5
-        progressHandler(progress)
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        if let http = downloadTask.response as? HTTPURLResponse,
-           !(200...299).contains(http.statusCode) {
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             storeResult(.failure(downloadError(message: "远程下载失败：HTTP \(http.statusCode)")))
-            try? FileManager.default.removeItem(at: location)
+            completionHandler(.cancel)
             return
         }
+        responseExpectedBytes = response.expectedContentLength > 0 ? response.expectedContentLength : expectedBytes
+        completionHandler(.allow)
+    }
 
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         do {
-            if FileManager.default.fileExists(atPath: destinationURL.path) {
-                try FileManager.default.removeItem(at: destinationURL)
-            }
-            try FileManager.default.moveItem(at: location, to: destinationURL)
-            progressHandler(0.999)
-            storeResult(.success(()))
+            try outputHandle?.write(contentsOf: data)
+            receivedBytes += Int64(data.count)
+            let resolvedExpected = responseExpectedBytes > 0 ? responseExpectedBytes : expectedBytes
+            let progress = resolvedExpected > 0
+                ? min(0.999, max(0.01, Double(receivedBytes) / Double(resolvedExpected)))
+                : 0.5
+            progressHandler(progress)
         } catch {
             storeResult(.failure(error))
+            dataTask.cancel()
         }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let serverTrust = challenge.protectionSpace.serverTrust,
+              LocalNetworkTrustSessionDelegate.isLocalOrPrivateHost(challenge.protectionSpace.host) else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: serverTrust))
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error {
             signalIfNeeded(.failure(error))
         } else {
-            signalIfNeeded(nil)
+            progressHandler(0.999)
+            signalIfNeeded(.success(()))
         }
     }
 

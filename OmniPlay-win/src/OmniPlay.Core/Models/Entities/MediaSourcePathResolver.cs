@@ -47,7 +47,7 @@ public static class MediaSourcePathResolver
             MediaSourceProtocol.WebDav => ResolveWebDavUrl(baseUrl, normalizedRelativePath),
             MediaSourceProtocol.Smb => ResolveLocalPath(baseUrl, normalizedRelativePath),
             MediaSourceProtocol.Direct => normalizedRelativePath,
-            MediaSourceProtocol.Plex or MediaSourceProtocol.Emby or MediaSourceProtocol.Jellyfin =>
+            MediaSourceProtocol.Plex or MediaSourceProtocol.Emby or MediaSourceProtocol.Jellyfin or MediaSourceProtocol.OmniPlayDocker =>
                 ResolveMediaServerUrl(baseUrl, normalizedRelativePath),
             _ => string.Empty
         };
@@ -79,6 +79,7 @@ public static class MediaSourcePathResolver
                 ResolveMediaServerUrl(baseUrl, normalizedRelativePath),
                 "api_key",
                 MediaSourceAuthConfigSerializer.DeserializeMediaServer(authConfig)?.Token),
+            MediaSourceProtocol.OmniPlayDocker => ResolveMediaServerUrl(baseUrl, normalizedRelativePath),
             _ => ResolvePlaybackPath(protocol, baseUrl, relativePath)
         };
     }

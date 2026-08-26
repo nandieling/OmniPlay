@@ -56,7 +56,13 @@ class PosterManager {
         
         Task {
             do {
-                let (data, _) = try await URLSession.shared.data(from: url)
+                let (data, response) = try await URLSession.shared.data(from: url)
+                if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                    throw URLError(.badServerResponse)
+                }
+                guard NSImage(data: data) != nil else {
+                    throw URLError(.cannotDecodeContentData)
+                }
                 try data.write(to: destinationURL)
                 
                 // 🌟 魔法：下载完成后，精准通知 UI 瞬间刷新这张海报
@@ -81,6 +87,7 @@ class PosterManager {
 struct CachedPosterView: View {
     let posterPath: String?
     @State private var nsImage: NSImage? = nil
+    @State private var loadedPosterPath: String? = nil
     
     var body: some View {
         Group {
@@ -98,6 +105,11 @@ struct CachedPosterView: View {
             }
         }
         .onAppear(perform: loadImage)
+        .onChange(of: posterPath) { _, _ in
+            nsImage = nil
+            loadedPosterPath = nil
+            loadImage()
+        }
         // 监听下载完成的广播，实现“无缝自愈”
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PosterUpdated_\(PosterManager.shared.cacheFileName(for: posterPath ?? ""))"))) { _ in
             loadImage()
@@ -105,15 +117,29 @@ struct CachedPosterView: View {
     }
     
     private func loadImage() {
-        guard let path = posterPath, !path.isEmpty else { return }
+        guard let path = posterPath, !path.isEmpty else {
+            self.nsImage = nil
+            self.loadedPosterPath = nil
+            return
+        }
+        guard loadedPosterPath != path || nsImage == nil else { return }
         
         // 1. 本地有，直接秒开读取
-        if let localURL = PosterManager.shared.getLocalPosterURL(for: path),
-           let data = try? Data(contentsOf: localURL),
-           let image = NSImage(data: data) {
-            self.nsImage = image
+        if let localURL = PosterManager.shared.getLocalPosterURL(for: path) {
+            if let data = try? Data(contentsOf: localURL),
+               let image = NSImage(data: data) {
+                self.nsImage = image
+                self.loadedPosterPath = path
+            } else {
+                try? FileManager.default.removeItem(at: localURL)
+                self.nsImage = nil
+                self.loadedPosterPath = nil
+                PosterManager.shared.downloadPoster(posterPath: path)
+            }
         } else {
             // 2. 本地没有（比如沙盒迁移丢了），后台立刻静默补下！
+            self.nsImage = nil
+            self.loadedPosterPath = nil
             PosterManager.shared.downloadPoster(posterPath: path)
         }
     }

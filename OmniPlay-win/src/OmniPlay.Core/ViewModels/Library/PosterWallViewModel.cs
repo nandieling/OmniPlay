@@ -38,6 +38,8 @@ public partial class PosterWallViewModel : ObservableObject
     private readonly INetworkShareDiscoveryService networkShareDiscoveryService;
     private readonly INetworkCredentialStore networkCredentialStore;
     private readonly IMediaServerPreflightService? mediaServerPreflightService;
+    private readonly IOmniPlayDockerClient? omniPlayDockerClient;
+    private readonly IDoubanMetadataService? doubanMetadataService;
     private readonly IPlaybackLauncher playbackLauncher;
     private readonly List<Movie> allMovies = [];
     private readonly List<TvShow> allTvShows = [];
@@ -96,7 +98,9 @@ public partial class PosterWallViewModel : ObservableObject
         SettingsViewModel settings,
         PlayerViewModel player,
         IMediaServerPreflightService? mediaServerPreflightService = null,
-        ITmdbConnectionTester? tmdbConnectionTester = null)
+        ITmdbConnectionTester? tmdbConnectionTester = null,
+        IOmniPlayDockerClient? omniPlayDockerClient = null,
+        IDoubanMetadataService? doubanMetadataService = null)
     {
         this.movieRepository = movieRepository;
         this.tvShowRepository = tvShowRepository;
@@ -113,6 +117,8 @@ public partial class PosterWallViewModel : ObservableObject
         this.networkShareDiscoveryService = networkShareDiscoveryService;
         this.networkCredentialStore = networkCredentialStore;
         this.mediaServerPreflightService = mediaServerPreflightService;
+        this.omniPlayDockerClient = omniPlayDockerClient;
+        this.doubanMetadataService = doubanMetadataService;
         this.playbackLauncher = playbackLauncher;
 
         Settings = settings;
@@ -187,6 +193,7 @@ public partial class PosterWallViewModel : ObservableObject
         OpenPosterEditCommand = new AsyncRelayCommand<LibraryPosterItem?>(OpenPosterEditAsync, item => item is not null);
         ClosePosterEditCommand = new RelayCommand(ClosePosterEdit);
         ChoosePosterImageCommand = new AsyncRelayCommand(ChoosePosterImageAsync, () => isPosterEditPanelOpen && !IsBusy);
+        BindPosterDoubanCommand = new AsyncRelayCommand(BindPosterDoubanAsync, () => posterMetadataTarget is not null && !IsBusy);
         SavePosterMetadataEditCommand = new AsyncRelayCommand(SavePosterMetadataEditAsync, () => posterMetadataTarget is not null && !IsBusy);
         OpenEpisodeEditCommand = new RelayCommand<LibraryVideoItem?>(OpenEpisodeEdit, video => video is not null && IsDetailSeries);
         CloseEpisodeEditCommand = new RelayCommand(CloseEpisodeEdit);
@@ -198,6 +205,11 @@ public partial class PosterWallViewModel : ObservableObject
         ToggleSourceEnabledCommand = new AsyncRelayCommand<MediaSource?>(
             ToggleSourceEnabledAsync,
             source => source?.Id is not null && (!IsBusy || source.IsEnabled));
+        CheckSourceConnectivityCommand = new AsyncRelayCommand<MediaSource?>(
+            CheckSourceConnectivityAsync,
+            source => source?.Id is not null && !IsBusy);
+        AddPendingExternalAddressCommand = new RelayCommand(AddPendingExternalAddress);
+        RemovePendingExternalAddressCommand = new RelayCommand<MediaSourceExternalAddress?>(RemovePendingExternalAddress);
         RefreshNetworkSourcesCommand = new AsyncRelayCommand(RefreshNetworkSourcesAsync, () => !networkDiscoveryInProgress);
         OpenNetworkLoginCommand = new RelayCommand<NetworkSourceDiscoveryItem?>(OpenNetworkLogin, item => item is not null && (!IsBusy || IsLibraryScanInProgress));
         OpenManualNetworkLoginCommand = new RelayCommand(OpenManualNetworkLogin, () => !IsBusy || IsLibraryScanInProgress);
@@ -219,6 +231,7 @@ public partial class PosterWallViewModel : ObservableObject
         ClosePlayerOverlayCommand = new AsyncRelayCommand(ClosePlayerOverlayAsync, () => IsPlayerOverlayOpen);
 
         Settings.SettingsSaved += OnSettingsSaved;
+        Settings.LuckyStunAddressUpdated += OnLuckyStunAddressUpdated;
         Player.PropertyChanged += OnPlayerPropertyChanged;
         selectedSortOptionItem = SortOptions[0];
         RefreshSortOptionSelectionStates();
@@ -234,6 +247,8 @@ public partial class PosterWallViewModel : ObservableObject
     public ObservableCollection<NetworkSourceDiscoveryItem> DiscoveredNetworkSources { get; } = [];
 
     public ObservableCollection<NetworkShareFolderItem> NetworkShareFolders { get; } = [];
+
+    public ObservableCollection<MediaSourceExternalAddress> PendingExternalAddresses { get; } = [];
 
     public ObservableCollection<LibraryVideoItem> DetailFiles { get; } = [];
 
@@ -252,6 +267,7 @@ public partial class PosterWallViewModel : ObservableObject
 
     public IReadOnlyList<SettingsOptionItem> MediaServerProtocolOptions { get; } =
     [
+        new("omniplay-docker", "OmniPlay Docker"),
         new("plex", "Plex"),
         new("emby", "Emby"),
         new("jellyfin", "Jellyfin")
@@ -259,6 +275,7 @@ public partial class PosterWallViewModel : ObservableObject
 
     public string PendingMediaServerAddressWatermark => NormalizeMediaServerProtocolType(PendingMediaServerProtocolType) switch
     {
+        "omniplay-docker" => "OmniPlay Docker 地址，例如 http://127.0.0.1:45722",
         "plex" => "Plex 地址，例如 http://127.0.0.1:32400",
         "emby" => "Emby 地址，例如 http://127.0.0.1:8096",
         "jellyfin" => "Jellyfin 地址，例如 http://127.0.0.1:8096",
@@ -267,11 +284,14 @@ public partial class PosterWallViewModel : ObservableObject
 
     public string PendingMediaServerUserWatermark => "用户名 / 用户 ID（可选）";
 
-    public string PendingMediaServerTokenWatermark => NormalizeMediaServerProtocolType(PendingMediaServerProtocolType) == "plex"
-        ? "Plex 访问令牌（X-Plex-Token）"
-        : "密码 / API Key / 访问令牌";
+    public string PendingMediaServerTokenWatermark => NormalizeMediaServerProtocolType(PendingMediaServerProtocolType) switch
+    {
+        "plex" => "Plex 访问令牌（X-Plex-Token）",
+        "omniplay-docker" => "OmniPlay Docker session cookie（无登录可留空）",
+        _ => "密码 / API Key / 访问令牌"
+    };
 
-    public bool PendingMediaServerUsesUserId => NormalizeMediaServerProtocolType(PendingMediaServerProtocolType) != "plex";
+    public bool PendingMediaServerUsesUserId => NormalizeMediaServerProtocolType(PendingMediaServerProtocolType) is not ("plex" or "omniplay-docker");
 
     public bool PendingMediaServerUsesPlex => NormalizeMediaServerProtocolType(PendingMediaServerProtocolType) == "plex";
 
@@ -373,6 +393,8 @@ public partial class PosterWallViewModel : ObservableObject
 
     public IAsyncRelayCommand ChoosePosterImageCommand { get; }
 
+    public IAsyncRelayCommand BindPosterDoubanCommand { get; }
+
     public IAsyncRelayCommand SavePosterMetadataEditCommand { get; }
 
     public IRelayCommand<LibraryVideoItem?> OpenEpisodeEditCommand { get; }
@@ -390,6 +412,12 @@ public partial class PosterWallViewModel : ObservableObject
     public IAsyncRelayCommand<MediaSource?> RemoveSourceCommand { get; }
 
     public IAsyncRelayCommand<MediaSource?> ToggleSourceEnabledCommand { get; }
+
+    public IAsyncRelayCommand<MediaSource?> CheckSourceConnectivityCommand { get; }
+
+    public IRelayCommand AddPendingExternalAddressCommand { get; }
+
+    public IRelayCommand<MediaSourceExternalAddress?> RemovePendingExternalAddressCommand { get; }
 
     public IAsyncRelayCommand RefreshNetworkSourcesCommand { get; }
 
@@ -472,7 +500,7 @@ public partial class PosterWallViewModel : ObservableObject
     private string pendingNetworkPassword = string.Empty;
 
     [ObservableProperty]
-    private bool isNetworkPasswordVisible;
+        private bool isNetworkPasswordVisible;
 
     [ObservableProperty]
     private string networkSourceStatus = string.Empty;
@@ -572,6 +600,9 @@ public partial class PosterWallViewModel : ObservableObject
 
     [ObservableProperty]
     private string pendingPlaybackDisplayPath = string.Empty;
+
+    [ObservableProperty]
+    private string pendingPlaybackMediaFileName = string.Empty;
 
     [ObservableProperty]
     private double pendingPlaybackStartPositionSeconds;
@@ -677,6 +708,12 @@ public partial class PosterWallViewModel : ObservableObject
 
     [ObservableProperty]
     private string posterEditPosterPath = string.Empty;
+
+    [ObservableProperty]
+    private string posterDoubanSubject = string.Empty;
+
+    [ObservableProperty]
+    private string posterDoubanStatus = string.Empty;
 
     private LibraryPosterItem? posterMetadataTarget;
 
@@ -975,27 +1012,13 @@ public partial class PosterWallViewModel : ObservableObject
                 var sourceSummary = await libraryScanner.ScanSourceAsync(
                     source.Id!.Value,
                     cancellationToken,
-                    skipTmdbArtwork
-                        ? null
-                        : async (item, token) =>
-                        {
-                            StatusMessage = item.IsTvShow
-                                ? $"正在刮削剧集元数据和海报：{item.Title}..."
-                                : $"正在刮削电影元数据和海报：{item.Title}...";
-                            await ReloadLibraryAsync();
-                            await RefreshIndexedScanItemArtworkAsync(item, token);
-                        },
+                    afterItemIndexed: null,
                     deferUnidentifiedGroups: true);
                 aggregate.Add(sourceSummary);
                 LastScanSummary = aggregate.ToSummary();
 
                 await ReloadLibraryAsync();
                 cancellationToken.ThrowIfCancellationRequested();
-                if (!skipTmdbArtwork)
-                {
-                    StatusMessage = $"正在刮削元数据和海报：{source.Name}...";
-                    await RefreshLibraryArtworkAsync(isExplicitRequest, forceThumbnails: false, cancellationToken);
-                }
             }
 
             cancellationToken.ThrowIfCancellationRequested();
@@ -1016,8 +1039,23 @@ public partial class PosterWallViewModel : ObservableObject
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 await ReloadLibraryAsync();
-                StatusMessage = "正在刮削分集剧照...";
+                if (!await EnsureTmdbAvailableForPendingArtworkAsync(isExplicitRequest, forceThumbnails: true, cancellationToken))
+                {
+                    return aggregate.ToSummary();
+                }
+
+                StatusMessage = "正在刮削元数据和分集剧照...";
                 await RefreshLibraryArtworkAsync(isExplicitRequest, forceThumbnails: true, cancellationToken);
+            }
+            else if (!skipTmdbArtwork)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await ReloadLibraryAsync();
+                if (await EnsureTmdbAvailableForPendingArtworkAsync(isExplicitRequest, forceThumbnails: false, cancellationToken))
+                {
+                    StatusMessage = "正在刮削元数据和海报...";
+                    await RefreshLibraryArtworkAsync(isExplicitRequest, forceThumbnails: false, cancellationToken);
+                }
             }
             else if (skipTmdbArtwork)
             {
@@ -1031,6 +1069,46 @@ public partial class PosterWallViewModel : ObservableObject
         }
 
         return aggregate.ToSummary();
+    }
+
+    private async Task<bool> EnsureTmdbAvailableForPendingArtworkAsync(
+        bool isExplicitRequest,
+        bool forceThumbnails,
+        CancellationToken cancellationToken)
+    {
+        var tmdbSettings = Settings.BuildTmdbSettings();
+        var needsMetadata = NeedsMetadataRefresh(tmdbSettings);
+        var needsThumbnails = ShouldRefreshThumbnails(tmdbSettings, forceThumbnails);
+        if (!needsMetadata && !needsThumbnails)
+        {
+            StatusMessage = "当前媒体库已无需刮削的内容。";
+            return false;
+        }
+
+        if (tmdbConnectionTester is null)
+        {
+            return true;
+        }
+
+        StatusMessage = "正在检测 TMDB API 连通性...";
+        var connection = await tmdbConnectionTester.TestConnectionAsync(tmdbSettings, cancellationToken);
+        if (connection.Success)
+        {
+            return true;
+        }
+
+        if (isExplicitRequest)
+        {
+            StatusMessage = $"TMDB API 无法连接，已保留未刮削条目：{connection.Message}";
+        }
+        else
+        {
+            StartupTmdbAlertMessage = $"建议添加自己的 TMDB API 后再刮削海报与影视信息。\n{connection.Message}";
+            IsStartupTmdbAlertOpen = true;
+            StatusMessage = "TMDB API 无法连接，已完成本地扫描。";
+        }
+
+        return false;
     }
 
     public async Task AddFolderSourceAsync()
@@ -1211,8 +1289,10 @@ public partial class PosterWallViewModel : ObservableObject
         IsPlayerOverlayOpen = true;
         PendingPlaybackFilePath = string.Empty;
         PendingPlaybackDisplayPath = string.Empty;
+        PendingPlaybackMediaFileName = string.Empty;
         PendingPlaybackFilePath = filePath;
         PendingPlaybackDisplayPath = filePath;
+        PendingPlaybackMediaFileName = Path.GetFileName(filePath);
         PendingPlaybackStartPositionSeconds = 0;
         currentPlaybackMode = PlaybackMode.Overlay;
         currentPlayingVideoId = string.Empty;
@@ -1262,6 +1342,7 @@ public partial class PosterWallViewModel : ObservableObject
                 Subtitle = FormatMovieSubtitle(movie),
                 PosterPath = movie.PosterPath,
                 VoteAverage = movie.VoteAverage,
+                DoubanRating = movie.DoubanRating,
                 MediaKind = "\u7535\u5F71",
                 IsContinuing = continuingIds.Contains(itemId),
                 WatchState = watchState,
@@ -1283,6 +1364,7 @@ public partial class PosterWallViewModel : ObservableObject
                 Subtitle = FormatTvShowSubtitle(show),
                 PosterPath = show.PosterPath,
                 VoteAverage = show.VoteAverage,
+                DoubanRating = show.DoubanRating,
                 MediaKind = "\u5267\u96C6",
                 IsContinuing = groupIds.Any(continuingIds.Contains),
                 WatchState = watchState,
@@ -1381,7 +1463,12 @@ public partial class PosterWallViewModel : ObservableObject
         {
             ClearDetailMetadataCandidates();
         }
-        DetailRatingText = voteAverage.HasValue ? $"\u8BC4\u5206 {voteAverage.Value:F1}" : "\u8BC4\u5206\u5F85\u8865\u5145";
+        var doubanRating = currentDetailMovieId.HasValue
+            ? allMovies.FirstOrDefault(movie => movie.Id == currentDetailMovieId.Value)?.DoubanRating
+            : currentDetailTvShowId.HasValue
+                ? allTvShows.FirstOrDefault(show => show.Id == currentDetailTvShowId.Value)?.DoubanRating
+                : null;
+        DetailRatingText = FormatCombinedRatingText(voteAverage, doubanRating);
         DetailCollectionHeading = isSeries ? "\u5206\u96C6\u5217\u8868" : "\u6587\u4EF6\u5217\u8868";
         DetailFileSummary = "\u6B63\u5728\u8BFB\u53D6\u6587\u4EF6...";
 
@@ -1482,19 +1569,6 @@ public partial class PosterWallViewModel : ObservableObject
         try
         {
             await Task.Delay(TimeSpan.FromMilliseconds(750), cancellationToken);
-            if (tmdbConnectionTester is not null)
-            {
-                StatusMessage = "正在检测 TMDB API 连通性...";
-                var connection = await tmdbConnectionTester.TestConnectionAsync(Settings.BuildTmdbSettings(), cancellationToken);
-                if (!connection.Success)
-                {
-                    StartupTmdbAlertMessage = $"建议添加自己的 TMDB API 后再刮削海报与影视信息。\n{connection.Message}";
-                    IsStartupTmdbAlertOpen = true;
-                    StatusMessage = "TMDB API 无法连接。";
-                    return;
-                }
-            }
-
             StatusMessage = "正在后台扫描媒体源...";
             LastScanSummary = await RunLibraryScanAndArtworkAsync(
                 isExplicitRequest: false,
@@ -1820,6 +1894,14 @@ public partial class PosterWallViewModel : ObservableObject
             return;
         }
 
+        var dockerPlaybackStartPosition = await TryRefreshOmniPlayDockerProgressAsync(video);
+        var effectivePlaybackPath = await ResolveEffectivePlaybackPathAsync(video);
+        if (string.IsNullOrWhiteSpace(effectivePlaybackPath))
+        {
+            StatusMessage = $"无法获取播放地址：{video.FileName}";
+            return;
+        }
+
         if (currentPlaybackMode == PlaybackMode.Standalone)
         {
             await playbackLauncher.CloseAsync();
@@ -1830,16 +1912,20 @@ public partial class PosterWallViewModel : ObservableObject
         }
 
         ApplyPreferredDetailVideoSelection(video);
-        var playbackStartPosition = nextPlaybackStartPositionOverride ?? GetPlaybackStartPosition(video);
+        var playbackStartPosition = nextPlaybackStartPositionOverride
+            ?? dockerPlaybackStartPosition
+            ?? GetPlaybackStartPosition(video);
         nextPlaybackStartPositionOverride = null;
         ApplyPlaybackPreferencesToPlayer();
 
         IsPlayerOverlayOpen = true;
         PendingPlaybackFilePath = string.Empty;
         PendingPlaybackDisplayPath = string.Empty;
+        PendingPlaybackMediaFileName = string.Empty;
         PendingPlaybackStartPositionSeconds = playbackStartPosition ?? 0;
-        PendingPlaybackFilePath = video.EffectivePlaybackPath;
+        PendingPlaybackFilePath = effectivePlaybackPath;
         PendingPlaybackDisplayPath = video.AbsolutePath;
+        PendingPlaybackMediaFileName = video.FileName;
         currentPlaybackMode = PlaybackMode.Overlay;
         currentPlayingVideoId = video.Id;
         suppressedPlaybackPersistenceVideoId = null;
@@ -1864,6 +1950,102 @@ public partial class PosterWallViewModel : ObservableObject
         {
             nextPlaybackStartPositionOverride = null;
         }
+    }
+
+    private async Task<string?> ResolveEffectivePlaybackPathAsync(LibraryVideoItem video)
+    {
+        if (!string.Equals(video.SourceProtocolType, "omniplay-docker", StringComparison.OrdinalIgnoreCase))
+        {
+            return video.EffectivePlaybackPath;
+        }
+
+        if (omniPlayDockerClient is null || !TryResolveOmniPlayDockerRemoteFileId(video.Id, video.RelativePath, out var remoteFileId))
+        {
+            return video.EffectivePlaybackPath;
+        }
+
+        try
+        {
+            return await omniPlayDockerClient.GetPlaybackUrlAsync(
+                video.SourceBasePath,
+                video.SourceAuthConfig,
+                remoteFileId);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or TaskCanceledException)
+        {
+            StatusMessage = $"OmniPlay Docker 播放地址获取失败：{ex.Message}";
+            return null;
+        }
+    }
+
+    private async Task<double?> TryRefreshOmniPlayDockerProgressAsync(LibraryVideoItem video)
+    {
+        if (!string.Equals(video.SourceProtocolType, "omniplay-docker", StringComparison.OrdinalIgnoreCase) ||
+            omniPlayDockerClient is null ||
+            !TryResolveOmniPlayDockerRemoteFileId(video.Id, video.RelativePath, out var remoteFileId))
+        {
+            return null;
+        }
+
+        try
+        {
+            var remote = await omniPlayDockerClient.GetPlaybackProgressAsync(
+                video.SourceBasePath,
+                video.SourceAuthConfig,
+                remoteFileId);
+            if (remote is null)
+            {
+                return null;
+            }
+
+            var duration = Math.Max(video.Duration, remote.DurationSeconds);
+            await videoFileRepository.UpdatePlaybackStateAsync(
+                video.Id,
+                Math.Max(remote.PositionSeconds, 0),
+                duration > 0 ? duration : null);
+
+            if (remote.IsWatched || remote.PositionSeconds <= 5)
+            {
+                return null;
+            }
+
+            if (duration > 0 && remote.PositionSeconds >= duration - 5)
+            {
+                return null;
+            }
+
+            return Math.Min(remote.PositionSeconds, duration > 0 ? Math.Max(duration - 5, 0) : remote.PositionSeconds);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or TaskCanceledException)
+        {
+            return null;
+        }
+    }
+
+    private static bool TryResolveOmniPlayDockerRemoteFileId(string localFileId, string relativePath, out string remoteFileId)
+    {
+        remoteFileId = string.Empty;
+        var idParts = localFileId.Split(':', 3);
+        if (idParts.Length == 3 &&
+            string.Equals(idParts[0], "omniplay-docker", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(idParts[2]))
+        {
+            remoteFileId = Uri.UnescapeDataString(idParts[2]);
+            return true;
+        }
+
+        var parts = relativePath.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length >= 5 &&
+            string.Equals(parts[0], "api", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(parts[1], "playback", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(parts[2], "files", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(parts[4], "stream", StringComparison.OrdinalIgnoreCase))
+        {
+            remoteFileId = Uri.UnescapeDataString(parts[3]);
+            return true;
+        }
+
+        return false;
     }
 
     private Task OpenStandalonePlayerAsync(LibraryVideoItem? video)
@@ -1916,10 +2098,16 @@ public partial class PosterWallViewModel : ObservableObject
 
         ApplyPreferredDetailVideoSelection(video);
         var playbackStartPosition = GetPlaybackStartPosition(video);
+        var effectivePlaybackPath = await ResolveEffectivePlaybackPathAsync(video);
+        if (string.IsNullOrWhiteSpace(effectivePlaybackPath))
+        {
+            StatusMessage = $"无法获取独立播放地址：{video.FileName}";
+            return;
+        }
         ApplyPlaybackPreferencesToPlayer();
 
         var opened = await playbackLauncher.OpenAsync(
-            new PlaybackOpenRequest(video.EffectivePlaybackPath, video.AbsolutePath),
+            new PlaybackOpenRequest(effectivePlaybackPath, video.AbsolutePath, video.FileName),
             result => HandleStandalonePlaybackClosedAsync(video.Id, video.FileName, result),
             playbackStartPosition,
             replaceCurrentSession || isReplacingStandaloneSession);
@@ -2779,6 +2967,10 @@ public partial class PosterWallViewModel : ObservableObject
             ? allMovies.FirstOrDefault(movie => movie.Id == item.MovieId.Value)?.Overview ?? string.Empty
             : allTvShows.FirstOrDefault(show => show.Id == item.TvShowId!.Value)?.Overview ?? string.Empty;
         PosterEditPosterPath = item.PosterPath ?? string.Empty;
+        PosterDoubanSubject = string.Empty;
+        PosterDoubanStatus = item.DoubanRating.HasValue
+            ? $"已绑定豆瓣评分 {item.DoubanRating.Value:F1}"
+            : "可填写豆瓣 subject ID 或链接进行手动绑定。";
         IsPosterScrapePanelOpen = false;
         ReplaceItems(PosterMetadataCandidates, []);
         IsPosterEditPanelOpen = true;
@@ -2789,6 +2981,8 @@ public partial class PosterWallViewModel : ObservableObject
     {
         IsPosterEditPanelOpen = false;
         PosterSourceFileText = string.Empty;
+        PosterDoubanSubject = string.Empty;
+        PosterDoubanStatus = string.Empty;
         posterMetadataTarget = null;
         OnCommandStateChanged();
     }
@@ -3003,6 +3197,136 @@ public partial class PosterWallViewModel : ObservableObject
         {
             PosterEditPosterPath = posterPath;
         }
+    }
+
+    private async Task BindPosterDoubanAsync()
+    {
+        if (posterMetadataTarget is null || doubanMetadataService is null)
+        {
+            PosterDoubanStatus = "当前版本未启用豆瓣绑定服务。";
+            return;
+        }
+
+        var subject = PosterDoubanSubject.Trim();
+        if (string.IsNullOrWhiteSpace(subject))
+        {
+            PosterDoubanStatus = "请填写豆瓣 subject ID 或链接。";
+            return;
+        }
+
+        var isMovie = posterMetadataTarget.MovieId.HasValue;
+        var entityId = isMovie ? posterMetadataTarget.MovieId!.Value : posterMetadataTarget.TvShowId!.Value;
+        IsBusy = true;
+        OnCommandStateChanged();
+        try
+        {
+            PosterDoubanStatus = "正在绑定豆瓣条目...";
+            var metadata = await doubanMetadataService.BindAsync(
+                isMovie ? "movie" : "tv",
+                entityId,
+                subject,
+                PosterEditTitle.Trim().Length == 0 ? posterMetadataTarget.Title : PosterEditTitle.Trim(),
+                PosterEditDate);
+            await ReloadLibraryAsync();
+            await RefreshOpenDetailIfNeededAsync();
+            var dockerSyncMessage = metadata is null
+                ? null
+                : await TrySyncDoubanMetadataToOmniPlayDockerAsync(posterMetadataTarget, metadata);
+            PosterDoubanStatus = metadata?.Rating.HasValue == true
+                ? $"豆瓣绑定成功：{metadata.Title} {metadata.Rating.Value:F1}"
+                : "豆瓣条目已保存；本次未获取到评分。";
+            if (!string.IsNullOrWhiteSpace(dockerSyncMessage))
+            {
+                PosterDoubanStatus = $"{PosterDoubanStatus} {dockerSyncMessage}";
+            }
+            StatusMessage = PosterDoubanStatus;
+        }
+        catch (ArgumentException ex)
+        {
+            PosterDoubanStatus = ex.Message;
+        }
+        finally
+        {
+            IsBusy = false;
+            OnCommandStateChanged();
+        }
+    }
+
+    private async Task<string?> TrySyncDoubanMetadataToOmniPlayDockerAsync(
+        LibraryPosterItem item,
+        DoubanMetadata metadata)
+    {
+        if (omniPlayDockerClient is null)
+        {
+            return null;
+        }
+
+        var files = item.MovieId.HasValue
+            ? await videoFileRepository.GetByMovieAsync(item.MovieId.Value)
+            : item.TvShowId.HasValue
+                ? await videoFileRepository.GetByTvShowAsync(item.TvShowId.Value)
+                : [];
+        var dockerFiles = files
+            .Where(static file => string.Equals(file.SourceProtocolType, "omniplay-docker", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (dockerFiles.Count == 0)
+        {
+            return null;
+        }
+
+        var remoteFileIds = dockerFiles
+            .Select(file => TryResolveOmniPlayDockerRemoteFileId(file.Id, file.RelativePath, out var remoteFileId) ? remoteFileId : null)
+            .OfType<string>()
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (remoteFileIds.Count == 0)
+        {
+            return null;
+        }
+
+        var firstFile = dockerFiles[0];
+        var source = new MediaSource
+        {
+            ProtocolType = "omniplay-docker",
+            BaseUrl = firstFile.SourceBasePath,
+            AuthConfig = firstFile.SourceAuthConfig
+        };
+
+        try
+        {
+            var remoteItems = await omniPlayDockerClient.GetLibraryItemsAsync(source);
+            foreach (var remoteItem in remoteItems)
+            {
+                var detail = await omniPlayDockerClient.GetLibraryDetailAsync(source, remoteItem.Id);
+                if (detail is null)
+                {
+                    continue;
+                }
+
+                var detailFileIds = GetOmniPlayDockerRemoteFileIds(detail);
+                if (detailFileIds.Overlaps(remoteFileIds))
+                {
+                    await omniPlayDockerClient.ImportDoubanMetadataAsync(source, remoteItem.Id, metadata);
+                    return "已同步到 OmniPlay Docker。";
+                }
+            }
+
+            return "未在 OmniPlay Docker 中找到对应条目，未同步到 Docker。";
+        }
+        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or TaskCanceledException)
+        {
+            return $"Docker 同步失败：{ex.Message}";
+        }
+    }
+
+    private static HashSet<string> GetOmniPlayDockerRemoteFileIds(OmniPlayDockerLibraryDetail detail)
+    {
+        var fileIds = detail.VideoFiles.Select(static file => file.Id)
+            .Concat(detail.Seasons.SelectMany(static season => season.Episodes)
+                .SelectMany(static episode => episode.VideoFiles is { Count: > 0 }
+                    ? episode.VideoFiles
+                    : episode.VideoFile is { } file ? [file] : [])
+                .Select(static file => file.Id));
+        return fileIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 
     private async Task SavePosterMetadataEditAsync()
@@ -3388,6 +3712,22 @@ public partial class PosterWallViewModel : ObservableObject
             : null;
     }
 
+    private static string FormatCombinedRatingText(double? tmdbRating, double? doubanRating)
+    {
+        var parts = new List<string>();
+        if (tmdbRating.HasValue)
+        {
+            parts.Add($"TMDB {tmdbRating.Value:F1}");
+        }
+
+        if (doubanRating.HasValue)
+        {
+            parts.Add($"豆瓣 {doubanRating.Value:F1}");
+        }
+
+        return parts.Count == 0 ? "评分待补充" : string.Join("  ", parts);
+    }
+
     private async Task ClosePlayerOverlayAsync()
     {
         StopPlaybackProgressSync();
@@ -3401,6 +3741,7 @@ public partial class PosterWallViewModel : ObservableObject
         PendingPlaybackStartPositionSeconds = 0;
         PendingPlaybackFilePath = string.Empty;
         PendingPlaybackDisplayPath = string.Empty;
+        PendingPlaybackMediaFileName = string.Empty;
         IsPlayerOverlayOpen = false;
         await Player.StopAsync();
 
@@ -3592,6 +3933,19 @@ public partial class PosterWallViewModel : ObservableObject
         IsMediaServerTokenVisible = !IsMediaServerTokenVisible;
     }
 
+    private void AddPendingExternalAddress()
+    {
+        PendingExternalAddresses.Add(new MediaSourceExternalAddress());
+    }
+
+    private void RemovePendingExternalAddress(MediaSourceExternalAddress? address)
+    {
+        if (address is not null)
+        {
+            PendingExternalAddresses.Remove(address);
+        }
+    }
+
     private async Task RefreshNetworkSourcesAsync(bool updateBusyState)
     {
         if (networkDiscoveryInProgress)
@@ -3632,7 +3986,7 @@ public partial class PosterWallViewModel : ObservableObject
             return;
         }
 
-        if (item.ProtocolKind is MediaSourceProtocol.Plex or MediaSourceProtocol.Emby or MediaSourceProtocol.Jellyfin)
+        if (item.ProtocolKind is MediaSourceProtocol.Plex or MediaSourceProtocol.Emby or MediaSourceProtocol.Jellyfin or MediaSourceProtocol.OmniPlayDocker)
         {
             OpenDiscoveredMediaServer(item);
             return;
@@ -3643,6 +3997,7 @@ public partial class PosterWallViewModel : ObservableObject
         PendingNetworkDisplayName = item.Name;
         PendingNetworkUsername = string.Empty;
         PendingNetworkPassword = string.Empty;
+        PendingExternalAddresses.Clear();
         ApplySavedNetworkCredential(item.ProtocolKind, item.BaseUrl, allowBaseUrlPrefill: false);
         NetworkLoginTitle = $"登录 {item.ProtocolLabel}";
         IsSourcePopupOpen = false;
@@ -3681,6 +4036,7 @@ public partial class PosterWallViewModel : ObservableObject
         PendingNetworkDisplayName = string.Empty;
         PendingNetworkUsername = string.Empty;
         PendingNetworkPassword = string.Empty;
+        PendingExternalAddresses.Clear();
         ApplyLatestSavedNetworkCredential();
         NetworkLoginTitle = "添加局域网媒体源";
         IsSourcePopupOpen = false;
@@ -3766,6 +4122,41 @@ public partial class PosterWallViewModel : ObservableObject
 
         try
         {
+            if (source.ProtocolKind == MediaSourceProtocol.OmniPlayDocker)
+            {
+                var sourceId = await mediaSourceRepository.AddAsync(source);
+                IsMediaServerPanelOpen = false;
+                ResetMediaServerForm(clearStatus: true);
+                await ReloadLibraryAsync();
+                if (sourceId <= 0)
+                {
+                    StatusMessage = "已保存 OmniPlay Docker 媒体源。";
+                    return;
+                }
+
+                var automationCancellationTokenSource = BeginLibraryAutomation();
+                var cancellationToken = automationCancellationTokenSource.Token;
+                IsBusy = false;
+                OnCommandStateChanged();
+                try
+                {
+                    StatusMessage = $"已添加 OmniPlay Docker：{source.Name}，正在同步媒体库...";
+                    LastScanSummary = await RunLibraryScanAndArtworkAsync(
+                        isExplicitRequest: true,
+                        forceThumbnails: false,
+                        cancellationToken,
+                        [sourceId],
+                        skipTmdbArtwork: true);
+                    StatusMessage = $"已同步 OmniPlay Docker：{source.Name}";
+                }
+                finally
+                {
+                    CompleteLibraryAutomation(automationCancellationTokenSource);
+                }
+
+                return;
+            }
+
             MediaServerStatus = $"正在预扫描 {source.ProtocolLabel} 共享文件夹...";
             StatusMessage = MediaServerStatus;
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
@@ -3864,6 +4255,13 @@ public partial class PosterWallViewModel : ObservableObject
 
         try
         {
+            if (source.ProtocolKind == MediaSourceProtocol.OmniPlayDocker)
+            {
+                MediaServerStatus = "OmniPlay Docker 会在保存后直接同步服务端媒体库。";
+                StatusMessage = MediaServerStatus;
+                return;
+            }
+
             MediaServerStatus = $"正在预扫描 {source.ProtocolLabel} 媒体列表...";
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
             var result = await RunMediaServerPreflightAsync(source, timeout.Token);
@@ -3892,6 +4290,7 @@ public partial class PosterWallViewModel : ObservableObject
         PendingNetworkDisplayName = string.Empty;
         PendingNetworkUsername = string.Empty;
         PendingNetworkPassword = string.Empty;
+        PendingExternalAddresses.Clear();
         ReplaceItems(NetworkShareFolders, []);
         NotifyNetworkShareFolderStateChanged();
         if (clearStatus)
@@ -3904,9 +4303,9 @@ public partial class PosterWallViewModel : ObservableObject
     {
         IsMediaServerPanelOpen = false;
         PendingMediaServerName = string.Empty;
-        PendingMediaServerProtocolType = "plex";
+        PendingMediaServerProtocolType = "omniplay-docker";
         SelectedMediaServerProtocolOption = MediaServerProtocolOptions[0];
-        PendingMediaServerBaseUrl = DefaultMediaServerBaseUrl("plex");
+        PendingMediaServerBaseUrl = DefaultMediaServerBaseUrl(PendingMediaServerProtocolType);
         PendingMediaServerToken = string.Empty;
         IsMediaServerTokenVisible = false;
         PendingMediaServerUserId = string.Empty;
@@ -4085,6 +4484,7 @@ public partial class PosterWallViewModel : ObservableObject
             foreach (var folder in folders)
             {
                 var source = folder.ToMediaSource();
+                source.SetAddressConfiguration(BuildPendingAddressConfiguration(source.BaseUrl, source.ProtocolKind));
                 var sourceId = await mediaSourceRepository.AddAsync(source);
                 if (sourceId > 0)
                 {
@@ -4127,6 +4527,50 @@ public partial class PosterWallViewModel : ObservableObject
             CompleteLibraryAutomation(automationCancellationTokenSource);
             OnCommandStateChanged();
         }
+    }
+
+    private MediaSourceAddressConfiguration BuildPendingAddressConfiguration(
+        string localAddress,
+        MediaSourceProtocol? protocolKind)
+    {
+        var configuration = new MediaSourceAddressConfiguration
+        {
+            LocalAddress = localAddress.Trim(),
+            LocalLabel = "局域网",
+            ActiveAddress = localAddress.Trim(),
+            ActiveLabel = "局域网"
+        };
+
+        foreach (var pending in PendingExternalAddresses)
+        {
+            var address = pending.Address.Trim();
+            if (string.IsNullOrWhiteSpace(address))
+            {
+                continue;
+            }
+
+            if (protocolKind == MediaSourceProtocol.Smb)
+            {
+                address = NormalizePendingNetworkBaseUrl(address);
+            }
+            else if (protocolKind == MediaSourceProtocol.WebDav)
+            {
+                address = MediaSourceNormalizer.NormalizeBaseUrl(MediaSourceProtocol.WebDav, address);
+            }
+
+            var rule = Settings.LuckyStunRules.FirstOrDefault(item =>
+                string.Equals(item.Id, pending.LuckyRuleId, StringComparison.OrdinalIgnoreCase));
+            configuration.ExternalAddresses.Add(new MediaSourceExternalAddress
+            {
+                Address = address,
+                Label = pending.Label.Trim(),
+                UseLuckyStun = pending.UseLuckyStun,
+                LuckyRuleId = pending.LuckyRuleId.Trim(),
+                LuckyRuleName = rule?.Name ?? pending.LuckyRuleName.Trim()
+            });
+        }
+
+        return configuration;
     }
 
     private async Task EditSourceAsync(MediaSource? source)
@@ -4267,6 +4711,7 @@ public partial class PosterWallViewModel : ObservableObject
         ApplyPosterMetadataCandidateCommand.NotifyCanExecuteChanged();
         OpenPosterEditCommand.NotifyCanExecuteChanged();
         ChoosePosterImageCommand.NotifyCanExecuteChanged();
+        BindPosterDoubanCommand.NotifyCanExecuteChanged();
         SavePosterMetadataEditCommand.NotifyCanExecuteChanged();
         OpenEpisodeEditCommand.NotifyCanExecuteChanged();
         SaveEpisodeEditCommand.NotifyCanExecuteChanged();
@@ -4275,6 +4720,7 @@ public partial class PosterWallViewModel : ObservableObject
         CancelWebDavEditCommand.NotifyCanExecuteChanged();
         RemoveSourceCommand.NotifyCanExecuteChanged();
         ToggleSourceEnabledCommand.NotifyCanExecuteChanged();
+        CheckSourceConnectivityCommand.NotifyCanExecuteChanged();
         RefreshNetworkSourcesCommand.NotifyCanExecuteChanged();
         OpenNetworkLoginCommand.NotifyCanExecuteChanged();
         OpenManualNetworkLoginCommand.NotifyCanExecuteChanged();
@@ -4353,6 +4799,8 @@ public partial class PosterWallViewModel : ObservableObject
             source.Name = ResolveWebDavSourceName(source.BaseUrl);
         }
 
+        source.SetAddressConfiguration(BuildPendingAddressConfiguration(source.BaseUrl, source.ProtocolKind));
+
         return source;
     }
 
@@ -4363,18 +4811,24 @@ public partial class PosterWallViewModel : ObservableObject
         var normalizedUrl = MediaSourceNormalizer.NormalizeBaseUrl(protocolKind, PendingMediaServerBaseUrl.Trim());
         if (string.IsNullOrWhiteSpace(normalizedUrl))
         {
-            MediaServerStatus = "请输入 Plex、Emby 或 Jellyfin 服务器地址。";
+            MediaServerStatus = "请输入媒体服务器地址。";
             return null;
         }
+
+        var authConfig = protocolKind == MediaSourceProtocol.OmniPlayDocker
+            ? MediaSourceAuthConfigSerializer.SerializeOmniPlayDocker(new OmniPlayDockerAuthConfig(
+                string.IsNullOrWhiteSpace(PendingMediaServerUserId) ? null : PendingMediaServerUserId.Trim(),
+                string.IsNullOrWhiteSpace(PendingMediaServerToken) ? null : PendingMediaServerToken.Trim()))
+            : MediaSourceAuthConfigSerializer.SerializeMediaServer(new MediaServerAuthConfig(
+                PendingMediaServerToken,
+                protocolKind == MediaSourceProtocol.Plex ? string.Empty : PendingMediaServerUserId.Trim()));
 
         var source = new MediaSource
         {
             Name = PendingMediaServerName.Trim(),
             ProtocolType = protocolType,
             BaseUrl = normalizedUrl,
-            AuthConfig = MediaSourceAuthConfigSerializer.SerializeMediaServer(new MediaServerAuthConfig(
-                PendingMediaServerToken,
-                protocolKind == MediaSourceProtocol.Plex ? string.Empty : PendingMediaServerUserId.Trim()))
+            AuthConfig = authConfig
         };
 
         if (!source.IsValidConfiguration())
@@ -4383,7 +4837,7 @@ public partial class PosterWallViewModel : ObservableObject
             return null;
         }
 
-        if (string.IsNullOrWhiteSpace(PendingMediaServerToken))
+        if (protocolKind != MediaSourceProtocol.OmniPlayDocker && string.IsNullOrWhiteSpace(PendingMediaServerToken))
         {
             MediaServerStatus = protocolKind == MediaSourceProtocol.Plex
                 ? "Plex 需要访问令牌（X-Plex-Token）才能读取媒体库。"
@@ -4410,6 +4864,7 @@ public partial class PosterWallViewModel : ObservableObject
     {
         return protocolType.Trim().ToLowerInvariant() switch
         {
+            "omniplaydocker" or "omniplay-docker" or "omniplay_docker" => "omniplay-docker",
             "emby" => "emby",
             "jellyfin" => "jellyfin",
             _ => "plex"
@@ -4420,6 +4875,7 @@ public partial class PosterWallViewModel : ObservableObject
     {
         return NormalizeMediaServerProtocolType(protocolType) switch
         {
+            "omniplay-docker" => MediaSourceProtocol.OmniPlayDocker,
             "emby" => MediaSourceProtocol.Emby,
             "jellyfin" => MediaSourceProtocol.Jellyfin,
             _ => MediaSourceProtocol.Plex
@@ -4430,6 +4886,7 @@ public partial class PosterWallViewModel : ObservableObject
     {
         return NormalizeMediaServerProtocolType(protocolType) switch
         {
+            "omniplay-docker" => "http://127.0.0.1:45722",
             "emby" or "jellyfin" => "http://127.0.0.1:8096",
             _ => "http://127.0.0.1:32400"
         };
@@ -4441,13 +4898,16 @@ public partial class PosterWallViewModel : ObservableObject
         return string.Equals(trimmed, "http://127.0.0.1:32400", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(trimmed, "http://localhost:32400", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(trimmed, "http://127.0.0.1:8096", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(trimmed, "http://localhost:8096", StringComparison.OrdinalIgnoreCase);
+               string.Equals(trimmed, "http://localhost:8096", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(trimmed, "http://127.0.0.1:45722", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(trimmed, "http://localhost:45722", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string GetMediaServerConnectionHint(string protocolType)
     {
         return NormalizeMediaServerProtocolType(protocolType) switch
         {
+            "omniplay-docker" => "OmniPlay Docker 默认地址为 http://127.0.0.1:45722；未开启登录可留空 session cookie。",
             "plex" => "Plex 默认地址为 http://127.0.0.1:32400，点击“登录 Plex”会自动获取访问令牌。",
             "emby" => "Emby 默认地址为 http://127.0.0.1:8096，可填写用户名和密码，也可直接填写 API Key 或访问令牌。",
             "jellyfin" => "Jellyfin 默认地址为 http://127.0.0.1:8096，可填写用户名和密码，也可直接填写 API Key 或访问令牌。",
@@ -4463,7 +4923,7 @@ public partial class PosterWallViewModel : ObservableObject
             PendingMediaServerBaseUrl = DefaultMediaServerBaseUrl(protocolType);
         }
 
-        if (NormalizeMediaServerProtocolType(protocolType) == "plex")
+        if (NormalizeMediaServerProtocolType(protocolType) is "plex" or "omniplay-docker")
         {
             PendingMediaServerUserId = string.Empty;
         }
@@ -4631,13 +5091,21 @@ public partial class PosterWallViewModel : ObservableObject
             displayName = normalizedPath;
         }
 
-        return new MediaSource
+        var source = new MediaSource
         {
             Id = sourceId,
             Name = displayName,
             ProtocolType = "local",
             BaseUrl = normalizedPath
         };
+        source.SetAddressConfiguration(new MediaSourceAddressConfiguration
+        {
+            LocalAddress = normalizedPath,
+            LocalLabel = "局域网",
+            ActiveAddress = normalizedPath,
+            ActiveLabel = "局域网"
+        });
+        return source;
     }
 
     private void ResetWebDavForm()
@@ -4672,6 +5140,87 @@ public partial class PosterWallViewModel : ObservableObject
         }
 
         return uri.Host;
+    }
+
+    private async Task CheckSourceConnectivityAsync(MediaSource? source)
+    {
+        if (source?.Id is null)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        OnCommandStateChanged();
+        try
+        {
+            var configuration = source.GetAddressConfiguration();
+            var candidates = new List<(string Address, string Label)>
+            {
+                (configuration.LocalAddress.Trim(), string.IsNullOrWhiteSpace(configuration.LocalLabel) ? "局域网" : configuration.LocalLabel.Trim())
+            };
+            candidates.AddRange(configuration.ExternalAddresses
+                .Where(static item => !string.IsNullOrWhiteSpace(item.Address))
+                .Select(static item => (item.Address.Trim(), item.DisplayLabel)));
+
+            foreach (var candidate in candidates)
+            {
+                if (await IsSourceAddressReachableAsync(source, candidate.Address))
+                {
+                    configuration.ActiveAddress = candidate.Address;
+                    configuration.ActiveLabel = candidate.Label;
+                    source.BaseUrl = candidate.Address;
+                    source.SetAddressConfiguration(configuration);
+                    var updated = await mediaSourceRepository.UpdateAsync(source);
+                    await ReloadLibraryAsync();
+                    StatusMessage = updated
+                        ? $"媒体源“{source.Name}”已切换到{candidate.Label}入口。"
+                        : $"媒体源“{source.Name}”已检测到可用入口：{candidate.Label}。";
+                    return;
+                }
+            }
+
+            StatusMessage = $"媒体源“{source.Name}”的局域网和外网入口均无法连接。";
+        }
+        finally
+        {
+            IsBusy = false;
+            OnCommandStateChanged();
+        }
+    }
+
+    private async Task<bool> IsSourceAddressReachableAsync(MediaSource source, string address)
+    {
+        if (string.IsNullOrWhiteSpace(address))
+        {
+            return false;
+        }
+
+        var probe = new MediaSource
+        {
+            Name = source.Name,
+            ProtocolType = source.ProtocolType,
+            BaseUrl = address,
+            AuthConfig = source.AuthConfig,
+            IsEnabled = source.IsEnabled
+        };
+
+        switch (source.ProtocolKind)
+        {
+            case MediaSourceProtocol.Local:
+            case MediaSourceProtocol.Smb:
+                return await Task.Run(() => Directory.Exists(address));
+            case MediaSourceProtocol.WebDav:
+                return (await webDavConnectionTester.TestConnectionAsync(probe)).Success;
+            case MediaSourceProtocol.Plex:
+            case MediaSourceProtocol.Emby:
+            case MediaSourceProtocol.Jellyfin:
+            case MediaSourceProtocol.OmniPlayDocker:
+                return (await RunMediaServerPreflightAsync(probe, CancellationToken.None)).Success;
+            case MediaSourceProtocol.Direct:
+                return await Task.Run(() => File.Exists(address) || Directory.Exists(address));
+            default:
+                return false;
+        }
     }
 
     private async Task ToggleSourceEnabledAsync(MediaSource? source)
@@ -4991,7 +5540,9 @@ public partial class PosterWallViewModel : ObservableObject
             return;
         }
 
-        await videoFileRepository.UpdatePlaybackStateAsync(videoId, NormalizePersistedProgress(progress, duration), duration);
+        var normalizedProgress = NormalizePersistedProgress(progress, duration);
+        await videoFileRepository.UpdatePlaybackStateAsync(videoId, normalizedProgress, duration);
+        await SyncOmniPlayDockerPlaybackProgressIfNeededAsync(videoId, normalizedProgress, duration);
         preferredDetailVideoId = videoId;
 
         if (!refreshCollections)
@@ -5005,6 +5556,36 @@ public partial class PosterWallViewModel : ObservableObject
         }
 
         await RefreshContinueWatchingAsync();
+    }
+
+    private async Task SyncOmniPlayDockerPlaybackProgressIfNeededAsync(string videoId, double progress, double duration)
+    {
+        if (omniPlayDockerClient is null)
+        {
+            return;
+        }
+
+        var video = ResolveDetailVideo(videoId);
+        if (video is null ||
+            !string.Equals(video.SourceProtocolType, "omniplay-docker", StringComparison.OrdinalIgnoreCase) ||
+            !TryResolveOmniPlayDockerRemoteFileId(video.Id, video.RelativePath, out var remoteFileId))
+        {
+            return;
+        }
+
+        try
+        {
+            await omniPlayDockerClient.UpdateProgressAsync(
+                video.SourceBasePath,
+                video.SourceAuthConfig,
+                remoteFileId,
+                progress,
+                duration);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or TaskCanceledException)
+        {
+            StatusMessage = $"Docker 进度同步失败：{ex.Message}";
+        }
     }
 
     partial void OnSearchTextChanged(string value)
@@ -5437,8 +6018,17 @@ public partial class PosterWallViewModel : ObservableObject
                     return file;
                 }
 
+                string? suffix = null;
+                if (duplicateEpisodeKeys.Contains((file.SeasonNumber, file.EpisodeNumber)))
+                {
+                    prefixSuffixesByFileId.TryGetValue(file.Id, out suffix);
+                    if (string.IsNullOrWhiteSpace(suffix))
+                    {
+                        suffix = Path.GetFileNameWithoutExtension(file.FileName);
+                    }
+                }
+
                 if (duplicateEpisodeKeys.Contains((file.SeasonNumber, file.EpisodeNumber)) &&
-                    prefixSuffixesByFileId.TryGetValue(file.Id, out var suffix) &&
                     !string.IsNullOrWhiteSpace(suffix))
                 {
                     return CopyVideoItemWithEpisodeSubtitle(file, suffix);
@@ -7402,6 +7992,11 @@ public partial class PosterWallViewModel : ObservableObject
     {
         ApplyPlaybackPreferencesToPlayer();
         OnPropertyChanged(nameof(ShowMediaSourceRealPath));
+        QueueLibraryRefreshIfNeeded(force: true);
+    }
+
+    private void OnLuckyStunAddressUpdated(object? sender, EventArgs e)
+    {
         QueueLibraryRefreshIfNeeded(force: true);
     }
 

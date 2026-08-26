@@ -16,7 +16,7 @@ struct SettingsView: View {
     @AppStorage("enableLocalMetadataImport") var enableLocalMetadataImport = false
     @AppStorage("enableLocalMetadataExport") var enableLocalMetadataExport = false
     @AppStorage("tmdbApiKey") var tmdbApiKey = ""
-    @AppStorage("tmdbUsePublicSource") var tmdbUsePublicSource = true
+    @AppStorage("tmdbProxyURL") var tmdbProxyURL = ""
     
     @AppStorage("appLanguage") var appLanguage = "zh-Hans"
     @AppStorage("defaultAudio") var defaultAudio = "auto"
@@ -182,10 +182,7 @@ struct SettingsView: View {
                 }
                 
                 Section(header: Text("刮削服务 (TMDB)").font(.headline).padding(.top, 10)) {
-                    Toggle("启用公共源 TMDB", isOn: $tmdbUsePublicSource)
-                        .help("默认开启。关闭后只有填写自定义 TMDB API 时才能继续刮削和获取剧照。")
-
-                    Text("公开源码不内置个人 TMDB Key。请填写自己的 TMDB API Key / v4 令牌，以启用稳定的刮削。")
+                    Text("请填写自己的 TMDB API Key / v4 令牌，以启用刮削、海报和剧照获取。")
                         .font(.caption)
                         .foregroundColor(theme.textSecondary)
 
@@ -236,7 +233,18 @@ struct SettingsView: View {
                     }
                     .frame(height: 28)
 
-                    Text("填写自定义 API 后会优先使用你的密钥；“验证”只检查这里填写的自定义密钥。")
+                    Text("“验证”会检查这里填写的 TMDB API Key / v4 令牌。")
+                        .font(.caption)
+                        .foregroundColor(theme.textSecondary)
+
+                    HStack(spacing: 8) {
+                        TextField("TMDB API 代理网关（可选）", text: $tmdbProxyURL)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 482)
+                        Spacer(minLength: 0)
+                    }
+
+                    Text("留空直连官方 API；无法直连时可填写反向代理地址。支持域名或带路径前缀的地址，例如 https://proxy.example.com/tmdb。")
                         .font(.caption)
                         .foregroundColor(theme.textSecondary)
 
@@ -244,11 +252,7 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(theme.accent)
 
-                    if trimmedTMDBApiKey.isEmpty, tmdbUsePublicSource {
-                        Text("当前未填写自定义 TMDB API；公开源码版本不会内置个人 Key。")
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                    } else if trimmedTMDBApiKey.isEmpty {
+                    if trimmedTMDBApiKey.isEmpty {
                         Text("当前未配置任何 TMDB 凭据。TMDB 刮削、海报与剧照获取将不可用。")
                             .font(.caption)
                             .foregroundColor(.red)
@@ -281,7 +285,7 @@ struct SettingsView: View {
             }
             .padding().formStyle(.grouped)
         }
-        .frame(width: 580, height: 660)
+        .frame(width: 620, height: 760)
         .environment(\.locale, .init(identifier: appLanguage))
         .sheet(isPresented: $isShowingOpenSourceInfo) {
             OpenSourceInfoSheet(theme: theme)
@@ -301,6 +305,10 @@ struct SettingsView: View {
 
     private var trimmedTMDBApiKey: String {
         tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedTMDBProxyURL: String {
+        tmdbProxyURL.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var currentAppVersion: String {
@@ -324,11 +332,14 @@ struct SettingsView: View {
         guard !customKey.isEmpty else { return }
 
         isValidatingAPI = true
-        apiValidationMessage = "正在连接 TMDB 服务器..."
+        apiValidationMessage = trimmedTMDBProxyURL.isEmpty ? "正在连接 TMDB 服务器..." : "正在通过自定义网关连接 TMDB..."
         apiValidationColor = .secondary
         
         Task {
-            let result = await TMDBService.shared.checkConnection(customAPIInput: customKey)
+            let result = await TMDBService.shared.checkConnection(
+                customAPIInput: customKey,
+                customProxyURL: trimmedTMDBProxyURL
+            )
             await MainActor.run {
                 if result.isConnected {
                     apiValidationMessage = "✅ 验证成功！API 状态正常。"

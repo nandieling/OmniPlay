@@ -14,7 +14,6 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient
 {
     private const string ApiBaseUrl = "https://api.themoviedb.org/3";
     private const string ImageBaseUrl = "https://image.tmdb.org/t/p/w500";
-    private const string BuiltInPublicApiKey = "";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly HttpClient httpClient;
@@ -367,7 +366,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient
         TmdbCredential credential,
         CancellationToken cancellationToken)
     {
-        await ApplyApiRateLimitAsync(credential.IsBuiltInPublicSource, cancellationToken);
+        await ApplyApiRateLimitAsync(cancellationToken);
         var separator = path.Contains('?', StringComparison.Ordinal) ? '&' : '?';
         var url = $"{ApiBaseUrl}{path}{separator}{BuildQueryString(query, credential)}";
         var request = new HttpRequestMessage(HttpMethod.Get, url);
@@ -379,9 +378,9 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient
         return await httpClient.SendAsync(request, cancellationToken);
     }
 
-    private async Task ApplyApiRateLimitAsync(bool builtInPublicSource, CancellationToken cancellationToken)
+    private async Task ApplyApiRateLimitAsync(CancellationToken cancellationToken)
     {
-        var interval = builtInPublicSource ? TimeSpan.FromMilliseconds(250) : TimeSpan.FromMilliseconds(100);
+        var interval = TimeSpan.FromMilliseconds(100);
         await apiRequestGate.WaitAsync(cancellationToken);
         try
         {
@@ -488,29 +487,24 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient
     {
         if (!string.IsNullOrWhiteSpace(settings.CustomAccessToken))
         {
-            yield return new TmdbCredential(null, settings.CustomAccessToken.Trim(), "自定义 Access Token", false);
+            yield return new TmdbCredential(null, settings.CustomAccessToken.Trim(), "自定义 Access Token");
         }
 
         if (!string.IsNullOrWhiteSpace(settings.CustomApiKey))
         {
-            yield return new TmdbCredential(settings.CustomApiKey.Trim(), null, "自定义 API Key", false);
+            yield return new TmdbCredential(settings.CustomApiKey.Trim(), null, "自定义 API Key");
         }
 
         var envToken = Environment.GetEnvironmentVariable("OMNIPLAY_TMDB_ACCESS_TOKEN");
         if (!string.IsNullOrWhiteSpace(envToken))
         {
-            yield return new TmdbCredential(null, envToken.Trim(), "环境变量 Access Token", false);
+            yield return new TmdbCredential(null, envToken.Trim(), "环境变量 Access Token");
         }
 
         var envKey = Environment.GetEnvironmentVariable("OMNIPLAY_TMDB_API_KEY");
         if (!string.IsNullOrWhiteSpace(envKey))
         {
-            yield return new TmdbCredential(envKey.Trim(), null, "环境变量 API Key", false);
-        }
-
-        if (settings.EnableBuiltInPublicSource && !string.IsNullOrWhiteSpace(BuiltInPublicApiKey))
-        {
-            yield return new TmdbCredential(BuiltInPublicApiKey, null, "内置公共源", true);
+            yield return new TmdbCredential(envKey.Trim(), null, "环境变量 API Key");
         }
     }
 
@@ -898,8 +892,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient
     private sealed record TmdbCredential(
         string? ApiKey,
         string? BearerToken,
-        string Source,
-        bool IsBuiltInPublicSource);
+        string Source);
 
     private sealed record TmdbSearchResponse(
         [property: JsonPropertyName("results")] IReadOnlyList<TmdbSearchItem>? Results);

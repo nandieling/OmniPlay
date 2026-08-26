@@ -10,8 +10,6 @@ public sealed record TmdbSettings
 
     public bool EnableEpisodeThumbnailDownloads { get; init; } = true;
 
-    public bool EnableBuiltInPublicSource { get; init; } = true;
-
     public string CustomApiKey { get; init; } = string.Empty;
 
     public string CustomAccessToken { get; init; } = string.Empty;

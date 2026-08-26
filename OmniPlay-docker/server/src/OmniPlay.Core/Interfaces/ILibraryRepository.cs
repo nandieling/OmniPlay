@@ -42,6 +42,10 @@ public interface ILibraryRepository
         PlaybackProgressUpdateRequest request,
         CancellationToken cancellationToken = default);
 
+    Task<PlaybackProgressState?> GetPlaybackProgressAsync(
+        string videoFileId,
+        CancellationToken cancellationToken = default);
+
     Task<bool> SetWatchedAsync(
         WatchedStatusUpdateRequest request,
         CancellationToken cancellationToken = default);

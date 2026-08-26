@@ -1000,7 +1000,7 @@ struct ContinuousPressModifier: ViewModifier {
     let action: () -> Void
     @State private var timer: Timer?
     @State private var isPressing = false
-    
+
     func body(content: Content) -> some View {
         content
             .scaleEffect(isPressing ? 0.85 : 1.0)
@@ -1045,31 +1045,35 @@ struct PlayerScreen: View {
     var initialSourceProtocolType: String? = nil
     var initialSourceAuthConfig: String? = nil
     var initialPlaylistFiles: [VideoFile]? = nil
-    
+
     @StateObject private var playerManager = MPVPlayerManager()
     @AppStorage("seekDuration") var seekDuration: Int = 10
-    
+
     @State private var videoURLs: [URL] = []
     @State private var allPlaylistFiles: [VideoFile] = []
     @State private var rootFolderURL: URL?
     @State private var errorMessage: String?
-    
+
     @State private var currentVideoFileId: String?
     @State private var startPosition: Double = 0.0
-    
+    @State private var playbackSourceBaseURL: String?
+    @State private var playbackSourceProtocolType: String?
+    @State private var playbackSourceAuthConfig: String?
+
     @State private var isBluRayFolder: Bool = false
     @State private var blurayRootPath: String? = nil
     @State private var attachedDiscImageMountPaths: [String] = []
     @State private var remoteISOProxyRouteIDs: [String] = []
-    
+
     @State private var showControls = true
     @State private var isCursorHidden = false
     @State private var hideUITask: Task<Void, Never>? = nil
+    @State private var menuInteractionTask: Task<Void, Never>? = nil
+    @State private var isMenuInteractionActive = false
     @State private var isPointerInTopControlArea = false
     @State private var hasIssuedLoad = false
     @State private var hasPersistedBeforeExit = false
     @State private var isClosingPlayback = false
-    @State private var playbackActivity: NSObjectProtocol?
     @State private var embyRemotePlaybackContext: EmbyRemotePlaybackContext?
     @State private var isSwitchingEmbyRemoteStream = false
     @Environment(\.dismiss) var dismiss
@@ -1107,7 +1111,7 @@ struct PlayerScreen: View {
         let subtitleTracks: [EmbyMediaStreamOption]
         var streamSelection: EmbyStreamSelection
     }
-    
+
     private func log(_ message: String) {
         print("[PlayerScreen] \(message)")
     }
@@ -1120,45 +1124,29 @@ struct PlayerScreen: View {
         print("[PlayerScreenClose][\(formatter.string(from: Date()))][\(thread)][q:\(queue)] \(message)")
     }
 
-    private func beginPlaybackPowerAssertion() {
-        guard playbackActivity == nil else { return }
-        playbackActivity = ProcessInfo.processInfo.beginActivity(
-            options: [.userInitiated, .idleDisplaySleepDisabled],
-            reason: "OmniPlay 正在播放视频"
-        )
-    }
-
-    private func endPlaybackPowerAssertion() {
-        guard let playbackActivity else { return }
-        ProcessInfo.processInfo.endActivity(playbackActivity)
-        self.playbackActivity = nil
-    }
-    
     // 智能推算当前播放集数标题
     private var currentPlaybackTitle: String {
-        guard let id = currentVideoFileId,
-              let index = allPlaylistFiles.firstIndex(where: { $0.id == id }) else { return movie.title }
-        let file = allPlaylistFiles[index]
-        let parsed = MediaNameParser.parseEpisodeInfo(from: file.fileName, fallbackIndex: index)
-        if parsed.isTVShow {
-            let seasonText = parsed.season == 0 ? "特别篇" : "第 \(parsed.season) 季"
-            return "\(movie.title) \(seasonText) \(parsed.displayName)"
-        }
-        return movie.title
+        guard let id = currentVideoFileId, let file = allPlaylistFiles.first(where: { $0.id == id }) else { return movie.title }
+        let resolvedInfo = EpisodeMetadataOverrideStore.shared.resolvedEpisodeInfo(
+            fileId: file.id,
+            fileName: file.fileName,
+            fallbackIndex: 0
+        )
+        return resolvedInfo.isTVShow ? "\(movie.title) \(resolvedInfo.displayName)" : movie.title
     }
-    
+
     private var playbackProgressRatio: Double {
         let dur = playerManager.duration
         guard dur > 0 else { return 0 }
         return min(max(playerManager.currentTimePos / dur, 0), 1)
     }
-    
+
     private var hasNextEpisode: Bool {
         guard let id = currentVideoFileId,
               let currentIndex = allPlaylistFiles.firstIndex(where: { $0.id == id }) else { return false }
         return currentIndex < (allPlaylistFiles.count - 1)
     }
-    
+
     private var isTVPlayback: Bool {
         if allPlaylistFiles.enumerated().contains(where: { idx, file in
             MediaNameParser.parseEpisodeInfo(from: file.fileName, fallbackIndex: idx).isTVShow
@@ -1167,7 +1155,7 @@ struct PlayerScreen: View {
         }
         return allPlaylistFiles.count > 1 && (movie.title.contains("季") || movie.title.contains("集"))
     }
-    
+
     private var shouldShowNextEpisodeButton: Bool {
         isTVPlayback && showControls && !isCursorHidden && hasNextEpisode && playbackProgressRatio >= 0.95
     }
@@ -1329,11 +1317,11 @@ struct PlayerScreen: View {
             cursor += partDuration
         }
     }
-    
+
     var body: some View {
         ZStack {
             Color.black.edgesIgnoringSafeArea(.all)
-            
+
             if !videoURLs.isEmpty {
                 MPVVideoView(playerManager: playerManager)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1344,7 +1332,7 @@ struct PlayerScreen: View {
             } else {
                 ProgressView("准备播放环境...").foregroundColor(.white)
             }
-            
+
             if showControls {
                 VStack {
                     // 顶部栏
@@ -1372,9 +1360,9 @@ struct PlayerScreen: View {
                             resetHideTimer()
                         }
                     }
-                    
+
                     Spacer()
-                    
+
                     // 底部进度条与菜单
                     VStack(spacing: 15) {
                         if shouldShowNextEpisodeButton {
@@ -1424,16 +1412,16 @@ struct PlayerScreen: View {
                         }
                         .foregroundColor(.white)
                         .onHover { if $0 { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
-                        
+
                         HStack {
                             Text(isMultipartMoviePlayback ? playerTimelineCurrentText : playerManager.currentTime).font(.caption.monospacedDigit())
                             playbackTimelineSlider
                             Text(isMultipartMoviePlayback ? playerTimelineDurationText : playerManager.remainingTime).font(.caption.monospacedDigit())
                         }
-                        
+
                         HStack(spacing: 16) {
                             Spacer()
-                                                                                
+
                             // 🌟 音轨菜单
                             Menu {
                                 if let embyRemotePlaybackContext {
@@ -1443,7 +1431,7 @@ struct PlayerScreen: View {
                                         ForEach(embyRemotePlaybackContext.audioTracks) { track in
                                             Button(action: {
                                                 switchEmbyRemoteAudioTrack(track)
-                                                resetHideTimer()
+                                                completeMenuInteraction()
                                             }) {
                                                 let isActive = embyRemotePlaybackContext.streamSelection.audioStreamIndex == track.index
                                                 Text((isActive ? "✓ " : "") + track.displayName)
@@ -1452,20 +1440,23 @@ struct PlayerScreen: View {
                                     }
                                 } else {
                                     ForEach(0..<playerManager.audioTrackNames.count, id: \.self) { i in
-                                        Button(action: { playerManager.setAudioTrack(at: i) }) {
+                                        Button(action: {
+                                            playerManager.setAudioTrack(at: i)
+                                            completeMenuInteraction()
+                                        }) {
                                             let isActive = i < playerManager.audioTrackIds.count && playerManager.activeAudioId == playerManager.audioTrackIds[i]
                                             Text((isActive ? "✓ " : "") + playerManager.audioTrackNames[i])
                                         }
                                     }
                                 }
-                            } label: { HStack(spacing: 6) { Image(systemName: "waveform").font(.system(size: 16)); Text("音轨").font(.system(size: 14, weight: .bold)) }.padding(.horizontal, 16).padding(.vertical, 10).background(Color.black.opacity(0.75)).foregroundColor(.white).cornerRadius(8) }.menuStyle(.borderlessButton).fixedSize().colorScheme(.dark)
-                                                                                
+                            } label: { Image(systemName: "waveform").font(.system(size: 16, weight: .semibold)).frame(width: 44, height: 38).background(Color.black.opacity(0.75)).foregroundColor(.white).cornerRadius(8) }.help("音轨").menuStyle(.borderlessButton).fixedSize().colorScheme(.dark).simultaneousGesture(TapGesture().onEnded { beginMenuInteraction() })
+
                             // 🌟 字幕菜单 (含本地外挂及时间轴控制)
                             Menu {
                                 if let embyRemotePlaybackContext {
                                     Button(action: {
                                         switchEmbyRemoteSubtitleTrack(nil)
-                                        resetHideTimer()
+                                        completeMenuInteraction()
                                     }) {
                                         let isActive = embyRemotePlaybackContext.streamSelection.subtitleStreamIndex == nil
                                         Text((isActive ? "✓ " : "") + "关闭字幕")
@@ -1473,7 +1464,7 @@ struct PlayerScreen: View {
                                     ForEach(embyRemotePlaybackContext.subtitleTracks) { track in
                                         Button(action: {
                                             switchEmbyRemoteSubtitleTrack(track)
-                                            resetHideTimer()
+                                            completeMenuInteraction()
                                         }) {
                                             let isActive = embyRemotePlaybackContext.streamSelection.subtitleStreamIndex == track.index
                                             Text((isActive ? "✓ " : "") + track.displayName)
@@ -1481,72 +1472,101 @@ struct PlayerScreen: View {
                                     }
                                 } else {
                                     ForEach(0..<playerManager.subtitleNames.count, id: \.self) { i in
-                                        Button(action: { playerManager.setSubtitleTrack(at: i) }) {
+                                        Button(action: {
+                                            playerManager.setSubtitleTrack(at: i)
+                                            completeMenuInteraction()
+                                        }) {
                                             let isActive = i < playerManager.subtitleIds.count && playerManager.activeSubtitleId == playerManager.subtitleIds[i]
                                             Text((isActive ? "✓ " : "") + playerManager.subtitleNames[i])
                                         }
                                     }
                                 }
-                                
+
                                 Divider() // 分割线
-                                
+
                                 // 🌟 1. 加载本地外挂字幕
                                 Button(action: {
                                     loadExternalSubtitle()
-                                    resetHideTimer()
+                                    completeMenuInteraction()
                                 }) {
                                     HStack {
                                         Image(systemName: "doc.badge.plus")
                                         Text("加载外置字幕...")
                                     }
                                 }
-                                
+
                                 Divider() // 分割线
 
-                                Section("字幕大小") {
-                                    Button(subtitleSizeOptionTitle(size: 12, title: "小号字体 (12)")) { setSubtitleSize(12) }
-                                    Button(subtitleSizeOptionTitle(size: 16, title: "标准字体 (16)")) { setSubtitleSize(16) }
-                                    Button(subtitleSizeOptionTitle(size: 20, title: "大号字体 (20)")) { setSubtitleSize(20) }
-                                    Button(subtitleSizeOptionTitle(size: 24, title: "特大字体 (24)")) { setSubtitleSize(24) }
+                                Menu("字幕大小") {
+                                    Button(action: {
+                                        setSubtitleSize(12)
+                                        completeMenuInteraction()
+                                    }) {
+                                        Text((playerManager.currentSubtitleSize == 12 ? "✓ " : "") + "小号字体 (12)")
+                                    }
+                                    Button(action: {
+                                        setSubtitleSize(16)
+                                        completeMenuInteraction()
+                                    }) {
+                                        Text((playerManager.currentSubtitleSize == 16 ? "✓ " : "") + "标准字体 (16)")
+                                    }
+                                    Button(action: {
+                                        setSubtitleSize(20)
+                                        completeMenuInteraction()
+                                    }) {
+                                        Text((playerManager.currentSubtitleSize == 20 ? "✓ " : "") + "大号字体 (20)")
+                                    }
+                                    Button(action: {
+                                        setSubtitleSize(24)
+                                        completeMenuInteraction()
+                                    }) {
+                                        Text((playerManager.currentSubtitleSize == 24 ? "✓ " : "") + "特大字体 (24)")
+                                    }
                                 }
-                                
+
                                 Divider() // 分割线
-                                
+
                                 // 🌟 2. 时间轴同步手动控制 (G/H 国际标快捷键)
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text("字幕同步 (G 早 / H 晚)").font(.caption2).foregroundColor(.gray)
                                     HStack(spacing: 8) {
-                                        Button(action: { playerManager.adjustSubtitleDelay(by: -0.5); resetHideTimer() }) {
+                                        Button(action: {
+                                            playerManager.adjustSubtitleDelay(by: -0.5)
+                                            completeMenuInteraction()
+                                        }) {
                                             Image(systemName: "minus.circle")
                                         }.help("字幕调早 0.5 秒")
-                                        
+
                                         Text(String(format: "同步 %.1fs", playerManager.subtitleDelay))
                                             .font(.system(size: 13, weight: .bold))
                                             .foregroundColor(.white)
                                             .frame(width: 55, alignment: .center)
-                                        
-                                        Button(action: { playerManager.adjustSubtitleDelay(by: 0.5); resetHideTimer() }) {
+
+                                        Button(action: {
+                                            playerManager.adjustSubtitleDelay(by: 0.5)
+                                            completeMenuInteraction()
+                                        }) {
                                             Image(systemName: "plus.circle")
                                         }.help("字幕调晚 0.5 秒")
                                     }
                                     .padding(.horizontal, 10).padding(.vertical, 6)
                                     .background(Color.white.opacity(0.1)).cornerRadius(6)
                                 }.padding(.horizontal, 10)
-                                
-                            } label: { HStack(spacing: 6) { Image(systemName: "captions.bubble").font(.system(size: 16)); Text("字幕").font(.system(size: 14, weight: .bold)) }.padding(.horizontal, 16).padding(.vertical, 10).background(Color.black.opacity(0.75)).foregroundColor(.white).cornerRadius(8) }.menuStyle(.borderlessButton).fixedSize().colorScheme(.dark)
+
+                            } label: { Image(systemName: "captions.bubble").font(.system(size: 16, weight: .semibold)).frame(width: 44, height: 38).background(Color.black.opacity(0.75)).foregroundColor(.white).cornerRadius(8) }.help("字幕").menuStyle(.borderlessButton).fixedSize().colorScheme(.dark).simultaneousGesture(TapGesture().onEnded { beginMenuInteraction() })
 
                         }
                     }.foregroundColor(.white).padding(.horizontal, 30).padding(.bottom, 30).padding(.top, 40).background(LinearGradient(gradient: Gradient(colors: [.clear, .black.opacity(0.9)]), startPoint: .top, endPoint: .bottom))
                 }.transition(.opacity)
             }
-            
+
             // 快捷键映射
             Button("") { playerManager.playOrPause(); resetHideTimer() }.keyboardShortcut(.space, modifiers: []).opacity(0)
             Button("") { playerManager.seekRelative(seconds: Double(-seekDuration)); resetHideTimer() }.keyboardShortcut(.leftArrow, modifiers: []).opacity(0)
             Button("") { playerManager.seekRelative(seconds: Double(seekDuration)); resetHideTimer() }.keyboardShortcut(.rightArrow, modifiers: []).opacity(0)
             Button("") { playerManager.adjustSubtitleDelay(by: -0.5); resetHideTimer() }.keyboardShortcut("g", modifiers: []).opacity(0)
             Button("") { playerManager.adjustSubtitleDelay(by: 0.5); resetHideTimer() }.keyboardShortcut("h", modifiers: []).opacity(0)
-            
+
         }
         .toolbar(isStandaloneWindow ? .visible : .hidden, for: .windowToolbar)
         .onContinuousHover(coordinateSpace: .local) { phase in
@@ -1572,15 +1592,26 @@ struct PlayerScreen: View {
         }
         .onAppear {
             log("onAppear movie=\(movie.title) initialFileId=\(initialFileId ?? "nil") seedFiles=\(initialPlaylistFiles?.count ?? 0) seedSource=\(initialSourceBasePath ?? "nil") seedProtocol=\(initialSourceProtocolType ?? "nil")")
-            beginPlaybackPowerAssertion()
             ensureComfortableWindowSize()
             prepareVideoWithPermission()
             resetHideTimer()
         }
+        .task(id: videoURLs.count) {
+            guard !videoURLs.isEmpty else { return }
+            // Let the initial MPV load/seek settle before publishing progress;
+            // otherwise a remote client could briefly overwrite a saved resume
+            // position with the initial 0-second state.
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            while !Task.isCancelled {
+                await syncCurrentPlaybackProgressToDocker()
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+            }
+        }
         .onDisappear {
             traceClose("onDisappear triggered")
+            hideUITask?.cancel()
+            menuInteractionTask?.cancel()
             setCursorHidden(false)
-            endPlaybackPowerAssertion()
             persistAndStopPlaybackIfNeeded(reason: "onDisappear")
         }
         .onReceive(NotificationCenter.default.publisher(for: .standalonePlayerShouldClose)) { _ in
@@ -1616,27 +1647,27 @@ struct PlayerScreen: View {
             currentVideoFileId = newFile.id
         }
     }
-    
+
     // ==========================================
     // 🌟 原生加载本地外挂字幕逻辑
     // ==========================================
     private func loadExternalSubtitle() {
         let wasPlaying = playerManager.isPlaying
         if wasPlaying { playerManager.playOrPause() } // 选文件前自动暂停
-        
+
         let panel = NSOpenPanel()
         panel.message = "选择要挂载的字幕文件"
         // 仅允许常见的字幕格式
         panel.allowedContentTypes = [UTType(filenameExtension: "srt"), UTType(filenameExtension: "ass"), UTType(filenameExtension: "ssa"), UTType(filenameExtension: "vtt")].compactMap { $0 }
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        
+
         if panel.runModal() == .OK, let url = panel.url {
             let subName = url.lastPathComponent
             // 发送底层挂载命令，并强制选中这根新轨道
             playerManager.addExternalSubtitle(url: url, title: subName)
         }
-        
+
         if wasPlaying { playerManager.playOrPause() } // 选完自动恢复播放
     }
 
@@ -1690,25 +1721,51 @@ struct PlayerScreen: View {
                 self.embyRemotePlaybackContext = context
                 self.startPosition = resumePosition
                 self.videoURLs = [resolvedURL]
-                self.playerManager.loadFiles(urls: [resolvedURL], startPosition: resumePosition, isBluRay: false, blurayRootPath: nil)
+                self.playerManager.loadFiles(urls: [resolvedURL], startPosition: resumePosition, isBluRay: false, blurayRootPath: nil, trackPreferenceKey: self.currentVideoFileId)
                 self.resetHideTimer()
             }
         }
     }
-    
+
     private func resetHideTimer() {
         hideUITask?.cancel()
+        guard !isMenuInteractionActive else { return }
         guard !isPointerInTopControlArea else { return }
         hideUITask = Task {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run {
+                guard !isMenuInteractionActive else { return }
                 guard !isPointerInTopControlArea else { return }
                 withAnimation(.easeInOut(duration: 0.5)) { showControls = false }
             }
         }
     }
-    
+
+    private func beginMenuInteraction() {
+        hideUITask?.cancel()
+        menuInteractionTask?.cancel()
+        isMenuInteractionActive = true
+        if !showControls {
+            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+        }
+        setCursorHidden(false)
+        menuInteractionTask = Task {
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                isMenuInteractionActive = false
+                resetHideTimer()
+            }
+        }
+    }
+
+    private func completeMenuInteraction() {
+        menuInteractionTask?.cancel()
+        isMenuInteractionActive = false
+        resetHideTimer()
+    }
+
     private func setCursorHidden(_ hidden: Bool) {
         if isClosingPlayback && hidden {
             return
@@ -1731,7 +1788,7 @@ struct PlayerScreen: View {
         }
         isCursorHidden = false
     }
-    
+
     private func prepareVideoWithPermission() {
         let cacheDirectory = OfflineCacheManager.shared.cacheDirectory
         log("prepare start cacheDir=\(cacheDirectory?.path ?? "nil")")
@@ -1819,7 +1876,7 @@ struct PlayerScreen: View {
                     await MainActor.run { self.errorMessage = "找不到该视频的文件记录" }
                     return
                 }
-                
+
                 let applied = await applyPreparedPlayback(
                     files: snapshot.files,
                     sourceBasePath: snapshot.sourceBasePath,
@@ -1844,7 +1901,7 @@ struct PlayerScreen: View {
             }
         }
     }
-    
+
     private func closePlayer() {
         persistAndStopPlaybackIfNeeded(reason: "closePlayerButton")
         dismiss()
@@ -1882,7 +1939,7 @@ struct PlayerScreen: View {
         observedDuration: Double = 0,
         observedProgress: Double = 0
     ) {
-        let resolvedDuration = max(file.duration, max(observedDuration, max(observedProgress, 100.0)))
+        let resolvedDuration = max(file.duration, max(observedDuration, observedProgress))
         file.duration = resolvedDuration
         file.playProgress = resolvedDuration
         file.lastPlayedAt = nil
@@ -1895,6 +1952,86 @@ struct PlayerScreen: View {
             return 0.0
         }
         return min(file.playProgress, max(file.duration - 5.0, 0.0))
+    }
+
+    nonisolated private static func omniPlayDockerRemoteFileId(from file: VideoFile) -> String? {
+        let idParts = file.id.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
+        if idParts.count == 3, idParts[0] == "omniplay-docker", !idParts[2].isEmpty {
+            return idParts[2].removingPercentEncoding ?? idParts[2]
+        }
+
+        let trimmed = file.relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let parts = trimmed.split(separator: "/").map(String.init)
+        guard parts.count >= 5,
+              parts[0] == "api",
+              parts[1] == "playback",
+              parts[2] == "files",
+              parts[4] == "stream" else {
+            return nil
+        }
+        return parts[3].removingPercentEncoding ?? parts[3]
+    }
+
+    private static func syncOmniPlayDockerProgressIfNeeded(file: VideoFile, source: MediaSource?) async {
+        guard source?.protocolKind == .omniplayDocker,
+              let source,
+              let remoteFileId = omniPlayDockerRemoteFileId(from: file) else {
+            return
+        }
+        let config = OmniPlayDockerAuthConfig.decode(source.authConfig)
+        do {
+            let client = try OmniPlayDockerClient(baseURLString: source.baseUrl, sessionCookie: config?.sessionCookie)
+            try await client.updateProgress(
+                videoFileId: remoteFileId,
+                positionSeconds: file.playProgress,
+                durationSeconds: file.duration
+            )
+        } catch {
+            print("Docker 进度同步失败：\(error.localizedDescription)")
+        }
+    }
+
+    private func syncCurrentPlaybackProgressToDocker() async {
+        guard playbackSourceProtocolType == MediaSourceProtocol.omniplayDocker.rawValue,
+              let baseURL = playbackSourceBaseURL,
+              !isClosingPlayback else {
+            return
+        }
+
+        let snapshot = playerManager.playbackEngineSnapshot
+        guard snapshot.timePos.isFinite, snapshot.timePos > 0.5 else { return }
+        guard let fileIndex = resolvedPlaybackFileIndex(from: snapshot),
+              allPlaylistFiles.indices.contains(fileIndex) else {
+            return
+        }
+
+        let file = allPlaylistFiles[fileIndex]
+        guard let remoteFileId = Self.omniPlayDockerRemoteFileId(from: file) else { return }
+        let duration = max(
+            snapshot.duration.isFinite ? snapshot.duration : 0,
+            file.duration,
+            playerManager.duration
+        )
+        guard duration > 0 else { return }
+
+        let config = OmniPlayDockerAuthConfig.decode(playbackSourceAuthConfig)
+        do {
+            let client = try OmniPlayDockerClient(
+                baseURLString: baseURL,
+                sessionCookie: config?.sessionCookie
+            )
+            try await client.updateProgress(
+                videoFileId: remoteFileId,
+                positionSeconds: snapshot.timePos,
+                durationSeconds: duration
+            )
+            if allPlaylistFiles.indices.contains(fileIndex) {
+                allPlaylistFiles[fileIndex].playProgress = max(allPlaylistFiles[fileIndex].playProgress, snapshot.timePos)
+                allPlaylistFiles[fileIndex].duration = max(allPlaylistFiles[fileIndex].duration, duration)
+            }
+        } catch {
+            print("Docker 播放中进度同步失败：\(error.localizedDescription)")
+        }
     }
 
     private func normalizedPlaybackFilename(_ value: String) -> String {
@@ -1916,12 +2053,12 @@ struct PlayerScreen: View {
     }
 
     private func resolvedPlaybackFileIndex(from snapshot: MPVPlayerManager.PlaybackEngineSnapshot) -> Int? {
-        if allPlaylistFiles.indices.contains(snapshot.playlistIndex) {
-            return snapshot.playlistIndex
-        }
         if let filename = snapshot.filename,
            let filenameIndex = allPlaylistFiles.firstIndex(where: { playbackFilename(filename, matches: $0) }) {
             return filenameIndex
+        }
+        if allPlaylistFiles.indices.contains(snapshot.playlistIndex) {
+            return snapshot.playlistIndex
         }
         if let currentVideoFileId {
             return allPlaylistFiles.firstIndex(where: { $0.id == currentVideoFileId })
@@ -1984,8 +2121,7 @@ struct PlayerScreen: View {
         playerManager.stop()
         stopRemoteISOProxyRoutes()
         detachAttachedDiscImages()
-        endPlaybackPowerAssertion()
-        
+
         if let fileId = fileIdToSave {
             Task.detached {
                 let formatter = ISO8601DateFormatter()
@@ -1994,7 +2130,9 @@ struct PlayerScreen: View {
                 let thread = "bg"
                 print("[PlayerScreenClose][\(formatter.string(from: Date()))][\(thread)][q:\(queue)] progress save task begin fileId=\(fileId)")
                 do {
-                    try await AppDatabase.shared.dbQueue.write { db in
+                    let syncTarget = try await AppDatabase.shared.dbQueue.write { db -> (VideoFile, MediaSource?)? in
+                        var fileForRemoteSync: VideoFile?
+                        var sourceForRemoteSync: MediaSource?
                         for completedId in completedFileIds where completedId != fileId {
                             if var completedFile = try VideoFile.fetchOne(db, key: completedId) {
                                 Self.applyFinishedPlaybackState(to: &completedFile)
@@ -2017,7 +2155,14 @@ struct PlayerScreen: View {
                                 file.lastPlayedAt = thresholded > 0.0 ? Date().timeIntervalSince1970 : nil
                             }
                             try file.update(db)
+                            fileForRemoteSync = file
+                            sourceForRemoteSync = try file.request(for: VideoFile.mediaSource).fetchOne(db)
                         }
+                        guard let fileForRemoteSync else { return nil }
+                        return (fileForRemoteSync, sourceForRemoteSync)
+                    }
+                    if let syncTarget {
+                        await Self.syncOmniPlayDockerProgressIfNeeded(file: syncTarget.0, source: syncTarget.1)
                     }
                     await MainActor.run { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
                     let doneFormatter = ISO8601DateFormatter()
@@ -2029,16 +2174,14 @@ struct PlayerScreen: View {
             }
         }
     }
-    
+
     private func toggleFullScreen() {
         guard let keyWindow = NSApplication.shared.windows.first(where: { $0.isKeyWindow }) else { return }
         let targetWindow = keyWindow.sheetParent ?? keyWindow
         targetWindow.toggleFullScreen(nil)
     }
     private func setSubtitleSize(_ size: Int) { playerManager.setSubtitleSize(size); resetHideTimer() }
-    private func subtitleSizeOptionTitle(size: Int, title: String) -> String {
-        playerManager.currentSubtitleSize == size ? "✓ \(title)" : title
-    }
+    private func subtitleSizeLabel(_ size: Int) -> String { switch size { case 12: return "小"; case 16: return "标准"; case 20: return "大"; case 24: return "特大"; default: return "标准" } }
     private func ensureComfortableWindowSize() {
         guard let window = NSApplication.shared.windows.first(where: { $0.isKeyWindow }) else { return }
         guard !window.styleMask.contains(.fullScreen) else { return }
@@ -2061,7 +2204,7 @@ struct PlayerScreen: View {
         let targetWindow = keyWindow.sheetParent ?? keyWindow
         return targetWindow.styleMask.contains(.fullScreen)
     }
-    
+
     @MainActor private func applyPreparedPlayback(
         files: [VideoFile],
         sourceBasePath: String,
@@ -2083,8 +2226,11 @@ struct PlayerScreen: View {
         let mediaServerCredential = (sourceKind == .plex || sourceKind == .emby || sourceKind == .jellyfin)
             ? MediaServerAuthConfig.decode(sourceAuthConfig)
             : nil
+        let omniPlayDockerAuth = sourceKind == .omniplayDocker
+            ? OmniPlayDockerAuthConfig.decode(sourceAuthConfig)
+            : nil
         switch sourceKind {
-        case .webdav, .plex, .emby, .jellyfin:
+        case .webdav, .plex, .emby, .jellyfin, .omniplayDocker:
             guard let remoteBase = URL(string: normalizedBase) else { return false }
             sourceBaseUrl = remoteBase
         case .local, .direct:
@@ -2181,7 +2327,7 @@ struct PlayerScreen: View {
         func webDAVMountedISOPlaybackURL(for file: VideoFile, remoteURL: URL) async -> URL? {
             guard sourceKind == .webdav,
                   !remoteURL.isFileURL,
-                  remoteURL.pathExtension.lowercased() == "iso" else {
+                  isISOFile(file) else {
                 return nil
             }
 
@@ -2306,13 +2452,14 @@ struct PlayerScreen: View {
         }
 
         func remoteISOProxyPlaybackRegistration(for file: VideoFile, remoteURL: URL) async -> RemoteISOProxyRegistration? {
-            guard sourceKind == .webdav,
+            guard sourceKind == .webdav || sourceKind == .omniplayDocker,
                   !remoteURL.isFileURL,
-                  remoteURL.pathExtension.lowercased() == "iso" else {
+                  isISOFile(file) else {
                 return nil
             }
 
-            let reader = RemoteISOHTTPByteReader(url: remoteURL, credential: webDAVCredential)
+            let readerCredential = sourceKind == .webdav ? webDAVCredential : nil
+            let reader = RemoteISOHTTPByteReader(url: remoteURL, credential: readerCredential)
             do {
                 let isoSize = try await reader.contentLength(hint: file.fileSize)
                 let streamFiles = try await RemoteISOImageParser(reader: reader, isoSize: isoSize).bluRayStreamFiles()
@@ -2339,10 +2486,10 @@ struct PlayerScreen: View {
                 let registration = try RemoteISOStreamProxy.shared.register(files: selectedFiles, reader: reader)
                 remoteISOProxyRouteIDs.append(contentsOf: registration.routeIDs)
                 let names = selectedFiles.map { "\($0.fileName):\($0.size)" }.joined(separator: ",")
-                log("WebDAV ISO proxy ready isoSize=\(isoSize) streams=\(streamFiles.count) selected=\(selectedFiles.count) includeExtras=\(includeExtras) files=\(names)")
+                log("Remote ISO proxy ready source=\(sourceKind.rawValue) isoSize=\(isoSize) streams=\(streamFiles.count) selected=\(selectedFiles.count) includeExtras=\(includeExtras) files=\(names)")
                 return registration
             } catch {
-                log("WebDAV ISO proxy failed error=\(error)")
+                log("Remote ISO proxy failed source=\(sourceKind.rawValue) error=\(error)")
                 return nil
             }
         }
@@ -2420,8 +2567,8 @@ struct PlayerScreen: View {
         let playbackFiles = playbackSelection?.files ?? files
         let playbackStartIndex = playbackSelection?.startIndex ?? startIndex
         let targetFile = playbackFiles[playbackStartIndex]
-        let remainingFiles = Array(playbackFiles[playbackStartIndex...])
         let isDirectOpenFile = targetFile.mediaType == "direct"
+        let remainingFiles = Array(playbackFiles[playbackStartIndex...])
 
         func sourcePlaybackURL(for file: VideoFile) async -> URL? {
             switch sourceKind {
@@ -2498,6 +2645,15 @@ struct PlayerScreen: View {
                 }
                 components.queryItems = items.isEmpty ? nil : items
                 return components.url
+            case .omniplayDocker:
+                guard let remoteId = Self.omniPlayDockerRemoteFileId(from: file),
+                      let client = try? OmniPlayDockerClient(
+                        baseURLString: normalizedBase,
+                        sessionCookie: omniPlayDockerAuth?.sessionCookie
+                      ) else {
+                    return nil
+                }
+                return try? await client.playbackURL(videoFileId: remoteId)
             case .local, .direct:
                 let relativePath = file.relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
                 return sourceBaseUrl.appendingPathComponent(relativePath)
@@ -2610,6 +2766,15 @@ struct PlayerScreen: View {
                 || lower.contains("uhd")
         }
 
+        func isISOFile(_ file: VideoFile) -> Bool {
+            [file.fileName, file.relativePath].contains { value in
+                let path = value.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? value
+                return path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    .lowercased()
+                    .hasSuffix(".iso")
+            }
+        }
+
         func splitRelativePathAndQuery(_ value: String) -> (path: String, queryItems: [URLQueryItem]) {
             guard let separator = value.firstIndex(of: "?") else {
                 return (value.trimmingCharacters(in: CharacterSet(charactersIn: "/")), [])
@@ -2619,7 +2784,7 @@ struct PlayerScreen: View {
             let items = URLComponents(string: "http://omniplay.local?\(query)")?.queryItems ?? []
             return (path, items)
         }
-        
+
         func localPlaybackURL(for file: VideoFile) -> URL? {
             guard let cacheDirectory else { return nil }
             if (sourceKind == .emby || sourceKind == .jellyfin),
@@ -2675,18 +2840,24 @@ struct PlayerScreen: View {
 
         guard let originalTargetSourceURL = await sourcePlaybackURL(for: targetFile) else { return false }
         let targetLocalURL = localPlaybackURL(for: targetFile)
-        let requiresRemoteWebDAVISO = targetLocalURL == nil
-            && sourceKind == .webdav
+        let requiresRemoteISO = targetLocalURL == nil
+            && (sourceKind == .webdav || sourceKind == .omniplayDocker)
             && !originalTargetSourceURL.isFileURL
-            && originalTargetSourceURL.pathExtension.lowercased() == "iso"
-        let remoteISOProxyRegistration = requiresRemoteWebDAVISO
+            && isISOFile(targetFile)
+        let remoteISOProxyRegistration = requiresRemoteISO
             ? await remoteISOProxyPlaybackRegistration(for: targetFile, remoteURL: originalTargetSourceURL)
             : nil
-        let mountedISOPlaybackURL = requiresRemoteWebDAVISO && remoteISOProxyRegistration == nil
+        let mountedISOPlaybackURL = sourceKind == .webdav
+            && requiresRemoteISO
+            && remoteISOProxyRegistration == nil
             ? await webDAVMountedISOPlaybackURL(for: targetFile, remoteURL: originalTargetSourceURL)
             : nil
-        if requiresRemoteWebDAVISO && remoteISOProxyRegistration == nil && mountedISOPlaybackURL == nil {
-            errorMessage = "无法播放 WebDAV ISO：远程 Range 解析失败，系统挂载也失败。请确认服务器支持 Range 请求，或使用 SMB/NFS 源播放 ISO。"
+        if requiresRemoteISO && remoteISOProxyRegistration == nil && mountedISOPlaybackURL == nil {
+            if sourceKind == .omniplayDocker {
+                errorMessage = "无法播放 OmniPlay Docker ISO：客户端 Range 代理失败，请确认服务端支持 Range 请求。"
+            } else {
+                errorMessage = "无法播放 WebDAV ISO：远程 Range 解析失败，系统挂载也失败。请确认服务器支持 Range 请求，或使用 SMB/NFS 源播放 ISO。"
+            }
             return false
         }
         let targetSourceURL = remoteISOProxyRegistration?.urls.first ?? mountedISOPlaybackURL ?? originalTargetSourceURL
@@ -2700,13 +2871,13 @@ struct PlayerScreen: View {
             switch sourceKind {
             case .local:
                 return FileManager.default.fileExists(atPath: targetSourceURL.path)
-            case .webdav, .direct, .plex, .emby, .jellyfin:
+            case .webdav, .direct, .plex, .emby, .jellyfin, .omniplayDocker:
                 return true
             }
         }()
         log("applyPreparedPlayback targetFile=\(targetFile.fileName) direct=\(isDirectOpenFile) targetLocal=\(targetLocalURL != nil) targetURL=\(targetSourceURL.path)")
         guard targetExists else { return false }
-        
+
         var urls: [URL] = []
         var localCacheAccessCount = 0
         if let proxyURLs = remoteISOProxyRegistration?.urls {
@@ -2732,7 +2903,7 @@ struct PlayerScreen: View {
         let attachedISOBlurayRoot = firstPlaybackURL.isFileURL && firstPlaybackURL.pathExtension.lowercased() == "iso"
             ? await attachISOImageIfNeeded(firstPlaybackURL)
             : nil
-        
+
         var isBDMV = false
         var bdRoot: String? = nil
         if localCacheAccessCount > 0 && targetLocalURL != nil {
@@ -2753,7 +2924,7 @@ struct PlayerScreen: View {
             isBDMV = true
             bdRoot = attachedISOBlurayRoot ?? targetSourceURL.path
         }
-        
+
         let resolvedURLs = urls
         DispatchQueue.main.async {
             self.isBluRayFolder = isBDMV
@@ -2761,6 +2932,9 @@ struct PlayerScreen: View {
             self.allPlaylistFiles = remainingFiles
             self.currentVideoFileId = targetFile.id
             self.startPosition = Self.playbackResumeStartPosition(for: targetFile)
+            self.playbackSourceBaseURL = sourceBasePath
+            self.playbackSourceProtocolType = sourceProtocolType
+            self.playbackSourceAuthConfig = sourceAuthConfig
             self.rootFolderURL = sourceBaseUrl
             self.videoURLs = resolvedURLs
             self.embyRemotePlaybackContext = remotePlaybackContexts[targetFile.id]
@@ -3636,7 +3810,7 @@ struct PlayerScreen: View {
         }
         return nil
     }
-    
+
     private func playNextEpisodeAndMarkCurrentWatched() {
         guard let currentId = currentVideoFileId else { return }
         guard let currentIndex = allPlaylistFiles.firstIndex(where: { $0.id == currentId }),
@@ -3645,7 +3819,7 @@ struct PlayerScreen: View {
         let snapshot = playerManager.playbackEngineSnapshot
         let duration = max(playerManager.duration, snapshot.duration)
         let currentTime = max(playerManager.currentTimePos, snapshot.timePos)
-        
+
         Task.detached {
             do {
                 try await AppDatabase.shared.dbQueue.write { db in
@@ -3677,13 +3851,13 @@ struct PlayerScreen: View {
             }
         }
     }
-    
+
     private func tryStartPlaybackIfReady() {
         guard !hasIssuedLoad else { return }
         guard !videoURLs.isEmpty else { return }
         guard playerManager.drawableBindVersion > 0 else { return }
         hasIssuedLoad = true
         log("start playback after drawable ready version=\(playerManager.drawableBindVersion)")
-        playerManager.loadFiles(urls: videoURLs, startPosition: startPosition, isBluRay: isBluRayFolder, blurayRootPath: blurayRootPath)
+        playerManager.loadFiles(urls: videoURLs, startPosition: startPosition, isBluRay: isBluRayFolder, blurayRootPath: blurayRootPath, trackPreferenceKey: currentVideoFileId)
     }
 }

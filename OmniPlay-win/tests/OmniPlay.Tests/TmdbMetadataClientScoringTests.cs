@@ -285,7 +285,6 @@ public sealed class TmdbMetadataClientScoringTests : IDisposable
         {
             Tmdb = new TmdbSettings
             {
-                EnableBuiltInPublicSource = true,
                 CustomApiKey = "custom-key",
                 Language = language
             }

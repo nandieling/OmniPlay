@@ -19,4 +19,6 @@ public sealed record AppSettings
     public LocalMetadataSettings LocalMetadata { get; init; } = new();
 
     public PlaybackPreferenceSettings Playback { get; init; } = new();
+
+    public LuckyStunSettings LuckyStun { get; init; } = new();
 }

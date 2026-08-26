@@ -9,6 +9,18 @@ enum LibraryUpdateUserInfoKey {
 }
 
 enum MediaNameParser {
+    struct EpisodeDescriptor {
+        let season: Int
+        let episode: Int
+        let displayName: String
+        let isTVShow: Bool
+        let segmentIndex: Int?
+        let segmentLabel: String?
+        let variantTitle: String?
+        let sortBucket: Int
+        let variantSortKey: String
+    }
+
     struct BluRayStreamCandidate {
         let fileName: String
         let fileSize: Int64
@@ -107,6 +119,8 @@ enum MediaNameParser {
                 }
                 textToParse = candidate
             }
+        } else if let packageFolder = seasonRangeSeriesFolder(from: rawPath) {
+            textToParse = packageFolder
         } else {
             let nsPath = rawPath as NSString
             let fileStem = (nsPath.lastPathComponent as NSString).deletingPathExtension
@@ -125,7 +139,7 @@ enum MediaNameParser {
         }
         return textToParse
     }
-    
+
     nonisolated static func extractSearchMetadata(from rawPath: String) -> (chineseTitle: String?, foreignTitle: String?, fullCleanTitle: String?, year: String?) {
         let originalText = cleanedTitleSource(from: rawPath)
         var textToParse = truncateBeforeReleaseMetadata(originalText)
@@ -134,7 +148,7 @@ enum MediaNameParser {
             with: " ",
             options: .regularExpression
         )
-        
+
         let extractedYear: String? = chooseReleaseYear(from: originalText) ?? chooseReleaseYear(from: textToParse)
         if let extractedYear {
             let removePattern = #"[ \.\-_\(\)\[\]\{\}【】（）《》「」『』〔〕〖〗]*\#(extractedYear)[ \.\-_\(\)\[\]\{\}【】（）《》「」『』〔〕〖〗]*"#
@@ -142,14 +156,12 @@ enum MediaNameParser {
                 textToParse = String(textToParse[..<cutRange.lowerBound])
             }
         }
-        textToParse = removeReleaseTitleNoise(textToParse)
-        
+
         let cleanPatterns = [
             #"(?i)\b(1080p|2160p|4k|720p|480p|blu[- ]?ray|bluray|bdrip|web[- ]?dl|webrip|remux|x264|x265|h\.?264|h\.?265|hevc|avc|vc[- ]?1|aac|dts[- ]?hd|dts|lpcm|truehd|hdr|dv)\b"#,
             #"(?i)\b[sS]\d{1,2}\s*[-–~]\s*(?:[sS])?\d{1,2}\b"#,
             #"(?i)\bseason\s*\d{1,2}\s*[-–~]\s*(?:season\s*)?\d{1,2}\b"#,
             #"(?i)\b[sS]\d{1,2}[eE][pP]?\d{1,3}\b"#,
-            #"(?i)\bpart\s*\d+\b"#,
             #"(?i)\b[sS]\d{1,2}\b"#,
             #"(?i)\b[eE][pP]?\d{1,3}\b"#,
             #"第\s*\d{1,3}\s*[集话]"#,
@@ -164,7 +176,6 @@ enum MediaNameParser {
             #"(?i)\b(bdrom|bdmv)\b"#,
             #"(?i)\b(vol|volume)\s*[-_ ]?\d{1,2}([\-–]\d{1,2})?\b"#,
             #"\d{1,3}\s*周年\s*纪念版"#,
-            #"(花絮|幕后花絮|幕后特辑|幕后|特典|附赠|预告片|样片)"#,
             #"(?i)\b(cctv\d*k?|cmctv)\b"#,
             #"(映画|剧场版|劇場版|電影版|电影版|完全版|总集篇|總集篇|特別篇|特别篇)"#,
             #"(?i)\b(special\s*features?|featurettes?)\b"#,
@@ -174,15 +185,13 @@ enum MediaNameParser {
         for pattern in cleanPatterns {
             textToParse = textToParse.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
         }
-        
+
         textToParse = textToParse.replacingOccurrences(of: #"[._]+"#, with: " ", options: .regularExpression)
-        textToParse = textToParse.replacingOccurrences(of: #"(?i)(?:\s*[-–—:]\s*|\s+)the\s+movie\s*$"#, with: "", options: .regularExpression)
-        textToParse = textToParse.replacingOccurrences(of: #"^[\s._\-–—:]+"#, with: "", options: .regularExpression)
         textToParse = textToParse.replacingOccurrences(of: #"\[[^\]]*\]|\([^\)]*\)"#, with: " ", options: .regularExpression)
         textToParse = textToParse.replacingOccurrences(of: #"[【】（）《》「」『』〔〕〖〗]"#, with: " ", options: .regularExpression)
         textToParse = textToParse.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         let tokens = textToParse.split(separator: " ").map(String.init)
         let originalTokens = originalText
             .replacingOccurrences(of: #"[._]+"#, with: " ", options: .regularExpression)
@@ -195,7 +204,7 @@ enum MediaNameParser {
         let chineseTitle = extractChineseTitle(from: tokens) ?? extractChineseTitle(from: originalTokens)
         let foreignTitle = extractForeignTitle(from: tokens)
         let fullTitle = textToParse.isEmpty ? nil : textToParse
-        
+
         return (
             chineseTitle: chineseTitle,
             foreignTitle: foreignTitle,
@@ -203,7 +212,7 @@ enum MediaNameParser {
             year: extractedYear
         )
     }
-    
+
     nonisolated static func extractParentFolderChineseTitle(from rawPath: String) -> String? {
         let parentPath = (rawPath as NSString).deletingLastPathComponent
         guard !parentPath.isEmpty, parentPath != rawPath else { return nil }
@@ -302,42 +311,89 @@ enum MediaNameParser {
             .lowercased()
         return normalized.range(of: #"^(items/[^/]+/download|library/parts/|library/metadata/|video/|videos/)"#, options: .regularExpression) != nil
     }
-    
-    nonisolated static func parseEpisodeInfo(from fileName: String, fallbackIndex: Int) -> (season: Int, episode: Int, displayName: String, isTVShow: Bool, detectedSubtitle: String?) {
+
+    nonisolated static func parseEpisodeDescriptor(from fileName: String, fallbackIndex: Int) -> EpisodeDescriptor {
         var season = 1
         var episode = fallbackIndex + 1
-        var displayName = fileName
         var isTVShow = false
-        var detectedSubtitle: String? = nil
-        
-        if let match = fileName.range(of: #"[sS](\d{1,2})[eE][pP]?(\d{1,3})"#, options: .regularExpression) {
-            let matched = String(fileName[match]).uppercased()
+        var markerRange: Range<String.Index>?
+        let fileStem = ((fileName as NSString).lastPathComponent as NSString).deletingPathExtension
+
+        if let match = fileStem.range(of: #"[sS](\d{1,2})[eE][pP]?(\d{1,3})"#, options: .regularExpression) {
+            let matched = String(fileStem[match]).uppercased()
             let normalized = matched.replacingOccurrences(of: "EP", with: "E")
             let parts = normalized.components(separatedBy: "E")
             if parts.count == 2 {
-                let seasonText = parts[0].replacingOccurrences(of: "S", with: "")
-                let rawSeason = Int(seasonText) ?? 1
-                season = (seasonText == "0") ? 1 : rawSeason
+                season = Int(parts[0].replacingOccurrences(of: "S", with: "")) ?? 1
                 episode = Int(parts[1]) ?? episode
             }
-            detectedSubtitle = extractEpisodeDescriptorSuffix(from: fileName, after: match)
-            displayName = episodeDisplayName(episode: episode, subtitle: detectedSubtitle)
             isTVShow = true
-        } else if let match = fileName.range(of: #"[eE][pP]?(\d{1,3})"#, options: .regularExpression) {
-            let matched = String(fileName[match]).uppercased()
+            markerRange = match
+        } else if let match = fileStem.range(of: #"[eE][pP]?(\d{1,3})"#, options: .regularExpression) {
+            let matched = String(fileStem[match]).uppercased()
             episode = Int(matched.replacingOccurrences(of: "EP", with: "").replacingOccurrences(of: "E", with: "")) ?? episode
-            detectedSubtitle = extractEpisodeDescriptorSuffix(from: fileName, after: match)
-            displayName = episodeDisplayName(episode: episode, subtitle: detectedSubtitle)
             isTVShow = true
-        } else if let match = fileName.range(of: #"第(\d{1,3})[集话]"#, options: .regularExpression) {
-            let matched = String(fileName[match])
+            markerRange = match
+        } else if let match = fileStem.range(of: #"第(\d{1,3})[集话]"#, options: .regularExpression) {
+            let matched = String(fileStem[match])
             episode = Int(matched.replacingOccurrences(of: "第", with: "").replacingOccurrences(of: "集", with: "").replacingOccurrences(of: "话", with: "")) ?? episode
-            detectedSubtitle = extractEpisodeDescriptorSuffix(from: fileName, after: match)
-            displayName = episodeDisplayName(episode: episode, subtitle: detectedSubtitle)
             isTVShow = true
+            markerRange = match
         }
-        
-        return (season, episode, displayName, isTVShow, detectedSubtitle)
+
+        guard isTVShow else {
+            return EpisodeDescriptor(
+                season: season,
+                episode: episode,
+                displayName: fileName,
+                isTVShow: false,
+                segmentIndex: nil,
+                segmentLabel: nil,
+                variantTitle: nil,
+                sortBucket: 1,
+                variantSortKey: ""
+            )
+        }
+
+        let detail = extractEpisodeDetailInfo(from: fileStem, episodeMarkerRange: markerRange)
+        var displayName = season == 0 ? "特别篇 第 \(episode) 集" : "第 \(season) 季 第 \(episode) 集"
+        if let variantTitle = detail.variantTitle, !variantTitle.isEmpty {
+            displayName += " · \(variantTitle)"
+        }
+        if let segmentLabel = detail.segmentLabel, !segmentLabel.isEmpty {
+            displayName += " · \(segmentLabel)"
+        }
+
+        return EpisodeDescriptor(
+            season: season,
+            episode: episode,
+            displayName: displayName,
+            isTVShow: true,
+            segmentIndex: detail.segmentIndex,
+            segmentLabel: detail.segmentLabel,
+            variantTitle: detail.variantTitle,
+            sortBucket: detail.segmentIndex != nil ? 0 : (detail.variantTitle == nil ? 1 : 2),
+            variantSortKey: normalizedEpisodeDetailKey(detail.variantTitle)
+        )
+    }
+
+    nonisolated static func parseEpisodeInfo(from fileName: String, fallbackIndex: Int) -> (season: Int, episode: Int, displayName: String, isTVShow: Bool) {
+        let parsed = parseEpisodeDescriptor(from: fileName, fallbackIndex: fallbackIndex)
+        return (parsed.season, parsed.episode, parsed.displayName, parsed.isTVShow)
+    }
+
+    nonisolated static func parseMultiSeasonRangeStart(from rawPath: String) -> Int? {
+        let components = rawPath
+            .components(separatedBy: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let searchableComponents = components.count > 1 ? Array(components.dropLast()) : components
+        for component in searchableComponents.reversed() {
+            if let value = seasonRangeStart(in: component), value > 0 {
+                return value
+            }
+        }
+        return nil
     }
 
     nonisolated static func parsePreferredSeason(from rawPath: String) -> Int? {
@@ -372,15 +428,41 @@ enum MediaNameParser {
         return parsePreferredSeason(from: rawPath)
     }
 
-    nonisolated static func parseMultiSeasonRangeStart(from rawPath: String) -> Int? {
+    nonisolated static func isLikelyTVEpisodePath(_ rawPath: String) -> Bool {
+        let lower = rawPath.lowercased()
+        if lower.range(of: #"[s]\d{1,2}[e][p]?\d{1,3}"#, options: .regularExpression) != nil { return true }
+        if lower.range(of: #"\bep?\d{1,3}\b"#, options: .regularExpression) != nil { return true }
+        if lower.range(of: #"\bs\d{1,2}\b"#, options: .regularExpression) != nil { return true }
+        if lower.range(of: #"\bseason[\s._-]*\d{1,2}\b"#, options: .regularExpression) != nil { return true }
+        if rawPath.range(of: #"第\s*\d{1,3}\s*[集话]"#, options: .regularExpression) != nil { return true }
+        if rawPath.range(of: #"第\s*[一二三四五六七八九十零〇两\d]{1,3}\s*季"#, options: .regularExpression) != nil { return true }
+        return false
+    }
+
+    nonisolated static func isLikelyMoviePath(_ rawPath: String) -> Bool {
+        let lower = rawPath.lowercased()
+        if lower.contains("/bdmv/") || lower.hasSuffix(".iso") || lower.hasSuffix(".m2ts") || lower.hasSuffix(".m2t") {
+            return true
+        }
+        let fileName = (rawPath as NSString).lastPathComponent.lowercased()
+        if fileName.range(of: #"(disc|disk|dvd|cd|vol|volume)[-_ ]?\d{0,2}"#, options: .regularExpression) != nil {
+            return true
+        }
+        return false
+    }
+
+    nonisolated private static func seasonRangeSeriesFolder(from rawPath: String) -> String? {
         let components = rawPath
             .components(separatedBy: "/")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        let searchableComponents = components.count > 1 ? Array(components.dropLast()) : components
-        for component in searchableComponents.reversed() {
-            if let value = seasonRangeStart(in: component), value > 0 {
-                return value
+        guard !components.isEmpty else { return nil }
+        let folderComponents = components.count > 1 ? Array(components.dropLast()) : components
+
+        for component in folderComponents.reversed() {
+            if looksLikeSeasonFolderComponent(component) { continue }
+            if seasonRangeStart(in: component) != nil {
+                return component
             }
         }
         return nil
@@ -413,34 +495,21 @@ enum MediaNameParser {
         }
         return nil
     }
-    
-    nonisolated static func isLikelyTVEpisodePath(_ rawPath: String) -> Bool {
-        let lower = rawPath.lowercased()
-        if lower.range(of: #"[s]\d{1,2}[e][p]?\d{1,3}"#, options: .regularExpression) != nil { return true }
-        if lower.range(of: #"\bep?\d{1,3}\b"#, options: .regularExpression) != nil { return true }
-        if lower.range(of: #"\bs\d{1,2}\b"#, options: .regularExpression) != nil { return true }
-        if lower.range(of: #"\bseason[\s._-]*\d{1,2}\b"#, options: .regularExpression) != nil { return true }
-        if rawPath.range(of: #"第\s*\d{1,3}\s*[集话]"#, options: .regularExpression) != nil { return true }
-        if rawPath.range(of: #"第\s*[一二三四五六七八九十零〇两\d]{1,3}\s*季"#, options: .regularExpression) != nil { return true }
-        return false
+
+    nonisolated private static func looksLikeSeasonFolderComponent(_ value: String) -> Bool {
+        value.range(of: #"(?i)^(season|s)\s*[\._-]?\s*\d{1,2}$"#, options: .regularExpression) != nil
+            || value.range(of: #"^第\s*[一二三四五六七八九十零〇两\d]{1,3}\s*季$"#, options: .regularExpression) != nil
     }
 
-    nonisolated static func isLikelyMoviePath(_ rawPath: String) -> Bool {
-        let lower = rawPath.lowercased()
-        if lower.contains("/bdmv/") || lower.hasSuffix(".iso") || lower.hasSuffix(".m2ts") || lower.hasSuffix(".m2t") {
-            return true
-        }
-        let fileName = (rawPath as NSString).lastPathComponent.lowercased()
-        if fileName.range(of: #"(disc|disk|dvd|cd|vol|volume)[-_ ]?\d{0,2}"#, options: .regularExpression) != nil {
-            return true
-        }
-        return false
-    }
-    
     nonisolated static func episodeSortKey(for fileName: String, fallbackIndex: Int) -> (Int, Int, String) {
-        let parsed = parseEpisodeInfo(from: fileName, fallbackIndex: fallbackIndex)
+        let parsed = parseEpisodeDescriptor(from: fileName, fallbackIndex: fallbackIndex)
         let seasonOrder = parsed.season == 0 ? Int.max : parsed.season
-        return (seasonOrder, parsed.episode, fileName)
+        let segmentOrder = parsed.segmentIndex ?? Int.max
+        return (
+            seasonOrder,
+            parsed.episode,
+            String(format: "%02d|%@|%06d|%@", parsed.sortBucket, parsed.variantSortKey, segmentOrder, fileName.lowercased())
+        )
     }
 
     nonisolated static func playbackSortPrecedes(
@@ -561,91 +630,6 @@ enum MediaNameParser {
         return total > 0 ? total : nil
     }
 
-    nonisolated private static func truncateEpisodeDescriptor(from input: String) -> String {
-        let patterns = [
-            #"(?i)(^|[\s._-])[s]\d{1,2}[e][p]?\d{1,3}.*$"#,
-            #"(?i)(^|[\s._-])[e][p]?\d{1,3}.*$"#,
-            #"第\s*\d{1,3}\s*[集话].*$"#
-        ]
-        for pattern in patterns {
-            if let range = input.range(of: pattern, options: .regularExpression) {
-                let prefix = String(input[..<range.lowerBound])
-                    .replacingOccurrences(of: #"[._-]+"#, with: " ", options: .regularExpression)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !prefix.isEmpty {
-                    return prefix
-                }
-            }
-        }
-        return input
-    }
-
-    nonisolated private static func extractEpisodeDescriptorSuffix(from fileName: String, after range: Range<String.Index>) -> String? {
-        let stem = ((fileName as NSString).lastPathComponent as NSString).deletingPathExtension
-        guard let matchRange = stem.range(of: String(fileName[range])) ?? stem.range(of: String(fileName[range]), options: [.caseInsensitive]) else {
-            return nil
-        }
-        var suffix = String(stem[matchRange.upperBound...])
-        suffix = suffix.replacingOccurrences(of: #"^[\s._\-–—:]+"#, with: "", options: .regularExpression)
-        suffix = suffix.replacingOccurrences(of: #"[\s._\-–—:]+$"#, with: "", options: .regularExpression)
-        suffix = suffix.replacingOccurrences(of: #"[._]+"#, with: " ", options: .regularExpression)
-        suffix = suffix.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-        suffix = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
-        suffix = trimEpisodeSuffixReleaseMetadata(suffix)
-        guard !suffix.isEmpty else { return nil }
-        if let partRange = suffix.range(of: #"(?i)^part\s*0*(\d+)$"#, options: .regularExpression) {
-            let partText = String(suffix[partRange])
-                .replacingOccurrences(of: #"(?i)part"#, with: "", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return "Part \(Int(partText) ?? 1)"
-        }
-        return suffix
-    }
-
-    nonisolated private static func trimEpisodeSuffixReleaseMetadata(_ suffix: String) -> String {
-        let normalized = suffix
-            .replacingOccurrences(of: #"[\[\]\(\)\{\}【】（）《》「」『』〔〕〖〗]"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: #"[._\-–—:]+"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return "" }
-
-        let tokens = normalized.split(separator: " ").map(String.init)
-        var kept: [String] = []
-        for token in tokens {
-            if isEpisodeSuffixReleaseMetadataToken(token) {
-                break
-            }
-            kept.append(token)
-        }
-        return kept.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    nonisolated private static func isEpisodeSuffixReleaseMetadataToken(_ token: String) -> Bool {
-        let lower = token.lowercased()
-        if lower.range(of: #"^(19\d{2}|20\d{2})$"#, options: .regularExpression) != nil { return true }
-        if lower.range(of: #"^(\d{3,4}p|[48]k|uhd|fhd|hd|sd)$"#, options: .regularExpression) != nil { return true }
-        if lower.range(of: #"^(8|10|12)bit$"#, options: .regularExpression) != nil { return true }
-        if lower.range(of: #"^h\.?(264|265)$"#, options: .regularExpression) != nil { return true }
-        if lower.range(of: #"^x(264|265)$"#, options: .regularExpression) != nil { return true }
-
-        let metadataTokens: Set<String> = [
-            "bluray", "blu", "ray", "bdrip", "web", "dl", "webdl", "webrip", "hdtv", "uhdtv",
-            "remux", "avc", "hevc", "hdr", "dv", "dovi", "sdr", "hdr10", "hdr10plus",
-            "aac", "ac3", "eac3", "ddp", "dts", "truehd", "atmos", "flac", "mp3", "opus",
-            "nf", "netflix", "amzn", "amazon", "dsnp", "disney", "hulu", "atvp", "max",
-            "cmctv", "cctv", "mweb", "adweb", "tx", "hhweb", "hdsky", "baha", "friday", "bglobal", "b-global", "complete",
-            "proper", "repack", "internal"
-        ]
-        return metadataTokens.contains(lower)
-    }
-
-    nonisolated private static func episodeDisplayName(episode: Int, subtitle: String?) -> String {
-        let base = "第 \(episode) 集"
-        guard let subtitle, !subtitle.isEmpty else { return base }
-        return "\(base) · \(subtitle)"
-    }
-    
     nonisolated private static func extractChineseTitle(from tokens: [String]) -> String? {
         let genericChineseTokens: Set<String> = [
             "电影", "電影", "电影版", "電影版", "剧场版", "劇場版", "映画", "完全版", "总集篇", "總集篇",
@@ -653,7 +637,7 @@ enum MediaNameParser {
         ]
         var groups: [[String]] = []
         var current: [String] = []
-        
+
         for token in tokens {
             let hasChinese = token.range(of: #"\p{Han}"#, options: .regularExpression) != nil
             let normalizedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -669,7 +653,7 @@ enum MediaNameParser {
             }
         }
         if !current.isEmpty { groups.append(current) }
-        
+
         let merged = groups
             .max(by: { $0.joined().count < $1.joined().count })?
             .joined()
@@ -696,13 +680,14 @@ enum MediaNameParser {
             .lowercased()
         return token.range(of: #"^(vol(ume)?\d{0,2}|disc\d{0,2}|disk\d{0,2}|dvd\d{0,2}|cd\d{0,2}|bdrom|bdmv)$"#, options: .regularExpression) != nil
     }
-    
+
     nonisolated private static func extractForeignTitle(from tokens: [String]) -> String? {
         let noiseTokens: Set<String> = [
             "tx", "mweb", "adweb", "web", "dl", "bluray", "bdrip", "webrip",
             "proper", "repack", "remastered", "extended", "unrated",
             "vol", "volume", "disc", "disk", "cd", "part", "bonus", "extra", "extras",
-            "featurette", "trailer", "sample", "cmctv", "bdrom", "bdmv", "special", "features", "anniversary", "edition"
+            "featurette", "trailer", "sample", "cmctv", "bdrom", "bdmv", "special", "features", "anniversary", "edition",
+            "avc", "vc1", "lpcm", "truehd", "ma", "usa", "ger", "gbr", "uk", "jpn", "jap", "kor", "chn", "hkg", "tw"
         ]
         let leadingNumericTitleIndexes: Set<Int> = {
             var indexes: [Int] = []
@@ -733,40 +718,132 @@ enum MediaNameParser {
         }
         let merged = filtered.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !merged.isEmpty else { return nil }
-        let lowered = merged.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedMerged = trimForeignSupplementTitle(merged)
+        let lowered = cleanedMerged.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         if lowered.range(of: #"^(vol|volume|disc|disk|cd|part)\s*\d*$"#, options: .regularExpression) != nil {
             return nil
         }
-        return merged
+        return cleanedMerged.isEmpty ? nil : cleanedMerged
     }
 
-    nonisolated private static func removeReleaseTitleNoise(_ input: String) -> String {
-        var normalized = input
-            .replacingOccurrences(of: #"[._]+"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let supplementTrimmed = trimChineseSupplementTitle(normalized)
-        if supplementTrimmed != normalized {
-            return supplementTrimmed
+    nonisolated private static func trimForeignSupplementTitle(_ input: String) -> String {
+        var result = input
+        let suffixPatterns = [
+            #"(?i)\s+the\s+movie$"#,
+            #"(?i)\s+main\s+feature$"#,
+            #"(?i)\s+feature\s+film$"#
+        ]
+        for pattern in suffixPatterns {
+            result = result.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
         }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
-        normalized = normalized.replacingOccurrences(
-            of: #"(?i)^(?:disc|disk|cd|dvd|vol|volume)\s*\d{0,2}\s*[-–—:]+\s*"#,
-            with: "",
-            options: .regularExpression
-        )
-        normalized = normalized.replacingOccurrences(of: #"^[\s._\-–—:]+"#, with: "", options: .regularExpression)
-        normalized = normalized.replacingOccurrences(of: #"(?i)\b(?:cctv4k|cctv)\b"#, with: " ", options: .regularExpression)
-        normalized = normalized.replacingOccurrences(of: #"(?i)\bepisode\s*\d{1,3}\b"#, with: " ", options: .regularExpression)
-        normalized = normalized.replacingOccurrences(of: #"(剧场版|纪念版|花絮|特典|番外|幕后花絮)"#, with: " ", options: .regularExpression)
-        normalized = normalized.replacingOccurrences(
-            of: #"(?i)(?:\s*[-–—:]\s*|\s+)the\s+movie\s*$"#,
-            with: "",
-            options: .regularExpression
-        )
-        return normalized
+    nonisolated private static func extractEpisodeDetailInfo(
+        from fileStem: String,
+        episodeMarkerRange: Range<String.Index>?
+    ) -> (segmentIndex: Int?, segmentLabel: String?, variantTitle: String?) {
+        guard let episodeMarkerRange else { return (nil, nil, nil) }
+        let suffix = String(fileStem[episodeMarkerRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !suffix.isEmpty else { return (nil, nil, nil) }
+
+        let tokens = tokenizeEpisodeDetail(suffix)
+        guard !tokens.isEmpty else { return (nil, nil, nil) }
+
+        let segment = detectEpisodeSegment(in: tokens)
+        let variantTokens = tokens.enumerated().compactMap { index, token -> String? in
+            if segment.consumedIndexes.contains(index) { return nil }
+            if isEpisodeDetailNoiseToken(token) { return nil }
+            return token
+        }
+        let variantTitle = buildEpisodeVariantTitle(from: variantTokens)
+        return (segment.index, segment.label, variantTitle)
+    }
+
+    nonisolated private static func tokenizeEpisodeDetail(_ input: String) -> [String] {
+        let normalized = input
+            .replacingOccurrences(of: #"[._\-]+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"[\\[\\]\\(\\)\\{\\}【】（）《》「」『』〔〕〖〗,:：]+"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return [] }
+        return normalized.split(separator: " ").map(String.init)
+    }
+
+    nonisolated private static func detectEpisodeSegment(in tokens: [String]) -> (index: Int?, label: String?, consumedIndexes: Set<Int>) {
+        let chineseSegments: [String: (Int, String)] = [
+            "上": (1, "Part 1"),
+            "上半": (1, "Part 1"),
+            "上篇": (1, "Part 1"),
+            "前篇": (1, "Part 1"),
+            "下": (2, "Part 2"),
+            "下半": (2, "Part 2"),
+            "下篇": (2, "Part 2"),
+            "后篇": (2, "Part 2"),
+            "後篇": (2, "Part 2")
+        ]
+
+        for (index, rawToken) in tokens.enumerated() {
+            let token = rawToken.lowercased()
+            if let detected = detectSegmentIndex(in: token, prefixes: ["part", "pt", "cd", "disc"]) {
+                return (detected, "Part \(detected)", [index])
+            }
+            if ["part", "pt", "cd", "disc"].contains(token),
+               index + 1 < tokens.count,
+               let numeric = Int(tokens[index + 1]), numeric > 0 {
+                return (numeric, "Part \(numeric)", [index, index + 1])
+            }
+            if let mapped = chineseSegments[rawToken] {
+                return (mapped.0, mapped.1, [index])
+            }
+        }
+        return (nil, nil, [])
+    }
+
+    nonisolated private static func detectSegmentIndex(in token: String, prefixes: [String]) -> Int? {
+        for prefix in prefixes where token.hasPrefix(prefix) {
+            let digits = String(token.dropFirst(prefix.count))
+            if let value = Int(digits), value > 0 {
+                return value
+            }
+        }
+        return nil
+    }
+
+    nonisolated private static func isEpisodeDetailNoiseToken(_ token: String) -> Bool {
+        let lower = token.lowercased()
+        if lower.isEmpty { return true }
+        if isReleaseMetadataToken(lower) { return true }
+        if [
+            "web", "dl", "blu", "ray", "uhd", "hdr", "hdr10", "hdr10+", "dv",
+            "hdtv", "tv", "rip", "remux", "proper", "repack", "complete"
+        ].contains(lower) { return true }
+        if lower.range(of: #"^(chs|cht|gb|big5|简繁|中字|内封|内挂|外挂)$"#, options: .regularExpression) != nil { return true }
+        if lower.range(of: #"^(hdtv|uhdtv|web-dl|bluray|blu-ray|remux|hevc|x265|x264|h264|h265|hdr10\+?)$"#, options: .regularExpression) != nil { return true }
+        if lower.range(of: #"^(cmctv|cctv\d*k?|mweb|adweb|tx|nf|amzn|dsnp|hmax|max|atvp|appletv|hulu|cr)$"#, options: .regularExpression) != nil { return true }
+        if lower.range(of: #"^(19|20)\d{2}$"#, options: .regularExpression) != nil { return true }
+        if lower.range(of: #"^\d{3,4}p$"#, options: .regularExpression) != nil { return true }
+        if lower.range(of: #"^v\d+$"#, options: .regularExpression) != nil { return true }
+        if lower.range(of: #"^(s\d{1,2}e[p]?\d{1,3}|ep?\d{1,3})$"#, options: .regularExpression) != nil { return true }
+        return false
+    }
+
+    nonisolated private static func buildEpisodeVariantTitle(from tokens: [String]) -> String? {
+        let cleaned = tokens
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else { return nil }
+        let title = cleaned.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return nil }
+        return title
+    }
+
+    nonisolated private static func normalizedEpisodeDetailKey(_ input: String?) -> String {
+        guard let input, !input.isEmpty else { return "" }
+        return input
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .replacingOccurrences(of: #"[^\p{L}\p{N}]"#, with: "", options: .regularExpression)
+            .lowercased()
     }
 
     nonisolated private static func truncateBeforeReleaseMetadata(_ input: String) -> String {
@@ -794,9 +871,9 @@ enum MediaNameParser {
         if token.range(of: #"^s\d{1,2}e[p]?\d{1,3}$"#, options: .regularExpression) != nil { return true }
         if token.range(of: #"^ep?\d{1,3}$"#, options: .regularExpression) != nil { return true }
         if token.range(of: #"^\d{3,4}p$"#, options: .regularExpression) != nil { return true }
-        if token.range(of: #"^(4k|uhd|hdr|dv|atmos|ddp\d*(\.\d+)?|aac\d*(\.\d+)?|ac3|eac3|dts|truehd|flac|mp3)$"#, options: .regularExpression) != nil { return true }
+        if token.range(of: #"^(4k|uhd|hdr|dv|atmos|ddp\d*(\.\d+)?|aac\d*(\.\d+)?|ac3|eac3|dts|dts[- ]?hd|truehd|lpcm|flac|mp3)$"#, options: .regularExpression) != nil { return true }
         if token.range(of: #"^(x|h)?26[45]$"#, options: .regularExpression) != nil { return true }
-        if token.range(of: #"^(web|webdl|webrip|bluray|bdrip|remux)$"#, options: .regularExpression) != nil { return true }
+        if token.range(of: #"^(web|webdl|webrip|bluray|blu-ray|bdrip|remux|avc|vc-?1)$"#, options: .regularExpression) != nil { return true }
         if token.range(of: #"^(amzn|nf|netflix|dsnp|disney|hmax|max|atvp|appletv|hulu|cr)$"#, options: .regularExpression) != nil { return true }
         if token.range(of: #"^(flux|ntb|cakes|tgx|successfulcrab)$"#, options: .regularExpression) != nil { return true }
         if token.range(of: #"^(bonus|extra|extras|featurette|trailer|sample)$"#, options: .regularExpression) != nil { return true }
@@ -951,52 +1028,64 @@ class MediaLibraryManager {
             return count > 0
         }
     }
-    
+
     func fetchAllMovies() throws -> [Movie] {
-        return try dbQueue.read { db in
-            let sql = """
-            SELECT DISTINCT movie.*
-            FROM movie
-            JOIN videoFile ON videoFile.movieId = movie.id
-            JOIN mediaSource ON mediaSource.id = videoFile.sourceId
-            WHERE videoFile.mediaType != 'direct'
-            AND COALESCE(mediaSource.isEnabled, 1) = 1
-            """
-            return try Movie.fetchAll(db, sql: sql).filter { movie in
-                shouldExposeMovieInLibrary(movie)
-            }
+        try dbQueue.read { db in
+            try Movie.fetchVisibleLibrary(in: db)
         }
     }
 
-    private func shouldExposeMovieInLibrary(_ movie: Movie) -> Bool {
-        guard let id = movie.id, id < 0 else { return true }
-        if movie.isLocked { return true }
-        guard MediaNameParser.isUsableLibraryDisplayTitle(movie.title) else { return false }
-        if hasVisiblePlaceholderMetadata(movie.posterPath) { return true }
-        if hasVisiblePlaceholderMetadata(movie.releaseDate) { return true }
-        if let overview = normalizedPlaceholderMetadata(movie.overview),
-           overview != "正在排队等待刮削..." {
-            return true
+    func cleanupExpiredDisabledSources(retention: TimeInterval = 30 * 24 * 60 * 60) throws {
+        let cutoff = Date().timeIntervalSince1970 - retention
+        var removedFileIDs: [String] = []
+
+        try dbQueue.write { db in
+            removedFileIDs = try String.fetchAll(
+                db,
+                sql: """
+                SELECT id
+                FROM videoFile
+                WHERE sourceId IN (
+                    SELECT id
+                    FROM mediaSource
+                    WHERE COALESCE(isEnabled, 1) = 0
+                      AND disabledAt IS NOT NULL
+                      AND disabledAt <= ?
+                )
+                """,
+                arguments: [cutoff]
+            )
+
+            guard !removedFileIDs.isEmpty else { return }
+
+            try db.execute(
+                sql: """
+                DELETE FROM videoFile
+                WHERE sourceId IN (
+                    SELECT id
+                    FROM mediaSource
+                    WHERE COALESCE(isEnabled, 1) = 0
+                      AND disabledAt IS NOT NULL
+                      AND disabledAt <= ?
+                )
+                """,
+                arguments: [cutoff]
+            )
+            try db.execute(sql: "DELETE FROM movie WHERE id NOT IN (SELECT DISTINCT movieId FROM videoFile WHERE movieId IS NOT NULL)")
         }
-        if movie.voteAverage != nil { return true }
-        return false
+
+        guard !removedFileIDs.isEmpty else { return }
+        ThumbnailManager.shared.removeAssets(for: removedFileIDs)
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .libraryUpdated, object: nil)
+        }
     }
 
-    private func hasVisiblePlaceholderMetadata(_ value: String?) -> Bool {
-        normalizedPlaceholderMetadata(value) != nil
-    }
-
-    private func normalizedPlaceholderMetadata(_ value: String?) -> String? {
-        guard let value else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-    
     func batchLockAllMovies() async throws {
         try await dbQueue.write { db in try db.execute(sql: "UPDATE movie SET isLocked = 1") }
         await MainActor.run { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
     }
-    
+
     func updateVideoFileMatch(fileId: String, newTMDBMovieId: Int64) throws {
         try dbQueue.write { db in
             guard var file = try VideoFile.fetchOne(db, key: fileId) else { return }
@@ -1005,7 +1094,29 @@ class MediaLibraryManager {
         }
         DispatchQueue.main.async { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
     }
-    
+
+    func hasPendingMetadataScrape(sourceIDs: [Int64]? = nil) async throws -> Bool {
+        try await dbQueue.read { db in
+            var sql = """
+            SELECT COUNT(*)
+            FROM videoFile
+            JOIN mediaSource ON mediaSource.id = videoFile.sourceId
+            WHERE videoFile.mediaType = 'unmatched'
+              AND COALESCE(mediaSource.isEnabled, 1) = 1
+            """
+            var arguments = StatementArguments()
+            if let sourceIDs, !sourceIDs.isEmpty {
+                let placeholders = Array(repeating: "?", count: sourceIDs.count).joined(separator: ",")
+                sql += " AND videoFile.sourceId IN (\(placeholders))"
+                for sourceID in sourceIDs {
+                    arguments += [sourceID]
+                }
+            }
+            let count = try Int.fetchOne(db, sql: sql, arguments: arguments) ?? 0
+            return count > 0
+        }
+    }
+
     // 🌟 核心升级：3轮递进式自动刮削引擎
     func processUnmatchedFiles(
         sourceID: Int64? = nil,
@@ -1056,25 +1167,16 @@ class MediaLibraryManager {
                     arguments: [placeholderMovieID]
                 )
             }
-            return try VideoFile.fetchAll(
-                db,
-                sql: """
-                SELECT videoFile.*
-                FROM videoFile
-                JOIN mediaSource ON mediaSource.id = videoFile.sourceId
-                WHERE videoFile.mediaType = 'unmatched'
-                  AND COALESCE(mediaSource.isEnabled, 1) = 1
-                """
-            )
+            return try VideoFile.fetchVisibleUnmatched(in: db)
         }
         if unmatchedFiles.isEmpty {
             print("🤖 递进刮削器：没有找到需要刮削的新文件。")
             return
         }
-        
+
         let representativeFiles = representativeUnmatchedFiles(from: unmatchedFiles)
         print("🤖 递进刮削器：开始刮削 \(representativeFiles.count) 个影视条目（来自 \(unmatchedFiles.count) 个新文件）...")
-        
+
         var tvAutoReuseCache: [String: TMDBResult] = [:]
 
         for file in representativeFiles {
@@ -1086,7 +1188,7 @@ class MediaLibraryManager {
             }
             guard isStillUnmatched else { continue }
             if let movieId = file.movieId { let isLocked = try await dbQueue.read { db in try Movie.fetchOne(db, key: movieId)?.isLocked ?? false }; if isLocked { continue } }
-            
+
             if let reuseKey = tvAutoReuseKey(for: file),
                let cached = tvAutoReuseCache[reuseKey],
                shouldAutoReuseTVResult(cached, for: file) {
@@ -1108,9 +1210,9 @@ class MediaLibraryManager {
                 fallbackIndex: 0
             )
             let yearForSearch = targetYear
-            
+
             print("\n🎬 正在处理文件: \(file.fileName)")
-            
+
             // --- 尝试 1: 中文名 + 年份 (精准模式) ---
             if let cnTitle = extraction.chineseTitle, !cnTitle.isEmpty {
                 print("   👉 尝试 [1/3] 精准模式 (中文+年份): [\(cnTitle)] 年份权重: [\(targetYear ?? "无")]")
@@ -1136,7 +1238,7 @@ class MediaLibraryManager {
                     }
                 }
             }
-            
+
             // --- 尝试 2: 父文件夹中文名 + 年份（文件名中文不可靠时回退） ---
             if let folderChinese = extraction.parentChineseTitle,
                !folderChinese.isEmpty,
@@ -1164,7 +1266,7 @@ class MediaLibraryManager {
                     }
                 }
             }
-            
+
             // --- 尝试 3: 外文名 + 年份（中文名缺失或尝试失败后降级） ---
             if let foreignTitle = extraction.foreignTitle, !foreignTitle.isEmpty {
                 let foreignCandidates = buildForeignQueryCandidates(from: foreignTitle)
@@ -1197,7 +1299,7 @@ class MediaLibraryManager {
                 }
                 if matchedInForeignTry { continue }
             }
-            
+
             // --- 尝试 4: 完整清洗名兜底 ---
             if let fullTitle = extraction.fullCleanTitle, !fullTitle.isEmpty {
                 print("   👉 尝试 [4/5] 兜底模式 (完整清洗名+年份): [\(fullTitle)] 年份权重: [\(targetYear ?? "无")]")
@@ -1223,7 +1325,7 @@ class MediaLibraryManager {
                     }
                 }
             }
-            
+
             // --- 尝试 5: 去空格去数字的纯名字强降级 ---
             if let fullTitle = extraction.fullCleanTitle {
                 let fallbackTitle = fullTitle.replacingOccurrences(of: #"[ \d]"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces)
@@ -1244,13 +1346,59 @@ class MediaLibraryManager {
                     print("   ❌ 彻底未找到: [\(fullTitle)]")
                 }
             }
-            
+
         }
 
         if exposeFailures {
             try await exposeRemainingUnmatchedFiles(sourceID: sourceID, placeholderMovieID: placeholderMovieID)
         }
 
+        await MainActor.run { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
+    }
+
+    func exposeQueuedUnmatchedPlaceholders(sourceID: Int64? = nil) async throws {
+        try await dbQueue.write { db in
+            let movies: [Movie]
+            if let sourceID {
+                movies = try Movie.fetchAll(
+                    db,
+                    sql: """
+                    SELECT DISTINCT movie.*
+                    FROM movie
+                    JOIN videoFile ON videoFile.movieId = movie.id
+                    JOIN mediaSource ON mediaSource.id = videoFile.sourceId
+                    WHERE videoFile.mediaType = 'unmatched'
+                      AND videoFile.sourceId = ?
+                      AND movie.id < 0
+                      AND COALESCE(mediaSource.isEnabled, 1) = 1
+                    """,
+                    arguments: [sourceID]
+                )
+            } else {
+                movies = try Movie.fetchAll(
+                    db,
+                    sql: """
+                    SELECT DISTINCT movie.*
+                    FROM movie
+                    JOIN videoFile ON videoFile.movieId = movie.id
+                    JOIN mediaSource ON mediaSource.id = videoFile.sourceId
+                    WHERE videoFile.mediaType = 'unmatched'
+                      AND movie.id < 0
+                      AND COALESCE(mediaSource.isEnabled, 1) = 1
+                    """
+                )
+            }
+
+            for var movie in movies {
+                guard !movie.isLocked else { continue }
+                guard MediaNameParser.isUsableLibraryDisplayTitle(movie.title) else { continue }
+                let currentOverview = movie.overview?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if currentOverview == nil || currentOverview?.isEmpty == true || currentOverview == "正在排队等待刮削..." {
+                    movie.overview = "等待 TMDB API 连通后自动刮削。"
+                    try movie.update(db)
+                }
+            }
+        }
         await MainActor.run { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
     }
 
@@ -1298,16 +1446,7 @@ class MediaLibraryManager {
                     arguments: [placeholderMovieID]
                 )
             } else {
-                files = try VideoFile.fetchAll(
-                    db,
-                    sql: """
-                    SELECT videoFile.*
-                    FROM videoFile
-                    JOIN mediaSource ON mediaSource.id = videoFile.sourceId
-                    WHERE videoFile.mediaType = 'unmatched'
-                      AND COALESCE(mediaSource.isEnabled, 1) = 1
-                    """
-                )
+                files = try VideoFile.fetchVisibleUnmatched(in: db)
             }
 
             let failedMovieIDs = Set(files.compactMap(\.movieId))
@@ -1362,7 +1501,7 @@ class MediaLibraryManager {
             fallbackIndex: fallbackIndex
         )
         let parsed = MediaNameParser.parseEpisodeInfo(from: file.fileName, fallbackIndex: fallbackIndex)
-        let season = preferredSeason ?? (parsed.isTVShow ? parsed.season : Int.max)
+        let season = parsed.isTVShow ? parsed.season : (preferredSeason ?? Int.max)
         let seasonRank = season == 0 ? Int.max : season
         return (
             sourceId: file.sourceId,
@@ -1372,22 +1511,14 @@ class MediaLibraryManager {
             path: file.relativePath
         )
     }
-    
+
     private func saveScrapingResult(_ tmdbResult: TMDBResult, for file: VideoFile) async throws {
-        try Task.checkCancellation()
-        guard try await sourceExists(file.sourceId) else { return }
+        if let path = tmdbResult.posterPath { PosterManager.shared.downloadPoster(posterPath: path) }
         let extracted = extractTitlesAndYear(from: file)
         let chineseFallback = extracted.chineseTitle ?? extracted.parentChineseTitle
         let resultId = Int64(tmdbResult.id); let oldFakeMovieId = file.movieId; let rTitle = tmdbResult.preferredTitle(chineseFallback: chineseFallback); let rDate = tmdbResult.releaseDate ?? tmdbResult.firstAirDate; let rOverview = tmdbResult.overview; let rPoster = tmdbResult.posterPath; let rVoteAverage = tmdbResult.voteAverage; let rFileId = file.id
-        
-        let didSave = try await dbQueue.write { db -> Bool in
-            let sourceCount = try Int.fetchOne(
-                db,
-                sql: "SELECT COUNT(*) FROM mediaSource WHERE id = ?",
-                arguments: [file.sourceId]
-            ) ?? 0
-            guard sourceCount > 0 else { return false }
 
+        try await dbQueue.write { db in
             let movie: Movie
             if var existingMovie = try Movie.fetchOne(db, key: resultId) {
                 if !existingMovie.isLocked {
@@ -1412,17 +1543,20 @@ class MediaLibraryManager {
                     groupedFile.movieId = movie.id
                     try groupedFile.update(db)
                 }
+                if var douban = try DoubanMetadata.fetchOne(db, key: fakeId),
+                   let realMovieId = movie.id {
+                    _ = try DoubanMetadata.deleteOne(db, key: fakeId)
+                    douban.movieId = realMovieId
+                    try douban.save(db)
+                }
             } else if var fileToUpdate = try VideoFile.fetchOne(db, key: rFileId) {
                 fileToUpdate.mediaType = "movie"
                 fileToUpdate.movieId = movie.id
                 try fileToUpdate.update(db)
             }
             if let fakeId = oldFakeMovieId, fakeId < 0 { _ = try Movie.deleteOne(db, key: fakeId) }
-            return true
         }
-        guard didSave else { return }
-        
-        if let path = tmdbResult.posterPath { PosterManager.shared.downloadPoster(posterPath: path) }
+
         let exportSource = try? await dbQueue.read { db in
             try MediaSource.fetchOne(db, key: file.sourceId)
         }
@@ -1448,9 +1582,8 @@ class MediaLibraryManager {
                 await LocalMetadataSidecarStore.shared.exportMovie(metadata: sidecar, videoURL: videoURL)
             }
         }
-        await MainActor.run { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
     }
-    
+
     private func extractTitlesAndYear(from file: VideoFile) -> (chineseTitle: String?, parentChineseTitle: String?, foreignTitle: String?, fullCleanTitle: String?, year: String?) {
         return MediaNameParser.combinedSearchMetadata(relativePath: file.relativePath, fileName: file.fileName)
     }
@@ -1500,8 +1633,6 @@ class MediaLibraryManager {
         for file: VideoFile,
         tvCache: inout [String: TMDBResult]
     ) async throws {
-        try Task.checkCancellation()
-        guard try await sourceExists(file.sourceId) else { return }
         try await saveScrapingResult(tmdbResult, for: file)
         guard shouldAutoReuseTVResult(tmdbResult, for: file),
               let key = tvAutoReuseKey(for: file) else { return }
@@ -1531,7 +1662,7 @@ class MediaLibraryManager {
         let release = result.releaseDate ?? ""
         return release.isEmpty
     }
-    
+
     private func isTVResult(_ result: TMDBResult) -> Bool {
         if let mediaType = result.mediaType?.lowercased(), mediaType == "tv" { return true }
         if let firstAir = result.firstAirDate, !firstAir.isEmpty { return true }
@@ -1757,13 +1888,27 @@ struct WebDAVPreflightChecker {
                 sanitizedEndpoint: MediaSourceScanDiagnosticsFormatter.sanitizedEndpoint(from: normalized)
             )
         }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PROPFIND"
+        request.timeoutInterval = 12
+        request.setValue("0", forHTTPHeaderField: "Depth")
+        request.setValue("text/xml; charset=\"utf-8\"", forHTTPHeaderField: "Content-Type")
+        request.httpBody = """
+<?xml version="1.0" encoding="utf-8" ?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop>
+    <d:resourcetype/>
+  </d:prop>
+</d:propfind>
+""".data(using: .utf8)
+
         let trimmedUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        let authHeader: String? = {
-            guard !trimmedUser.isEmpty else { return nil }
+        if !trimmedUser.isEmpty {
             let raw = "\(trimmedUser):\(password)"
             let encoded = Data(raw.utf8).base64EncodedString()
-            return "Basic \(encoded)"
-        }()
+            request.setValue("Basic \(encoded)", forHTTPHeaderField: "Authorization")
+        }
 
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 12
@@ -1778,123 +1923,9 @@ struct WebDAVPreflightChecker {
         }
         let session = URLSession(configuration: config, delegate: LocalNetworkTrustSessionDelegate.shared, delegateQueue: nil)
 
-        func makeRequest(url: URL) -> URLRequest {
-            var request = URLRequest(url: url)
-            request.httpMethod = "PROPFIND"
-            request.timeoutInterval = 12
-            request.setValue("0", forHTTPHeaderField: "Depth")
-            request.setValue("text/xml; charset=\"utf-8\"", forHTTPHeaderField: "Content-Type")
-            request.httpBody = """
-<?xml version="1.0" encoding="utf-8" ?>
-<d:propfind xmlns:d="DAV:">
-  <d:prop>
-    <d:resourcetype/>
-  </d:prop>
-</d:propfind>
-""".data(using: .utf8)
-            if let authHeader {
-                request.setValue(authHeader, forHTTPHeaderField: "Authorization")
-            }
-            return request
-        }
-
-        func resolveRedirectURL(from response: HTTPURLResponse, base: URL) -> URL? {
-            guard let location = response.value(forHTTPHeaderField: "Location")?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !location.isEmpty else { return nil }
-            if let absolute = URL(string: location) {
-                return absolute
-            }
-            return URL(string: location, relativeTo: base)?.absoluteURL
-        }
-
-        func runPreflight(currentURL: URL, redirectsLeft: Int) async throws -> (HTTPURLResponse, URL) {
-            let request = makeRequest(url: currentURL)
+        do {
             let (_, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
-                throw NSError(domain: "WebDAVPreflightChecker", code: -1, userInfo: [NSLocalizedDescriptionKey: "invalid_response"])
-            }
-            let code = http.statusCode
-            if (code == 301 || code == 302 || code == 307 || code == 308),
-               redirectsLeft > 0,
-               let nextURL = resolveRedirectURL(from: http, base: currentURL) {
-                return try await runPreflight(currentURL: nextURL, redirectsLeft: redirectsLeft - 1)
-            }
-            return (http, currentURL)
-        }
-
-        do {
-            let (http, finalURL) = try await runPreflight(currentURL: url, redirectsLeft: 3)
-            let sanitized = MediaSourceScanDiagnosticsFormatter.sanitizedEndpoint(from: finalURL.absoluteString)
-            let code = http.statusCode
-            if code == 401 || code == 403 {
-                return WebDAVPreflightResult(
-                    isReachable: false,
-                    category: .auth,
-                    message: "连接测试失败：认证失败（HTTP \(code)），请检查账号密码。",
-                    httpStatusCode: code,
-                    urlErrorCode: nil,
-                    sanitizedEndpoint: sanitized
-                )
-            }
-            if (500...599).contains(code) {
-                return WebDAVPreflightResult(
-                    isReachable: false,
-                    category: .server,
-                    message: "连接测试失败：服务端异常（HTTP \(code)）。",
-                    httpStatusCode: code,
-                    urlErrorCode: nil,
-                    sanitizedEndpoint: sanitized
-                )
-            }
-            if (200...299).contains(code) || code == 207 {
-                return WebDAVPreflightResult(
-                    isReachable: true,
-                    category: nil,
-                    message: "连接测试成功。",
-                    httpStatusCode: code,
-                    urlErrorCode: nil,
-                    sanitizedEndpoint: sanitized
-                )
-            }
-            if code == 301 || code == 302 || code == 307 || code == 308 {
-                return WebDAVPreflightResult(
-                    isReachable: false,
-                    category: .config,
-                    message: "连接测试失败：重定向次数过多，请填写最终 WebDAV 目录地址。",
-                    httpStatusCode: code,
-                    urlErrorCode: nil,
-                    sanitizedEndpoint: sanitized
-                )
-            }
-            return WebDAVPreflightResult(
-                isReachable: false,
-                category: .config,
-                message: "连接测试失败：返回 HTTP \(code)，请检查地址路径与 WebDAV 服务状态。",
-                httpStatusCode: code,
-                urlErrorCode: nil,
-                sanitizedEndpoint: sanitized
-            )
-        } catch let error as URLError {
-            let nsError = error as NSError
-            let userInfoText = nsError.userInfo.description.lowercased()
-            let isLocalNetworkDenied = error.code == .notConnectedToInternet && userInfoText.contains("local network prohibited")
-            let message: String
-            if isLocalNetworkDenied {
-                message = "连接测试失败：系统未授权本地网络访问。请到“系统设置 -> 隐私与安全性 -> 本地网络”中允许觅影，然后重试。"
-            } else {
-                message = "连接测试失败：网络错误（\(error.code.rawValue)）\(error.localizedDescription)"
-            }
-            return WebDAVPreflightResult(
-                isReachable: false,
-                category: .network,
-                message: message,
-                httpStatusCode: nil,
-                urlErrorCode: error.code.rawValue,
-                sanitizedEndpoint: MediaSourceScanDiagnosticsFormatter.sanitizedEndpoint(from: normalized)
-            )
-        } catch {
-            let nsError = error as NSError
-            if nsError.domain == "WebDAVPreflightChecker", nsError.code == -1 {
                 return WebDAVPreflightResult(
                     isReachable: false,
                     category: .unknown,
@@ -1904,6 +1935,56 @@ struct WebDAVPreflightChecker {
                     sanitizedEndpoint: MediaSourceScanDiagnosticsFormatter.sanitizedEndpoint(from: normalized)
                 )
             }
+
+            let code = http.statusCode
+            if code == 401 || code == 403 {
+                return WebDAVPreflightResult(
+                    isReachable: false,
+                    category: .auth,
+                    message: "连接测试失败：认证失败（HTTP \(code)），请检查账号密码。",
+                    httpStatusCode: code,
+                    urlErrorCode: nil,
+                    sanitizedEndpoint: MediaSourceScanDiagnosticsFormatter.sanitizedEndpoint(from: normalized)
+                )
+            }
+            if (500...599).contains(code) {
+                return WebDAVPreflightResult(
+                    isReachable: false,
+                    category: .server,
+                    message: "连接测试失败：服务端异常（HTTP \(code)）。",
+                    httpStatusCode: code,
+                    urlErrorCode: nil,
+                    sanitizedEndpoint: MediaSourceScanDiagnosticsFormatter.sanitizedEndpoint(from: normalized)
+                )
+            }
+            if (200...299).contains(code) || code == 207 {
+                return WebDAVPreflightResult(
+                    isReachable: true,
+                    category: nil,
+                    message: "连接测试成功。",
+                    httpStatusCode: code,
+                    urlErrorCode: nil,
+                    sanitizedEndpoint: MediaSourceScanDiagnosticsFormatter.sanitizedEndpoint(from: normalized)
+                )
+            }
+            return WebDAVPreflightResult(
+                isReachable: false,
+                category: .config,
+                message: "连接测试失败：返回 HTTP \(code)，请检查地址路径与 WebDAV 服务状态。",
+                httpStatusCode: code,
+                urlErrorCode: nil,
+                sanitizedEndpoint: MediaSourceScanDiagnosticsFormatter.sanitizedEndpoint(from: normalized)
+            )
+        } catch let error as URLError {
+            return WebDAVPreflightResult(
+                isReachable: false,
+                category: .network,
+                message: "连接测试失败：网络错误（\(error.code.rawValue)）\(error.localizedDescription)",
+                httpStatusCode: nil,
+                urlErrorCode: error.code.rawValue,
+                sanitizedEndpoint: MediaSourceScanDiagnosticsFormatter.sanitizedEndpoint(from: normalized)
+            )
+        } catch {
             return WebDAVPreflightResult(
                 isReachable: false,
                 category: .unknown,
@@ -1916,47 +1997,64 @@ struct WebDAVPreflightChecker {
     }
 }
 
-struct WebDAVDirectoryItem: Identifiable, Hashable {
+struct WebDAVDirectoryItem: Identifiable, Equatable {
     let id: String
     let url: URL
-    let name: String
+    let displayName: String
     let protocolKind: MediaSourceProtocol
     let authConfig: String?
 
     init(
-        id: String,
+        id: String? = nil,
         url: URL,
-        name: String,
+        displayName: String,
         protocolKind: MediaSourceProtocol = .webdav,
         authConfig: String? = nil
     ) {
-        self.id = id
         self.url = url
-        self.name = name
+        self.displayName = displayName
         self.protocolKind = protocolKind
         self.authConfig = authConfig
+        self.id = id ?? "\(protocolKind.rawValue):\(url.absoluteString)"
     }
+}
 
-    var displayURL: String {
-        let normalized = protocolKind == .webdav
-            ? MediaSourceProtocol.webdav.normalizedBaseURL(url.absoluteString)
-            : protocolKind.normalizedBaseURL(url.absoluteString)
-        return normalized.removingPercentEncoding ?? normalized
+enum WebDAVDirectoryBrowserError: LocalizedError {
+    case invalidBaseURL(String)
+    case requestFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidBaseURL:
+            return "WebDAV 地址无效，请输入 http(s):// 开头且包含主机名的地址。"
+        case .requestFailed(let message):
+            return message
+        }
     }
 }
 
 struct WebDAVDirectoryBrowser {
-    private struct DAVEntry {
-        var href: String = ""
-        var displayName: String = ""
-        var isDirectory = false
+    private struct AuthCredential {
+        let username: String
+        let password: String
+    }
+
+    private struct DAVItem {
+        let url: URL
+        let displayName: String?
+        let isDirectory: Bool
     }
 
     private final class PROPFINDParser: NSObject, XMLParserDelegate {
-        private(set) var entries: [DAVEntry] = []
-        private var currentEntry: DAVEntry?
-        private var currentElement: String = ""
-        private var textBuffer: String = ""
+        struct Entry {
+            var href: String = ""
+            var displayName: String?
+            var isDirectory = false
+        }
+
+        private(set) var entries: [Entry] = []
+        private var currentEntry: Entry?
+        private var textBuffer = ""
 
         private func localName(_ raw: String) -> String {
             if let idx = raw.lastIndex(of: ":") {
@@ -1965,7 +2063,7 @@ struct WebDAVDirectoryBrowser {
             return raw.lowercased()
         }
 
-        func parse(data: Data) throws -> [DAVEntry] {
+        func parse(data: Data) throws -> [Entry] {
             let parser = XMLParser(data: data)
             parser.delegate = self
             parser.shouldProcessNamespaces = true
@@ -1973,17 +2071,17 @@ struct WebDAVDirectoryBrowser {
             parser.shouldResolveExternalEntities = false
             guard parser.parse() else {
                 let reason = parser.parserError?.localizedDescription ?? "未知 XML 解析错误"
-                throw NSError(domain: "WebDAVDirectoryBrowser", code: -1, userInfo: [NSLocalizedDescriptionKey: "WebDAV 文件夹列表解析失败：\(reason)"])
+                throw WebDAVDirectoryBrowserError.requestFailed("WebDAV 响应解析失败：\(reason)")
             }
             return entries
         }
 
         func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String : String] = [:]) {
             let name = localName(qName ?? elementName)
-            currentElement = name
             textBuffer = ""
+
             if name == "response" {
-                currentEntry = DAVEntry()
+                currentEntry = Entry()
             } else if name == "collection" {
                 currentEntry?.isDirectory = true
             }
@@ -2008,30 +2106,61 @@ struct WebDAVDirectoryBrowser {
                 currentEntry = nil
             }
 
-            currentElement = ""
             textBuffer = ""
         }
     }
 
-    func listSharedFolders(baseURL rawBaseURL: String, username: String, password: String) async throws -> [WebDAVDirectoryItem] {
-        let normalized = MediaSourceProtocol.webdav.normalizedBaseURL(rawBaseURL)
-        guard MediaSourceProtocol.webdav.isValidBaseURL(normalized),
-              let baseURL = URL(string: normalized) else {
-            throw NSError(domain: "WebDAVDirectoryBrowser", code: 1001, userInfo: [NSLocalizedDescriptionKey: "WebDAV 地址无效，请输入 http(s):// 开头且包含主机名的地址。"])
+    func listDirectories(at rawURL: String, username: String, password: String) async throws -> [WebDAVDirectoryItem] {
+        let normalized = MediaSourceProtocol.webdav.normalizedBaseURL(rawURL)
+        guard MediaSourceProtocol.webdav.isValidBaseURL(normalized), let url = URL(string: normalized) else {
+            throw WebDAVDirectoryBrowserError.invalidBaseURL(rawURL)
+        }
+        guard let directoryURL = sanitizedURL(from: url) else {
+            throw WebDAVDirectoryBrowserError.invalidBaseURL(rawURL)
         }
 
-        var cleanComponents = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
-        cleanComponents?.user = nil
-        cleanComponents?.password = nil
-        if cleanComponents?.path.isEmpty == true {
-            cleanComponents?.path = "/"
-        }
-        guard let requestURL = cleanComponents?.url else {
-            throw NSError(domain: "WebDAVDirectoryBrowser", code: 1002, userInfo: [NSLocalizedDescriptionKey: "WebDAV 地址无效。"])
+        let credential = resolveCredential(username: username, password: password, fallbackURL: url)
+        let items = try await listItems(at: directoryURL, credential: credential)
+        var seen: Set<String> = []
+
+        return items
+            .filter(\.isDirectory)
+            .compactMap { item -> WebDAVDirectoryItem? in
+                let key = MediaSourceProtocol.webdav.normalizedBaseURL(item.url.absoluteString)
+                guard !seen.contains(key) else { return nil }
+                seen.insert(key)
+                return WebDAVDirectoryItem(
+                    url: item.url,
+                    displayName: displayName(for: item.url, fallback: item.displayName)
+                )
+            }
+            .sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+    }
+
+    private func listItems(at directoryURL: URL, credential: AuthCredential?) async throws -> [DAVItem] {
+        var request = URLRequest(url: directoryURL)
+        request.httpMethod = "PROPFIND"
+        request.setValue("1", forHTTPHeaderField: "Depth")
+        request.setValue("text/xml; charset=\"utf-8\"", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 15
+        request.httpBody = """
+<?xml version="1.0" encoding="utf-8" ?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop>
+    <d:displayname/>
+    <d:resourcetype/>
+  </d:prop>
+</d:propfind>
+""".data(using: .utf8)
+
+        if let credential {
+            let raw = "\(credential.username):\(credential.password)"
+            let encoded = Data(raw.utf8).base64EncodedString()
+            request.setValue("Basic \(encoded)", forHTTPHeaderField: "Authorization")
         }
 
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 12
+        config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 25
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         config.urlCache = nil
@@ -2043,97 +2172,82 @@ struct WebDAVDirectoryBrowser {
         }
         let session = URLSession(configuration: config, delegate: LocalNetworkTrustSessionDelegate.shared, delegateQueue: nil)
 
-        var request = URLRequest(url: requestURL)
-        request.httpMethod = "PROPFIND"
-        request.timeoutInterval = 12
-        request.setValue("1", forHTTPHeaderField: "Depth")
-        request.setValue("text/xml; charset=\"utf-8\"", forHTTPHeaderField: "Content-Type")
-        request.httpBody = """
-<?xml version="1.0" encoding="utf-8" ?>
-<d:propfind xmlns:d="DAV:">
-  <d:prop>
-    <d:displayname/>
-    <d:resourcetype/>
-  </d:prop>
-</d:propfind>
-""".data(using: .utf8)
-
-        let trimmedUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedUser.isEmpty {
-            let raw = "\(trimmedUser):\(password)"
-            let encoded = Data(raw.utf8).base64EncodedString()
-            request.setValue("Basic \(encoded)", forHTTPHeaderField: "Authorization")
-        }
-
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
-                throw NSError(domain: "WebDAVDirectoryBrowser", code: 1003, userInfo: [NSLocalizedDescriptionKey: "WebDAV 未返回有效响应。"])
+                throw WebDAVDirectoryBrowserError.requestFailed("WebDAV 请求失败：未收到有效响应。")
             }
-
             if http.statusCode == 401 || http.statusCode == 403 {
-                throw NSError(domain: "WebDAVDirectoryBrowser", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "WebDAV 认证失败，请检查用户名和密码。"])
+                throw WebDAVDirectoryBrowserError.requestFailed("WebDAV 认证失败：HTTP \(http.statusCode)，请检查账号密码。")
             }
             guard (200...299).contains(http.statusCode) || http.statusCode == 207 else {
-                throw NSError(domain: "WebDAVDirectoryBrowser", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "WebDAV 文件夹列表请求失败：HTTP \(http.statusCode)。"])
+                throw WebDAVDirectoryBrowserError.requestFailed("WebDAV 请求失败：HTTP \(http.statusCode)，请检查地址路径与服务状态。")
             }
 
-            let entries = try PROPFINDParser().parse(data: data)
-            let currentPath = normalizePath(requestURL.path)
-            var folders: [WebDAVDirectoryItem] = []
-            var seen: Set<String> = []
+            let parser = PROPFINDParser()
+            let entries = try parser.parse(data: data)
+            let currentPath = normalizePath(directoryURL.path)
+            let resolutionBaseURL = directoryURLForRelativeResolution(directoryURL)
 
-            for entry in entries where entry.isDirectory {
-                guard let resolved = resolveHref(entry.href, baseURL: requestURL) else { continue }
-                let cleanURL = sanitizedURL(resolved)
-                let path = normalizePath(cleanURL.path)
-                if path == currentPath { continue }
-                let key = MediaSourceProtocol.webdav.normalizedBaseURL(cleanURL.absoluteString)
-                guard !key.isEmpty, !seen.contains(key) else { continue }
-                seen.insert(key)
-
-                let name = folderName(for: cleanURL, displayName: entry.displayName)
-                folders.append(WebDAVDirectoryItem(id: key, url: cleanURL, name: name))
+            return entries.compactMap { entry in
+                guard let resolved = resolveHref(entry.href, baseURL: resolutionBaseURL),
+                      isSameEndpoint(resolved, directoryURL) else {
+                    return nil
+                }
+                let path = normalizePath(resolved.path)
+                guard path != currentPath else { return nil }
+                return DAVItem(url: resolved, displayName: entry.displayName, isDirectory: entry.isDirectory)
             }
-
-            return folders.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        } catch let error as WebDAVDirectoryBrowserError {
+            throw error
         } catch let error as URLError {
-            throw NSError(domain: "WebDAVDirectoryBrowser", code: error.code.rawValue, userInfo: [NSLocalizedDescriptionKey: "WebDAV 文件夹列表请求失败：\(error.localizedDescription)"])
+            throw WebDAVDirectoryBrowserError.requestFailed("WebDAV 网络错误（\(error.code.rawValue)）：\(error.localizedDescription)")
+        } catch {
+            throw WebDAVDirectoryBrowserError.requestFailed("WebDAV 请求异常：\(error.localizedDescription)")
         }
     }
 
-    private func resolveHref(_ href: String, baseURL: URL) -> URL? {
-        if let absolute = URL(string: href), absolute.scheme != nil {
-            return absolute
+    private func resolveCredential(username: String, password: String, fallbackURL: URL) -> AuthCredential? {
+        let trimmedUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedUser.isEmpty {
+            return AuthCredential(username: trimmedUser, password: password)
         }
-        if let relative = URL(string: href, relativeTo: baseURL)?.absoluteURL {
-            return relative
-        }
-        if let decoded = href.removingPercentEncoding,
-           let relative = URL(string: decoded, relativeTo: baseURL)?.absoluteURL {
-            return relative
+        if let user = fallbackURL.user, !user.isEmpty {
+            return AuthCredential(username: user, password: fallbackURL.password ?? "")
         }
         return nil
     }
 
-    private func sanitizedURL(_ url: URL) -> URL {
+    private func sanitizedURL(from url: URL) -> URL? {
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         components?.user = nil
         components?.password = nil
-        return components?.url ?? url
+        return components?.url
     }
 
-    private func folderName(for url: URL, displayName: String) -> String {
-        let decodedDisplayName = displayName.removingPercentEncoding ?? displayName
-        if !decodedDisplayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return decodedDisplayName
+    private func resolveHref(_ href: String, baseURL: URL) -> URL? {
+        if let absolute = URL(string: href), absolute.scheme != nil {
+            return sanitizedURL(from: absolute)
         }
+        if let relative = URL(string: href, relativeTo: baseURL)?.absoluteURL {
+            return sanitizedURL(from: relative)
+        }
+        if let decoded = href.removingPercentEncoding,
+           let relative = URL(string: decoded, relativeTo: baseURL)?.absoluteURL {
+            return sanitizedURL(from: relative)
+        }
+        return nil
+    }
 
-        let decodedPath = url.path.removingPercentEncoding ?? url.path
-        if let last = decodedPath.split(separator: "/").last {
-            return String(last)
-        }
-        return url.host ?? "WebDAV 文件夹"
+    private func directoryURLForRelativeResolution(_ url: URL) -> URL {
+        guard !url.absoluteString.hasSuffix("/") else { return url }
+        return URL(string: url.absoluteString + "/") ?? url
+    }
+
+    private func isSameEndpoint(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.scheme?.lowercased() == rhs.scheme?.lowercased()
+        && lhs.host?.lowercased() == rhs.host?.lowercased()
+        && lhs.port == rhs.port
     }
 
     private func normalizePath(_ value: String) -> String {
@@ -2143,6 +2257,20 @@ struct WebDAVDirectoryBrowser {
             path.removeLast()
         }
         return path
+    }
+
+    private func displayName(for url: URL, fallback: String?) -> String {
+        if let fallback = fallback?.removingPercentEncoding?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !fallback.isEmpty {
+            return fallback
+        }
+
+        let trimmedPath = normalizePath(url.path)
+        let last = (trimmedPath as NSString).lastPathComponent
+        if !last.isEmpty, last != "/" {
+            return last.removingPercentEncoding ?? last
+        }
+        return url.host ?? "未命名文件夹"
     }
 }
 
@@ -2246,7 +2374,7 @@ struct MediaServerLibraryBrowser {
                 libraryType: type
             )
         }
-        return items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        return items.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
     }
 
     private func listEmbyCompatibleLibraries(
@@ -2304,7 +2432,15 @@ struct MediaServerLibraryBrowser {
             throw error
         }
 
-        return [makeItem(protocolKind: protocolKind, baseURL: baseURL, token: resolvedToken, userId: resolvedUserId, libraryId: nil, libraryName: "全部媒体库", libraryType: nil)]
+        return [makeItem(
+            protocolKind: protocolKind,
+            baseURL: baseURL,
+            token: resolvedToken,
+            userId: resolvedUserId,
+            libraryId: nil,
+            libraryName: "全部媒体库",
+            libraryType: nil
+        )]
     }
 
     private func resolveEmbyCompatibleAuth(
@@ -2472,9 +2608,17 @@ struct MediaServerLibraryBrowser {
             let name = (dictionary["Name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
                 ?? "\(protocolLabel(protocolKind)) 媒体库"
             let type = (dictionary["CollectionType"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            return makeItem(protocolKind: protocolKind, baseURL: baseURL, token: token, userId: userId, libraryId: id, libraryName: name, libraryType: type)
+            return makeItem(
+                protocolKind: protocolKind,
+                baseURL: baseURL,
+                token: token,
+                userId: userId,
+                libraryId: id,
+                libraryName: name,
+                libraryType: type
+            )
         }
-        return items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        return items.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
     }
 
     private func makeItem(
@@ -2489,18 +2633,33 @@ struct MediaServerLibraryBrowser {
         let normalizedURL = protocolKind.normalizedBaseURL(baseURL)
         let url = URL(string: normalizedURL) ?? URL(string: normalizedURL + "/")!
         let trimmedName = libraryName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = trimmedName.isEmpty ? "\(protocolLabel(protocolKind)) 媒体库" : trimmedName
-        let authConfig = MediaServerAuthConfig.encode(token: token, userId: userId, libraryId: libraryId, libraryName: name, libraryType: libraryType)
+        let displayName = trimmedName.isEmpty ? "\(protocolLabel(protocolKind)) 媒体库" : trimmedName
+        let authConfig = MediaServerAuthConfig.encode(
+            token: token,
+            userId: userId,
+            libraryId: libraryId,
+            libraryName: displayName,
+            libraryType: libraryType
+        )
         let key = libraryId?.trimmingCharacters(in: .whitespacesAndNewlines)
         let id = "\(protocolKind.rawValue):\(normalizedURL):\(key?.isEmpty == false ? key! : "all")"
-        return WebDAVDirectoryItem(id: id, url: url, name: name, protocolKind: protocolKind, authConfig: authConfig)
+        return WebDAVDirectoryItem(
+            id: id,
+            url: url,
+            displayName: displayName,
+            protocolKind: protocolKind,
+            authConfig: authConfig
+        )
     }
 
     private func makeURL(protocolKind: MediaSourceProtocol, baseURL: String, relativePath: String, token: String?) throws -> URL {
         let normalized = protocolKind.normalizedBaseURL(baseURL)
-        guard let base = URL(string: normalized + "/"),
-              let raw = URL(string: relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/")), relativeTo: base)?.absoluteURL,
-              var components = URLComponents(url: raw, resolvingAgainstBaseURL: false) else {
+        guard let base = URL(string: normalized + "/") else {
+            throw MediaServerLibraryBrowserError.invalidConfiguration("媒体服务器地址无效。")
+        }
+
+        let composed = URL(string: relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/")), relativeTo: base)?.absoluteURL
+        guard var components = composed.flatMap({ URLComponents(url: $0, resolvingAgainstBaseURL: false) }) else {
             throw MediaServerLibraryBrowserError.invalidConfiguration("媒体服务器地址无效。")
         }
 
@@ -2571,6 +2730,7 @@ struct MediaServerLibraryBrowser {
         case .plex: return "Plex"
         case .emby: return "Emby"
         case .jellyfin: return "Jellyfin"
+        case .omniplayDocker: return "OmniPlay Docker"
         default: return "媒体服务器"
         }
     }
@@ -2613,60 +2773,62 @@ private struct LocalFilesystemScanner: MediaSourceScanner {
         let rootURL = URL(fileURLWithPath: normalized)
         let rootPathPrefix = rootURL.path.hasSuffix("/") ? rootURL.path : rootURL.path + "/"
 
-        guard let enumerator = FileManager.default.enumerator(
-            at: rootURL,
-            includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            throw MediaSourceScanError.accessDenied(rootURL.path)
-        }
+        return try await Task.detached(priority: .utility) { () throws -> [ScannedMediaFile] in
+            guard let enumerator = FileManager.default.enumerator(
+                at: rootURL,
+                includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                throw MediaSourceScanError.accessDenied(rootURL.path)
+            }
 
-        let exts = ["mp4", "mkv", "mov", "avi", "rmvb", "flv", "webm", "m2ts", "ts", "iso", "m4v", "wmv"]
-        let includeBluRayExtras = UserDefaults.standard.bool(forKey: "playBluRayExtras")
-        var bdmvGroups: [String: [(url: URL, size: Int64)]] = [:]
-        var normalFiles: [(url: URL, size: Int64)] = []
+            let exts = ["mp4", "mkv", "mov", "avi", "rmvb", "flv", "webm", "m2ts", "ts", "iso", "m4v", "wmv"]
+            let includeBluRayExtras = UserDefaults.standard.bool(forKey: "playBluRayExtras")
+            var bdmvGroups: [String: [(url: URL, size: Int64)]] = [:]
+            var normalFiles: [(url: URL, size: Int64)] = []
 
-        while let fileURL = enumerator.nextObject() as? URL {
-            if Task.isCancelled { return [] }
-            if (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true { continue }
+            while let fileURL = enumerator.nextObject() as? URL {
+                if Task.isCancelled { return [] }
+                if (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true { continue }
 
-            if exts.contains(fileURL.pathExtension.lowercased()) {
-                let comps = fileURL.pathComponents
-                if let idx = comps.firstIndex(where: { $0.caseInsensitiveCompare("BDMV") == .orderedSame }) {
-                    guard comps.indices.contains(idx + 1),
-                          comps[idx + 1].caseInsensitiveCompare("STREAM") == .orderedSame else {
-                        continue
+                if exts.contains(fileURL.pathExtension.lowercased()) {
+                    let comps = fileURL.pathComponents
+                    if let idx = comps.firstIndex(where: { $0.caseInsensitiveCompare("BDMV") == .orderedSame }) {
+                        guard comps.indices.contains(idx + 1),
+                              comps[idx + 1].caseInsensitiveCompare("STREAM") == .orderedSame else {
+                            continue
+                        }
+                        let size = Int64((try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                        let parent = comps[0..<idx].joined(separator: "/")
+                        bdmvGroups[parent, default: []].append((url: fileURL, size: size))
+                    } else {
+                        let size = Int64((try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                        normalFiles.append((url: fileURL, size: size))
                     }
-                    let size = Int64((try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-                    let parent = comps[0..<idx].joined(separator: "/")
-                    bdmvGroups[parent, default: []].append((url: fileURL, size: size))
-                } else {
-                    let size = Int64((try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-                    normalFiles.append((url: fileURL, size: size))
                 }
             }
-        }
 
-        var resolved = normalFiles
-        for (_, files) in bdmvGroups {
-            let candidates = files.map {
-                MediaNameParser.BluRayStreamCandidate(
-                    fileName: $0.url.lastPathComponent,
-                    fileSize: $0.size,
-                    duration: 0
+            var resolved = normalFiles
+            for (_, files) in bdmvGroups {
+                let candidates = files.map {
+                    MediaNameParser.BluRayStreamCandidate(
+                        fileName: $0.url.lastPathComponent,
+                        fileSize: $0.size,
+                        duration: 0
+                    )
+                }
+                let selectedIndexes = MediaNameParser.selectedBluRayStreamIndices(
+                    from: candidates,
+                    includeExtras: includeBluRayExtras
                 )
+                resolved.append(contentsOf: selectedIndexes.map { files[$0] })
             }
-            let selectedIndexes = MediaNameParser.selectedBluRayStreamIndices(
-                from: candidates,
-                includeExtras: includeBluRayExtras
-            )
-            resolved.append(contentsOf: selectedIndexes.map { files[$0] })
-        }
 
-        return resolved.map { item in
-            let relativePath = item.url.path.replacingOccurrences(of: rootPathPrefix, with: "")
-            return ScannedMediaFile(relativePath: relativePath, fileName: item.url.lastPathComponent, fileSize: item.size)
-        }
+            return resolved.map { item in
+                let relativePath = item.url.path.replacingOccurrences(of: rootPathPrefix, with: "")
+                return ScannedMediaFile(relativePath: relativePath, fileName: item.url.lastPathComponent, fileSize: item.size)
+            }
+        }.value
     }
 }
 
@@ -3088,14 +3250,21 @@ private struct MediaServerScanner: MediaSourceScanner {
         } else {
             queryPrefix = "Recursive=true&IncludeItemTypes=Movie,Episode&Fields=Path,MediaSources"
         }
-        let relativePath = (auth?.userId?.isEmpty == false)
-            ? "Users/\(auth!.userId!)/Items?\(queryPrefix)"
-            : "Items?\(queryPrefix)"
+
+        let relativePath: String
+        if let userId = auth?.userId, !userId.isEmpty {
+            relativePath = "Users/\(userId)/Items?\(queryPrefix)"
+        } else {
+            relativePath = "Items?\(queryPrefix)"
+        }
         let url = try makeURL(protocolKind: source.protocolKind ?? .jellyfin, baseURL: source.baseUrl, relativePath: relativePath, tokenName: "api_key", token: auth?.token)
         let (data, response) = try await session.data(from: url)
         try validateHTTP(response)
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let items = object["Items"] as? [[String: Any]] else { return [] }
+              let items = object["Items"] as? [[String: Any]] else {
+            return []
+        }
+
         return items.compactMap { item in
             guard let id = item["Id"] as? String, !id.isEmpty else { return nil }
             let name = (item["Name"] as? String) ?? id
@@ -3184,9 +3353,11 @@ private struct MediaServerScanner: MediaSourceScanner {
 
     private func makeURL(protocolKind: MediaSourceProtocol, baseURL: String, relativePath: String, tokenName: String, token: String?) throws -> URL {
         let normalized = protocolKind.normalizedBaseURL(baseURL)
-        guard let base = URL(string: normalized + "/"),
-              let raw = URL(string: relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/")), relativeTo: base)?.absoluteURL,
-              var components = URLComponents(url: raw, resolvingAgainstBaseURL: false) else {
+        guard let base = URL(string: normalized + "/") else {
+            throw MediaSourceScanError.invalidBaseURL(baseURL)
+        }
+        let composed = URL(string: relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/")), relativeTo: base)?.absoluteURL
+        guard var components = composed.flatMap({ URLComponents(url: $0, resolvingAgainstBaseURL: false) }) else {
             throw MediaSourceScanError.invalidBaseURL(baseURL)
         }
         if let token, !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -3194,7 +3365,9 @@ private struct MediaServerScanner: MediaSourceScanner {
             items.append(URLQueryItem(name: tokenName, value: token.trimmingCharacters(in: .whitespacesAndNewlines)))
             components.queryItems = items
         }
-        guard let url = components.url else { throw MediaSourceScanError.invalidBaseURL(baseURL) }
+        guard let url = components.url else {
+            throw MediaSourceScanError.invalidBaseURL(baseURL)
+        }
         return url
     }
 
@@ -3312,6 +3485,7 @@ struct MediaServerPreflightChecker {
         case .plex: return "Plex"
         case .emby: return "Emby"
         case .jellyfin: return "Jellyfin"
+        case .omniplayDocker: return "OmniPlay Docker"
         default: return "媒体服务器"
         }
     }
@@ -3335,8 +3509,8 @@ private enum MediaSourceScannerFactory {
                 throw MediaSourceScanError.invalidBaseURL(source.baseUrl)
             }
             return MediaServerScanner(source: source)
-        case .direct:
-            throw MediaSourceScanError.unsupportedProtocol(MediaSourceProtocol.direct.rawValue)
+        case .direct, .omniplayDocker:
+            throw MediaSourceScanError.unsupportedProtocol(protocolKind.rawValue)
         }
     }
 }
@@ -3345,6 +3519,371 @@ extension MediaLibraryManager {
     // 🌟 这里是完完整整的本地文件雷达扫描入库逻辑！保证它存在！
     func scanLocalSource(_ source: MediaSource) async {
         _ = await scanLocalSourceWithResult(source)
+    }
+
+    func syncOmniPlayDockerSourceWithResult(_ source: MediaSource) async -> MediaSourceScanResult {
+        guard let sourceId = source.id else {
+            let message = "Docker 媒体源缺少ID，无法同步。"
+            return MediaSourceScanResult(
+                sourceId: nil,
+                sourceName: source.name,
+                protocolType: source.protocolType,
+                scannedCount: 0,
+                insertedCount: 0,
+                removedCount: 0,
+                errorCategory: .config,
+                userMessage: message,
+                diagnostic: buildDiagnostic(source: source, category: .config, message: message, error: nil, retryAttempts: 0)
+            )
+        }
+
+        do {
+            let config = OmniPlayDockerAuthConfig.decode(source.authConfig)
+            let client = try OmniPlayDockerClient(baseURLString: source.baseUrl, sessionCookie: config?.sessionCookie)
+            let summaries = try await client.libraryItems()
+            let details = try await withThrowingTaskGroup(of: OmniPlayDockerLibraryDetail.self) { group in
+                for item in summaries {
+                    group.addTask {
+                        try await client.libraryDetail(id: item.id)
+                    }
+                }
+                var values: [OmniPlayDockerLibraryDetail] = []
+                for try await detail in group {
+                    values.append(detail)
+                }
+                return values
+            }
+            let stats = try await importOmniPlayDocker(details: details, sourceId: sourceId, client: client)
+            DispatchQueue.main.async { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
+            return MediaSourceScanResult(
+                sourceId: sourceId,
+                sourceName: source.name,
+                protocolType: source.protocolType,
+                scannedCount: stats.scannedCount,
+                insertedCount: stats.insertedCount,
+                removedCount: stats.removedCount,
+                errorCategory: nil,
+                userMessage: "Docker 同步完成：新增 \(stats.insertedCount)，移除 \(stats.removedCount)，共 \(stats.scannedCount) 个文件。",
+                diagnostic: nil
+            )
+        } catch {
+            let category = dockerScanErrorCategory(error)
+            let message = userFacingMessage(for: category, sourceName: source.name, fallback: error.localizedDescription)
+            return MediaSourceScanResult(
+                sourceId: sourceId,
+                sourceName: source.name,
+                protocolType: source.protocolType,
+                scannedCount: 0,
+                insertedCount: 0,
+                removedCount: 0,
+                errorCategory: category,
+                userMessage: message,
+                diagnostic: buildDiagnostic(source: source, category: category, message: error.localizedDescription, error: error, retryAttempts: 0)
+            )
+        }
+    }
+
+    private func dockerScanErrorCategory(_ error: Error) -> MediaSourceScanErrorCategory {
+        if let dockerError = error as? OmniPlayDockerClientError {
+            switch dockerError {
+            case .authenticationRequired:
+                return .auth
+            case .invalidBaseURL:
+                return .config
+            case .requestFailed(let status, _):
+                return status == 401 || status == 403 ? .auth : .server
+            case .network:
+                return .network
+            case .invalidResponse:
+                return .server
+            }
+        }
+        if error is URLError {
+            return .network
+        }
+        return .unknown
+    }
+
+    private func importOmniPlayDocker(
+        details: [OmniPlayDockerLibraryDetail],
+        sourceId: Int64,
+        client: OmniPlayDockerClient
+    ) async throws -> (scannedCount: Int, insertedCount: Int, removedCount: Int) {
+        let importedPosters = await importOmniPlayDockerPosters(details: details, client: client)
+        await importOmniPlayDockerThumbnails(details: details, sourceId: sourceId, client: client)
+
+        return try await dbQueue.write { db in
+            var remoteFileIds = Set<String>()
+            var insertedCount = 0
+            var scannedCount = 0
+
+            for detail in details {
+                let movieId = Self.omniPlayDockerMovieId(for: detail.id)
+                let effectiveOverview = detail.overview?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                    ? detail.overview
+                    : detail.douban?.summary
+                let existingPosterPath = try Movie.fetchOne(db, key: movieId)?.posterPath
+                let posterPath = importedPosters[detail.id]
+                    ?? existingPosterPath
+                    ?? detail.douban?.posterUrl
+                let movie = Movie(
+                    id: movieId,
+                    title: detail.title,
+                    releaseDate: detail.releaseDate,
+                    overview: effectiveOverview,
+                    posterPath: posterPath,
+                    voteAverage: detail.voteAverage,
+                    isLocked: true
+                )
+                try movie.save(db)
+
+                if let douban = Self.doubanMetadata(from: detail, movieId: movieId) {
+                    try douban.save(db)
+                }
+
+                let files = Self.flattenDockerFiles(detail)
+                for remoteFile in files {
+                    let localFileId = Self.omniPlayDockerVideoFileId(for: remoteFile.id, sourceId: sourceId)
+                    let displayRelativePath = Self.omniPlayDockerDisplayRelativePath(for: remoteFile)
+                    let displayFileName = Self.omniPlayDockerDisplayFileName(for: remoteFile, relativePath: displayRelativePath)
+                    scannedCount += 1
+                    remoteFileIds.insert(localFileId)
+                    let file = VideoFile(
+                        id: localFileId,
+                        sourceId: sourceId,
+                        relativePath: displayRelativePath,
+                        fileName: displayFileName,
+                        mediaType: detail.itemKind == "tv" ? "tv" : "movie",
+                        movieId: movieId,
+                        episodeId: nil,
+                        playProgress: remoteFile.positionSeconds,
+                        duration: remoteFile.durationSeconds,
+                        fileSize: remoteFile.fileSizeBytes ?? 0,
+                        lastPlayedAt: remoteFile.positionSeconds > 5 ? Date().timeIntervalSince1970 : nil
+                    )
+                    if var existing = try VideoFile.fetchOne(db, key: localFileId) {
+                        let existingProgressIsNewer = existing.playProgress > 5 && remoteFile.positionSeconds <= 0
+                        existing.sourceId = sourceId
+                        existing.relativePath = file.relativePath
+                        existing.fileName = file.fileName
+                        existing.mediaType = file.mediaType
+                        existing.movieId = file.movieId
+                        existing.episodeId = nil
+                        existing.fileSize = file.fileSize
+                        existing.duration = max(existing.duration, file.duration)
+                        if !existingProgressIsNewer {
+                            existing.playProgress = file.playProgress
+                            existing.lastPlayedAt = file.lastPlayedAt
+                        }
+                        try existing.update(db)
+                    } else {
+                        try file.insert(db)
+                        insertedCount += 1
+                    }
+                }
+            }
+
+            let existingIds = try String.fetchAll(db, sql: "SELECT id FROM videoFile WHERE sourceId = ?", arguments: [sourceId])
+            var removedCount = 0
+            for id in existingIds where !remoteFileIds.contains(id) {
+                _ = try VideoFile.deleteOne(db, key: id)
+                removedCount += 1
+            }
+            try db.execute(sql: "DELETE FROM movie WHERE id NOT IN (SELECT DISTINCT movieId FROM videoFile WHERE movieId IS NOT NULL)")
+            return (scannedCount, insertedCount, removedCount)
+        }
+    }
+
+    private func importOmniPlayDockerPosters(
+        details: [OmniPlayDockerLibraryDetail],
+        client: OmniPlayDockerClient
+    ) async -> [String: String] {
+        await withTaskGroup(of: (String, String)?.self) { group in
+            for detail in details {
+                guard let assetId = detail.posterAssetId else { continue }
+                group.addTask {
+                    do {
+                        let data = try await client.posterData(assetId: assetId)
+                        guard NSImage(data: data) != nil else { return nil }
+                        let cacheKey = "omniplay-docker-\(detail.id)-\(assetId)"
+                        let (fileName, destination) = await MainActor.run {
+                            let fileName = PosterManager.shared.cacheFileName(for: cacheKey)
+                            let destination = PosterManager.shared.cacheDirectory.appendingPathComponent(fileName)
+                            return (fileName, destination)
+                        }
+                        try FileManager.default.createDirectory(
+                            at: destination.deletingLastPathComponent(),
+                            withIntermediateDirectories: true
+                        )
+                        try data.write(to: destination, options: .atomic)
+                        await MainActor.run {
+                            NotificationCenter.default.post(name: NSNotification.Name("PosterUpdated_\(fileName)"), object: nil)
+                        }
+                        return (detail.id, destination.path)
+                    } catch {
+                        return nil
+                    }
+                }
+            }
+
+            var imported: [String: String] = [:]
+            for await result in group {
+                if let result {
+                    imported[result.0] = result.1
+                }
+            }
+            return imported
+        }
+    }
+
+    private func importOmniPlayDockerThumbnails(
+        details: [OmniPlayDockerLibraryDetail],
+        sourceId: Int64,
+        client: OmniPlayDockerClient
+    ) async {
+        let candidates: [(String, String)] = details.flatMap { detail in
+            detail.seasons.flatMap { season in
+                season.episodes.flatMap { episode -> [(String, String)] in
+                    guard let assetId = episode.stillAssetId else { return [] }
+                    return episode.videoFiles.map { ($0.id, assetId) }
+                }
+            }
+        }
+        guard !candidates.isEmpty else { return }
+
+        let thumbnailDirectory = await MainActor.run { ThumbnailManager.shared.thumbDirectory }
+        try? FileManager.default.createDirectory(at: thumbnailDirectory, withIntermediateDirectories: true)
+
+        await withTaskGroup(of: Void.self) { group in
+            var iterator = candidates.makeIterator()
+            func addNext() -> Bool {
+                guard let candidate = iterator.next() else { return false }
+                group.addTask {
+                    let localFileId = Self.omniPlayDockerVideoFileId(for: candidate.0, sourceId: sourceId)
+                    let destination = thumbnailDirectory.appendingPathComponent("\(localFileId).jpg")
+                    if FileManager.default.fileExists(atPath: destination.path) { return }
+                    do {
+                        let data = try await client.thumbnailData(assetId: candidate.1)
+                        guard NSImage(data: data) != nil else { return }
+                        try data.write(to: destination, options: .atomic)
+                    } catch {
+                        return
+                    }
+                }
+                return true
+            }
+
+            for _ in 0..<4 where addNext() {}
+            while await group.next() != nil {
+                _ = addNext()
+            }
+        }
+    }
+
+    nonisolated static func omniPlayDockerMovieId(for id: String) -> Int64 {
+        let raw = "omniplay-docker:\(id)".precomposedStringWithCanonicalMapping.lowercased()
+        var hash: UInt64 = 1469598103934665603
+        for byte in raw.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 1099511628211
+        }
+        let positive = Int64(hash & 0x3FFF_FFFF_FFFF_FFFF)
+        return -max(positive, 1)
+    }
+
+    nonisolated static func omniPlayDockerVideoFileId(for id: String, sourceId: Int64) -> String {
+        "omniplay-docker:\(sourceId):\(id)"
+    }
+
+    nonisolated private static func flattenDockerFiles(_ detail: OmniPlayDockerLibraryDetail) -> [OmniPlayDockerVideoFile] {
+        var files = detail.videoFiles
+        for season in detail.seasons {
+            files.append(contentsOf: season.episodes.flatMap(\.videoFiles))
+        }
+        var seen = Set<String>()
+        return files.filter { file in
+            guard !seen.contains(file.id) else { return false }
+            seen.insert(file.id)
+            return true
+        }
+    }
+
+    nonisolated private static func omniPlayDockerDisplayRelativePath(for file: OmniPlayDockerVideoFile) -> String {
+        let relativePath = file.relativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if !normalized.isEmpty, !isOmniPlayDockerPlaybackEndpointPath(normalized) {
+            return normalized
+        }
+
+        return file.fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated private static func omniPlayDockerDisplayFileName(for file: OmniPlayDockerVideoFile, relativePath: String) -> String {
+        let fileName = file.fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !fileName.isEmpty,
+           fileName.lowercased() != "stream",
+           !isOmniPlayDockerPlaybackEndpointPath(fileName) {
+            return fileName
+        }
+
+        let relativeLastComponent = (relativePath as NSString).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !relativeLastComponent.isEmpty, relativeLastComponent.lowercased() != "stream" {
+            return relativeLastComponent
+        }
+
+        return fileName.isEmpty ? relativePath : fileName
+    }
+
+    nonisolated private static func isOmniPlayDockerPlaybackEndpointPath(_ value: String) -> Bool {
+        let parts = value.trimmingCharacters(in: CharacterSet(charactersIn: "/")).split(separator: "/").map(String.init)
+        return parts.count >= 5
+            && parts[0] == "api"
+            && parts[1] == "playback"
+            && parts[2] == "files"
+            && parts[4] == "stream"
+    }
+
+    nonisolated private static func doubanMetadata(from detail: OmniPlayDockerLibraryDetail, movieId: Int64) -> DoubanMetadata? {
+        guard let douban = detail.douban ?? minimalDoubanMetadata(from: detail) else { return nil }
+        let fetchedAt = ISO8601DateFormatter().date(from: douban.fetchedAt) ?? Date()
+        return DoubanMetadata(
+            movieId: movieId,
+            subjectId: douban.subjectId,
+            subjectURL: douban.subjectUrl,
+            title: douban.title,
+            originalTitle: douban.originalTitle,
+            year: douban.year,
+            rating: douban.rating,
+            ratingCount: douban.ratingCount,
+            summary: douban.summary,
+            genres: douban.genres,
+            countries: douban.countries,
+            directors: nil,
+            casts: nil,
+            posterURL: douban.posterUrl,
+            fetchedAt: fetchedAt.timeIntervalSince1970,
+            nextRefreshAt: fetchedAt.addingTimeInterval(30 * 24 * 60 * 60).timeIntervalSince1970,
+            lastError: nil
+        )
+    }
+
+    nonisolated private static func minimalDoubanMetadata(from detail: OmniPlayDockerLibraryDetail) -> OmniPlayDockerDoubanMetadata? {
+        guard let rating = detail.doubanRating else { return nil }
+        let year = detail.releaseDate.map { String($0.prefix(4)) }
+        return OmniPlayDockerDoubanMetadata(
+            subjectId: "docker-\(detail.id)",
+            subjectUrl: "",
+            title: detail.title,
+            originalTitle: nil,
+            year: year,
+            rating: rating,
+            ratingCount: nil,
+            summary: nil,
+            genres: nil,
+            countries: nil,
+            posterUrl: nil,
+            fetchedAt: ISO8601DateFormatter().string(from: Date())
+        )
     }
 
     func scanLocalSourceWithResult(
@@ -3407,8 +3946,8 @@ extension MediaLibraryManager {
             )
         }
 
-        let sourceStillExists = (try? await sourceExists(sourceId)) == true
-        if Task.isCancelled || !sourceStillExists {
+        let sourceStillEnabled = (try? await sourceExists(sourceId)) == true
+        if Task.isCancelled || !sourceStillEnabled {
             return MediaSourceScanResult(
                 sourceId: sourceId,
                 sourceName: scanningSource.name,
@@ -3417,7 +3956,7 @@ extension MediaLibraryManager {
                 insertedCount: 0,
                 removedCount: 0,
                 errorCategory: nil,
-                userMessage: "扫描已停止：媒体源已移除或同步任务已取消。",
+                userMessage: "扫描已停止：媒体源已关闭、移除或同步任务已取消。",
                 diagnostic: nil
             )
         }
@@ -3433,19 +3972,13 @@ extension MediaLibraryManager {
 
         do {
             let existingFiles = try await dbQueue.read { db in
-                try VideoFile
+                let existingFiles = try VideoFile
                     .filter(Column("sourceId") == sourceId)
                     .fetchAll(db)
+                return existingFiles
             }
 
-            let sourceAndRemoval = try await dbQueue.write { db -> (sourceExists: Bool, removed: Int) in
-                let sourceCount = try Int.fetchOne(
-                    db,
-                    sql: "SELECT COUNT(*) FROM mediaSource WHERE id = ?",
-                    arguments: [sourceId]
-                ) ?? 0
-                guard sourceCount > 0 else { return (sourceExists: false, removed: 0) }
-
+            removedCount = try await dbQueue.write { db -> Int in
                 var localRemovedCount = 0
                 for file in existingFiles where !scannedPathSet.contains(file.relativePath) {
                     _ = try VideoFile.deleteOne(db, key: file.id)
@@ -3454,23 +3987,8 @@ extension MediaLibraryManager {
                 if localRemovedCount > 0 {
                     print("🧹 已移除 \(localRemovedCount) 个源内不存在的旧文件记录。")
                 }
-                return (sourceExists: true, removed: localRemovedCount)
+                return localRemovedCount
             }
-
-            guard sourceAndRemoval.sourceExists else {
-                return MediaSourceScanResult(
-                    sourceId: sourceId,
-                    sourceName: scanningSource.name,
-                    protocolType: scanningSource.protocolType,
-                    scannedCount: 0,
-                    insertedCount: 0,
-                    removedCount: 0,
-                    errorCategory: nil,
-                    userMessage: "扫描已停止：媒体源已移除或同步任务已取消。",
-                    diagnostic: nil
-                )
-            }
-            removedCount = sourceAndRemoval.removed
 
             let existingPathSet = Set(existingFiles.filter { scannedPathSet.contains($0.relativePath) }.map(\.relativePath))
             let scannedByPath = Dictionary(uniqueKeysWithValues: scannedFiles.map { ($0.relativePath, $0) })
@@ -3651,7 +4169,7 @@ extension MediaLibraryManager {
                 groupingKey = isEpisode ? "\(sourceId)#tv#\(displayTitleBase.lowercased())" : "\(sourceId)#movie#\(relativePath)"
             } else {
                 groupingKey = isEpisode ? "\(sourceId)#unidentified-tv#\(displayTitleBase.lowercased())" : "\(sourceId)#unidentified#\(relativePath)"
-                print("📌 无法提取影视名称，待自动刮削完成后显示到首页：\(item.fileName)")
+                print("📌 无法提取影视名称，先以文件名显示到首页：\(item.fileName)")
             }
             var fakeMovieId = Int64(groupingKey.hashValue)
             fakeMovieId = fakeMovieId > 0 ? -fakeMovieId : fakeMovieId

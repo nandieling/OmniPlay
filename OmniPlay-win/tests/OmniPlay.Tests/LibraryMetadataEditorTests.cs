@@ -67,6 +67,7 @@ public sealed class LibraryMetadataEditorTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var editor = new LibraryMetadataEditor(database, client);
 
@@ -124,6 +125,7 @@ public sealed class LibraryMetadataEditorTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var editor = new LibraryMetadataEditor(database, client);
 
@@ -181,6 +183,7 @@ public sealed class LibraryMetadataEditorTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var editor = new LibraryMetadataEditor(database, client);
 
@@ -294,6 +297,7 @@ public sealed class LibraryMetadataEditorTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var editor = new LibraryMetadataEditor(database, client);
         var enricher = new LibraryMetadataEnricher(database, client);
@@ -347,6 +351,7 @@ public sealed class LibraryMetadataEditorTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var editor = new LibraryMetadataEditor(database, client);
 
@@ -466,6 +471,7 @@ public sealed class LibraryMetadataEditorTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var editor = new LibraryMetadataEditor(database, client, settingsService);
 
@@ -515,16 +521,28 @@ public sealed class LibraryMetadataEditorTests : IDisposable
     private async Task<JsonSettingsService> CreateEnglishTmdbSettingsServiceAsync()
     {
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         await settingsService.SaveAsync(new AppSettings
         {
             Tmdb = new TmdbSettings
             {
-                EnableBuiltInPublicSource = true,
+                CustomApiKey = "custom-key",
                 Language = "en-US"
             }
         });
 
         return settingsService;
+    }
+
+    private static AppSettings CreateTmdbAppSettings()
+    {
+        return new AppSettings
+        {
+            Tmdb = new TmdbSettings
+            {
+                CustomApiKey = "custom-key"
+            }
+        };
     }
 
     private sealed class MovieRecord

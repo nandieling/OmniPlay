@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>setup</AssemblyName>
+    <ApplicationIcon>..\..\src\OmniPlay.Desktop\app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyTitle>觅影安装程序</AssemblyTitle>
+    <Product>觅影</Product>
+    <Company>觅影</Company>
+    <FileDescription>觅影安装程序</FileDescription>
+    <Version>1.5</Version>
+    <AssemblyVersion>1.5.0.0</AssemblyVersion>
+    <FileVersion>1.5.0.0</FileVersion>
+    <InformationalVersion>1.5</InformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup Condition="Exists('..\..\tmp\package\payload\OmniPlayPayload.zip')">
+    <EmbeddedResource Include="..\..\tmp\package\payload\OmniPlayPayload.zip" LogicalName="OmniPlay.Payload.zip" />
+  </ItemGroup>
+
+</Project>
+

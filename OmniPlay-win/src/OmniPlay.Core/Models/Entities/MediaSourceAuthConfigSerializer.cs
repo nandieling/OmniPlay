@@ -76,6 +76,40 @@ public static class MediaSourceAuthConfigSerializer
             return null;
         }
     }
+
+    public static string? SerializeOmniPlayDocker(OmniPlayDockerAuthConfig? config)
+    {
+        if (config is null)
+        {
+            return null;
+        }
+
+        var normalized = new OmniPlayDockerAuthConfig(
+            string.IsNullOrWhiteSpace(config.Username) ? null : config.Username.Trim(),
+            string.IsNullOrWhiteSpace(config.SessionCookie) ? null : config.SessionCookie.Trim());
+
+        return string.IsNullOrWhiteSpace(normalized.Username) &&
+               string.IsNullOrWhiteSpace(normalized.SessionCookie)
+            ? null
+            : JsonSerializer.Serialize(normalized, SerializerOptions);
+    }
+
+    public static OmniPlayDockerAuthConfig? DeserializeOmniPlayDocker(string? authConfig)
+    {
+        if (string.IsNullOrWhiteSpace(authConfig))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<OmniPlayDockerAuthConfig>(authConfig, SerializerOptions);
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }
 
 public sealed record MediaServerAuthConfig(
@@ -84,3 +118,5 @@ public sealed record MediaServerAuthConfig(
     string? LibraryId = null,
     string? LibraryName = null,
     string? LibraryType = null);
+
+public sealed record OmniPlayDockerAuthConfig(string? Username = null, string? SessionCookie = null);

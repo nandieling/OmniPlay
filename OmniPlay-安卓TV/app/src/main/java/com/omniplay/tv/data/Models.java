@@ -135,8 +135,8 @@ public final class Models {
             ArrayList<VideoFile> files = new ArrayList<>();
             for (Season season : seasons) {
                 for (Episode episode : season.episodes) {
-                    if (episode.videoFile != null) {
-                        files.add(episode.videoFile.withEpisodeLabel(episode.label()));
+                    for (VideoFile file : episode.videoFiles) {
+                        files.add(file.withEpisodeLabel(episode.label()));
                     }
                 }
             }
@@ -202,6 +202,7 @@ public final class Models {
         public final String stillAssetId;
         public final String airDate;
         public final VideoFile videoFile;
+        public final List<VideoFile> videoFiles;
 
         private Episode(JSONObject json) {
             id = json.optString("id");
@@ -213,6 +214,11 @@ public final class Models {
             airDate = optString(json, "airDate");
             JSONObject file = json.optJSONObject("videoFile");
             videoFile = file == null ? null : new VideoFile(file);
+            List<VideoFile> parsedFiles = parseVideoFiles(json.optJSONArray("videoFiles"));
+            if (parsedFiles.isEmpty() && videoFile != null) {
+                parsedFiles = Collections.singletonList(videoFile);
+            }
+            videoFiles = parsedFiles;
         }
 
         public String label() {

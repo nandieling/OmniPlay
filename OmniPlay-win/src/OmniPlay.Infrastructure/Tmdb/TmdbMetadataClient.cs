@@ -17,20 +17,13 @@ namespace OmniPlay.Infrastructure.Tmdb;
 
 public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTester
 {
-    private const string DefaultApiKey = "";
     private const string TmdbApiBaseUrl = "https://api.themoviedb.org/3";
     private const string TmdbImageBaseUrl = "https://image.tmdb.org/t/p/w500";
     private const int DefaultSearchQueryLimit = 4;
-    private const int PublicSourceSearchQueryLimit = 2;
     private const int DefaultSearchCandidateLimit = 12;
-    private const int PublicSourceSearchCandidateLimit = 6;
     private const int DefaultSearchPagesPerLanguage = 2;
-    private const int PublicSourceSearchPagesPerLanguage = 1;
     private const int DefaultSeasonProbeLimit = 12;
-    private const int PublicSourceSeasonProbeLimit = 4;
     private const int DefaultLocalizationProbeLimit = 12;
-    private const int PublicSourceLocalizationProbeLimit = 4;
-    private static readonly TimeSpan PublicSourceMinimumApiInterval = TimeSpan.FromMilliseconds(250);
     private static readonly string[] ChineseTranslationRegionOrder = ["CN", "SG", "TW", "HK"];
     private static readonly Regex ConsecutiveWhitespaceRegex = new(@"\s+", RegexOptions.Compiled);
     private static readonly Regex TokenSeparatorRegex = new(@"[._\-]+", RegexOptions.Compiled);
@@ -49,12 +42,10 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
     private readonly HttpClient httpClient;
     private readonly IStoragePaths storagePaths;
     private readonly ISettingsService settingsService;
-    private readonly SemaphoreSlim publicSourceRequestGate = new(1, 1);
     private readonly ConcurrentDictionary<int, int?> tvSeasonCountCache = new();
     private readonly ConcurrentDictionary<int, IReadOnlyList<TmdbSeasonSummary>> tvSeasonSummaryCache = new();
     private readonly ConcurrentDictionary<string, int?> tvSeasonAirYearCache = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, TmdbSearchItem> localizedResultCache = new(StringComparer.Ordinal);
-    private DateTimeOffset nextPublicSourceRequestUtc = DateTimeOffset.MinValue;
 
     public TmdbMetadataClient(HttpClient httpClient, IStoragePaths storagePaths, ISettingsService settingsService)
     {
@@ -117,7 +108,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         var configuration = configurations.Primary;
         if (!configuration.IsConfigured)
         {
-            return new TmdbConnectionTestResult(false, "未启用内置公共 TMDB 源，也未填写自定义 API Key。");
+            return new TmdbConnectionTestResult(false, "未配置 TMDB API Key 或 Read Access Token。");
         }
 
         try
@@ -126,25 +117,6 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
             if (result.Success)
             {
                 return new TmdbConnectionTestResult(true, result.Message);
-            }
-
-            if (result.StatusCode.HasValue &&
-                ShouldFallbackToBuiltIn(result.StatusCode.Value) &&
-                configurations.BuiltInFallback is not null)
-            {
-                var fallbackResult = await TestConnectionWithConfigurationAsync(
-                    configurations.BuiltInFallback,
-                    cancellationToken);
-                if (fallbackResult.Success)
-                {
-                    return new TmdbConnectionTestResult(
-                        true,
-                        $"{configuration.SourceLabel} 不可用（HTTP {(int)result.StatusCode.Value}），已切换{configurations.BuiltInFallback.SourceLabel}；{fallbackResult.Message}");
-                }
-
-                return new TmdbConnectionTestResult(
-                    false,
-                    $"{result.Message} 已尝试切换{configurations.BuiltInFallback.SourceLabel}，但{fallbackResult.Message}");
             }
 
             return new TmdbConnectionTestResult(false, result.Message);
@@ -226,11 +198,6 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         var configurations = await ResolveConfigurationsAsync(null, cancellationToken);
         var configuration = configurations.Primary;
         if (!configuration.IsConfigured)
-        {
-            return null;
-        }
-
-        if (configuration.SourceKind == TmdbSourceKind.BuiltInPublicSource)
         {
             return null;
         }
@@ -386,7 +353,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
-            ThrowIfBuiltInFallbackNeeded(response.StatusCode, configuration);
+            ThrowIfCredentialUnavailable(response.StatusCode, configuration);
             return [];
         }
 
@@ -477,16 +444,6 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
                 configuration,
                 cancellationToken);
         }
-        catch (TmdbSourceUnavailableException) when (configurations.BuiltInFallback is not null)
-        {
-            return await SearchMatchesWithConfigurationAsync(
-                mediaType,
-                queries,
-                year,
-                options,
-                configurations.BuiltInFallback,
-                cancellationToken);
-        }
         catch (TmdbSourceUnavailableException)
         {
             return [];
@@ -501,21 +458,11 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         TmdbResolvedConfiguration configuration,
         CancellationToken cancellationToken)
     {
-        var searchQueryLimit = configuration.SourceKind == TmdbSourceKind.BuiltInPublicSource
-            ? PublicSourceSearchQueryLimit
-            : DefaultSearchQueryLimit;
-        var candidateLimit = configuration.SourceKind == TmdbSourceKind.BuiltInPublicSource
-            ? PublicSourceSearchCandidateLimit
-            : DefaultSearchCandidateLimit;
-        var pageLimit = configuration.SourceKind == TmdbSourceKind.BuiltInPublicSource
-            ? PublicSourceSearchPagesPerLanguage
-            : DefaultSearchPagesPerLanguage;
-        var seasonProbeLimit = configuration.SourceKind == TmdbSourceKind.BuiltInPublicSource
-            ? PublicSourceSeasonProbeLimit
-            : DefaultSeasonProbeLimit;
-        var localizationProbeLimit = configuration.SourceKind == TmdbSourceKind.BuiltInPublicSource
-            ? PublicSourceLocalizationProbeLimit
-            : DefaultLocalizationProbeLimit;
+        var searchQueryLimit = DefaultSearchQueryLimit;
+        var candidateLimit = DefaultSearchCandidateLimit;
+        var pageLimit = DefaultSearchPagesPerLanguage;
+        var seasonProbeLimit = DefaultSeasonProbeLimit;
+        var localizationProbeLimit = DefaultLocalizationProbeLimit;
 
         var searchContext = BuildSearchContext(mediaType, queries, year, options);
         var languageOrder = ResolveSearchLanguageOrder(configuration.Language);
@@ -627,7 +574,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
-            ThrowIfBuiltInFallbackNeeded(response.StatusCode, configuration);
+            ThrowIfCredentialUnavailable(response.StatusCode, configuration);
             return new TmdbSearchResponse();
         }
 
@@ -722,7 +669,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
-            ThrowIfBuiltInFallbackNeeded(response.StatusCode, configuration);
+            ThrowIfCredentialUnavailable(response.StatusCode, configuration);
             return null;
         }
 
@@ -752,7 +699,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
-            ThrowIfBuiltInFallbackNeeded(response.StatusCode, configuration);
+            ThrowIfCredentialUnavailable(response.StatusCode, configuration);
             return null;
         }
 
@@ -839,7 +786,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
-            ThrowIfBuiltInFallbackNeeded(response.StatusCode, configuration);
+            ThrowIfCredentialUnavailable(response.StatusCode, configuration);
             return null;
         }
 
@@ -891,7 +838,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
-            ThrowIfBuiltInFallbackNeeded(response.StatusCode, configuration);
+            ThrowIfCredentialUnavailable(response.StatusCode, configuration);
             return null;
         }
 
@@ -1441,91 +1388,54 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
     {
         var settings = overrideSettings ?? (await settingsService.LoadAsync(cancellationToken)).Tmdb;
         var language = ResolveLanguage(settings);
-        var builtInConfiguration = settings.EnableBuiltInPublicSource && !string.IsNullOrWhiteSpace(DefaultApiKey)
-            ? CreateBuiltInConfiguration(language)
-            : null;
 
         if (!string.IsNullOrWhiteSpace(settings.CustomAccessToken))
         {
-            return BuildConfigurations(
+            return new TmdbResolvedConfigurations(
                 new TmdbResolvedConfiguration(
                     settings.CustomAccessToken.Trim(),
                     UseBearerToken: true,
                     language,
                     "自定义 Access Token",
-                    TmdbSourceKind.CustomAccessToken),
-                builtInConfiguration);
+                    TmdbSourceKind.CustomAccessToken));
         }
 
         if (!string.IsNullOrWhiteSpace(settings.CustomApiKey))
         {
-            return BuildConfigurations(
+            return new TmdbResolvedConfigurations(
                 new TmdbResolvedConfiguration(
                     settings.CustomApiKey.Trim(),
                     UseBearerToken: false,
                     language,
                     "自定义 API Key",
-                    TmdbSourceKind.CustomApiKey),
-                builtInConfiguration);
+                    TmdbSourceKind.CustomApiKey));
         }
 
         var envAccessToken = ResolveAccessToken();
         if (!string.IsNullOrWhiteSpace(envAccessToken))
         {
-            return BuildConfigurations(
+            return new TmdbResolvedConfigurations(
                 new TmdbResolvedConfiguration(
                     envAccessToken,
                     UseBearerToken: true,
                     language,
                     "环境变量 Access Token",
-                    TmdbSourceKind.EnvironmentAccessToken),
-                builtInConfiguration);
+                    TmdbSourceKind.EnvironmentAccessToken));
         }
 
         var envApiKey = ResolveApiKey();
         if (!string.IsNullOrWhiteSpace(envApiKey))
         {
-            return BuildConfigurations(
+            return new TmdbResolvedConfigurations(
                 new TmdbResolvedConfiguration(
                     envApiKey,
                     UseBearerToken: false,
                     language,
                     "环境变量 API Key",
-                    TmdbSourceKind.EnvironmentApiKey),
-                builtInConfiguration);
+                    TmdbSourceKind.EnvironmentApiKey));
         }
 
-        return builtInConfiguration is null
-            ? new TmdbResolvedConfigurations(TmdbResolvedConfiguration.Unconfigured(language), null)
-            : new TmdbResolvedConfigurations(builtInConfiguration, null);
-    }
-
-    private static TmdbResolvedConfigurations BuildConfigurations(
-        TmdbResolvedConfiguration primary,
-        TmdbResolvedConfiguration? builtInConfiguration)
-    {
-        return new TmdbResolvedConfigurations(
-            primary,
-            CanFallbackToBuiltIn(primary, builtInConfiguration) ? builtInConfiguration : null);
-    }
-
-    private static TmdbResolvedConfiguration CreateBuiltInConfiguration(string language)
-    {
-        return new TmdbResolvedConfiguration(
-            DefaultApiKey,
-            UseBearerToken: false,
-            language,
-            "内置公共受限源",
-            TmdbSourceKind.BuiltInPublicSource);
-    }
-
-    private static bool CanFallbackToBuiltIn(
-        TmdbResolvedConfiguration primary,
-        TmdbResolvedConfiguration? builtInConfiguration)
-    {
-        return primary.SourceKind != TmdbSourceKind.BuiltInPublicSource &&
-               primary.SourceKind != TmdbSourceKind.Unconfigured &&
-               builtInConfiguration?.IsConfigured == true;
+        return new TmdbResolvedConfigurations(TmdbResolvedConfiguration.Unconfigured(language));
     }
 
     private static string? ResolveApiKey()
@@ -1565,9 +1475,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
 
         if (response.IsSuccessStatusCode)
         {
-            var successMessage = configuration.SourceKind == TmdbSourceKind.BuiltInPublicSource
-                ? $"TMDB 连通性正常（HTTP {(int)response.StatusCode}，{configuration.SourceLabel}，仅适合轻量刮削）。"
-                : $"TMDB 连通性正常（HTTP {(int)response.StatusCode}，{configuration.SourceLabel}）。";
+            var successMessage = $"TMDB 连通性正常（HTTP {(int)response.StatusCode}，{configuration.SourceLabel}）。";
             return new TmdbConnectionTestAttempt(true, successMessage, response.StatusCode);
         }
 
@@ -1590,19 +1498,13 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         };
     }
 
-    private static bool ShouldFallbackToBuiltIn(HttpStatusCode statusCode)
-    {
-        return statusCode is HttpStatusCode.Unauthorized
-            or HttpStatusCode.Forbidden
-            or HttpStatusCode.TooManyRequests;
-    }
-
-    private static void ThrowIfBuiltInFallbackNeeded(
+    private static void ThrowIfCredentialUnavailable(
         HttpStatusCode statusCode,
         TmdbResolvedConfiguration configuration)
     {
-        if (configuration.SourceKind != TmdbSourceKind.BuiltInPublicSource &&
-            ShouldFallbackToBuiltIn(statusCode))
+        if (statusCode is HttpStatusCode.Unauthorized
+            or HttpStatusCode.Forbidden
+            or HttpStatusCode.TooManyRequests)
         {
             throw new TmdbSourceUnavailableException(configuration, statusCode);
         }
@@ -1613,28 +1515,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         TmdbResolvedConfiguration configuration,
         CancellationToken cancellationToken)
     {
-        if (configuration.SourceKind != TmdbSourceKind.BuiltInPublicSource)
-        {
-            return await httpClient.SendAsync(request, cancellationToken);
-        }
-
-        await publicSourceRequestGate.WaitAsync(cancellationToken);
-        try
-        {
-            var delay = nextPublicSourceRequestUtc - DateTimeOffset.UtcNow;
-            if (delay > TimeSpan.Zero)
-            {
-                await Task.Delay(delay, cancellationToken);
-            }
-
-            var response = await httpClient.SendAsync(request, cancellationToken);
-            nextPublicSourceRequestUtc = DateTimeOffset.UtcNow + PublicSourceMinimumApiInterval;
-            return response;
-        }
-        finally
-        {
-            publicSourceRequestGate.Release();
-        }
+        return await httpClient.SendAsync(request, cancellationToken);
     }
 
     private async Task DownloadBinaryAsync(Uri sourceUri, string destinationPath, CancellationToken cancellationToken)
@@ -1837,9 +1718,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         public string? Iso3166_1 { get; init; }
     }
 
-    private sealed record TmdbResolvedConfigurations(
-        TmdbResolvedConfiguration Primary,
-        TmdbResolvedConfiguration? BuiltInFallback);
+    private sealed record TmdbResolvedConfigurations(TmdbResolvedConfiguration Primary);
 
     private sealed record TmdbConnectionTestAttempt(
         bool Success,
@@ -1883,7 +1762,6 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         CustomApiKey = 1,
         CustomAccessToken = 2,
         EnvironmentAccessToken = 3,
-        EnvironmentApiKey = 4,
-        BuiltInPublicSource = 5
+        EnvironmentApiKey = 4
     }
 }

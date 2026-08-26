@@ -53,7 +53,6 @@ export interface AppSettingsSnapshot {
 export interface TmdbSettings {
   enableMetadataEnrichment: boolean;
   enablePosterDownloads: boolean;
-  enableBuiltInPublicSource: boolean;
   customApiKey: string;
   customAccessToken: string;
   language: string;
@@ -91,7 +90,7 @@ export interface CacheSettings {
   webDavMaxGb: number;
   subtitleCachePath: string;
   subtitleMaxGb: number;
-  subtitleCacheStrategy: "optimized" | "full" | string;
+  subtitleCacheStrategy: "disabled" | "optimized" | "full" | string;
 }
 
 export interface PlaybackSettings {
@@ -244,6 +243,8 @@ export interface EpisodeDetail {
   stillAssetId: string | null;
   airDate: string | null;
   videoFile: VideoFileSummary | null;
+  /** All files mapped to this season/episode. videoFile remains the preferred resume file. */
+  videoFiles?: VideoFileSummary[];
 }
 
 export interface VideoFileSummary {

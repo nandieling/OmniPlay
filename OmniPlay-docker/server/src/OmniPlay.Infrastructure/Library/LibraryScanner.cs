@@ -238,7 +238,7 @@ public sealed class LibraryScanner : ILibraryScanner
         var scannedRelativePaths = scannedFiles
             .Select(static file => file.RelativePath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var episodeSubtitleByPath = ResolveDuplicateEpisodeSubtitles(source, scannedFiles);
+        var episodeSubtitleByPath = ResolveDuplicateEpisodeSubtitles(scannedFiles);
 
         foreach (var file in existing.Values.Where(file => !scannedRelativePaths.Contains(file.RelativePath)))
         {
@@ -265,7 +265,7 @@ public sealed class LibraryScanner : ILibraryScanner
             var metadata = MediaNameParser.ExtractSearchMetadata(scannedFile.MetadataPath);
             var isTv = MediaNameParser.IsLikelyTvEpisodePath(scannedFile.RelativePath);
             var libraryItemId = isTv
-                ? StableId.Create("tv", source.Id.ToString(), ResolveShowTitle(scannedFile.RelativePath, metadata))
+                ? CreateTvLibraryItemId(ResolveShowTitle(scannedFile.RelativePath, metadata))
                 : StableId.Create("movie", source.Id.ToString(), GetMovieGroupingKey(scannedFile.RelativePath, metadata));
             var itemKind = isTv ? "tv" : "movie";
             var title = isTv
@@ -981,7 +981,6 @@ public sealed class LibraryScanner : ILibraryScanner
     }
 
     private static IReadOnlyDictionary<string, string> ResolveDuplicateEpisodeSubtitles(
-        MediaSource source,
         IReadOnlyList<ScannedVideoFile> scannedFiles)
     {
         var contexts = scannedFiles
@@ -990,7 +989,7 @@ public sealed class LibraryScanner : ILibraryScanner
             {
                 var metadata = MediaNameParser.ExtractSearchMetadata(file.MetadataPath);
                 var showTitle = ResolveShowTitle(file.RelativePath, metadata);
-                var libraryItemId = StableId.Create("tv", source.Id.ToString(), showTitle);
+                var libraryItemId = CreateTvLibraryItemId(showTitle);
                 var episodeInfo = MediaNameParser.ParseEpisodeInfo(file.FileName, 0);
                 return new EpisodeSubtitleContext(file, libraryItemId, episodeInfo.Season, episodeInfo.Episode);
             })
@@ -1048,6 +1047,11 @@ public sealed class LibraryScanner : ILibraryScanner
                     ?? metadata.FullCleanTitle
                     ?? "未命名剧集";
         return MediaNameParser.NormalizeTvSeriesTitle(title);
+    }
+
+    private static string CreateTvLibraryItemId(string showTitle)
+    {
+        return StableId.Create("tv", showTitle);
     }
 
     private static string GetMovieGroupingKey(string relativePath, SearchMetadata metadata)

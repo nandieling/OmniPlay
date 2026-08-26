@@ -15,9 +15,6 @@ class OfflineCacheManager: ObservableObject {
     @Published var cachedFileKeys: Set<String> = []
     @Published var cacheStatusMessage: String? = nil
     
-    // 全局离线缓存模式开关
-    @Published var isCacheModeActive: Bool = false
-    
     // 无沙盒模式下，我们只需要存一个普通的字符串路径即可
     private let cachePathKey = "OfflineCacheDirectoryPath"
     private let minimumFreeSpaceAfterCache: Int64 = 256 * 1024 * 1024
@@ -110,7 +107,7 @@ class OfflineCacheManager: ObservableObject {
         switch kind {
         case .local, .direct, .webdav:
             return true
-        case .plex, .emby, .jellyfin:
+        case .plex, .emby, .jellyfin, .omniplayDocker:
             return false
         }
     }
@@ -119,7 +116,7 @@ class OfflineCacheManager: ObservableObject {
         if isCached(file) { return false }
         guard let mediaSource else { return true }
         guard let kind = mediaSource.protocolKind else { return true }
-        if kind == .webdav || kind == .plex || kind == .emby || kind == .jellyfin { return false }
+        if kind == .webdav || kind == .plex || kind == .emby || kind == .jellyfin || kind == .omniplayDocker { return false }
         let sourceURL = sourceFileURL(for: file, mediaSource: mediaSource)
         return !FileManager.default.fileExists(atPath: sourceURL.path)
     }
@@ -284,7 +281,7 @@ class OfflineCacheManager: ObservableObject {
                 }
                 let fileSize = await remoteFileSize(for: request, fallback: file.fileSize)
                 plannedFiles.append(CacheFilePlan(file: file, source: .remote(request), destinationURL: destinationURL, fileSize: fileSize))
-            case .plex, .emby, .jellyfin:
+            case .plex, .emby, .jellyfin, .omniplayDocker:
                 skippedUnsupportedCount += 1
             }
         }

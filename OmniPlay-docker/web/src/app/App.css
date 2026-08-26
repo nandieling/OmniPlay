@@ -2072,6 +2072,7 @@ input {
   align-items: center;
   background: transparent;
   display: flex;
+  flex-direction: column;
   justify-content: center;
   min-height: 34px;
   padding: 10px 4px 0;

@@ -661,6 +661,72 @@ public sealed class LibraryScannerTests : IDisposable
         Assert.Equal(0, metadataEnricher.CallCount);
     }
 
+    [Fact]
+    public async Task ScanAllAsync_OmniPlayDocker_DownloadsProtectedArtworkToLocalCache()
+    {
+        var storagePaths = new TestStoragePaths(rootPath);
+        var dockerClient = new FakeOmniPlayDockerClient();
+        var dockerScanner = new LibraryScanner(
+            database,
+            mediaSourceRepository,
+            omniPlayDockerClient: dockerClient,
+            storagePaths: storagePaths);
+
+        await mediaSourceRepository.AddAsync(new MediaSource
+        {
+            Name = "OmniPlay Docker",
+            ProtocolType = "omniplay-docker",
+            BaseUrl = "http://docker.local:45722"
+        });
+
+        var summary = await dockerScanner.ScanAllAsync();
+
+        Assert.Equal(1, summary.NewTvShowCount);
+        Assert.Equal(1, summary.NewVideoFileCount);
+        Assert.Equal([FakeOmniPlayDockerClient.PosterAssetId], dockerClient.DownloadedPosterAssetIds);
+        Assert.Equal([FakeOmniPlayDockerClient.StillAssetId], dockerClient.DownloadedThumbnailAssetIds);
+
+        using var connection = database.OpenConnection();
+        var posterPath = await connection.ExecuteScalarAsync<string>("SELECT posterPath FROM tvShow");
+        var thumbnailPath = await connection.ExecuteScalarAsync<string>(
+            "SELECT customEpisodeThumbnailPath FROM videoFile");
+
+        Assert.True(Path.IsPathRooted(posterPath));
+        Assert.True(Path.IsPathRooted(thumbnailPath));
+        Assert.True(File.Exists(posterPath));
+        Assert.True(File.Exists(thumbnailPath));
+        Assert.StartsWith(storagePaths.PostersDirectory, posterPath, StringComparison.Ordinal);
+        Assert.StartsWith(storagePaths.ThumbnailsDirectory, thumbnailPath, StringComparison.Ordinal);
+        Assert.DoesNotContain("/api/assets/", posterPath, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("/api/assets/", thumbnailPath, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(FakeOmniPlayDockerClient.PosterData, await File.ReadAllBytesAsync(posterPath));
+        Assert.Equal(FakeOmniPlayDockerClient.ThumbnailData, await File.ReadAllBytesAsync(thumbnailPath));
+    }
+
+    [Fact]
+    public async Task ScanAllAsync_OmniPlayDocker_ImportsEveryEpisodeVersion()
+    {
+        var dockerClient = new FakeOmniPlayDockerClient { IncludeAlternateEpisodeVersion = true };
+        var dockerScanner = new LibraryScanner(
+            database,
+            mediaSourceRepository,
+            omniPlayDockerClient: dockerClient);
+
+        await mediaSourceRepository.AddAsync(new MediaSource
+        {
+            Name = "OmniPlay Docker",
+            ProtocolType = "omniplay-docker",
+            BaseUrl = "http://docker.local:45722"
+        });
+
+        var summary = await dockerScanner.ScanAllAsync();
+
+        Assert.Equal(2, summary.NewVideoFileCount);
+        using var connection = database.OpenConnection();
+        Assert.Equal(2, await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM videoFile"));
+        Assert.Equal(2, await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM videoFile WHERE episodeId IS NOT NULL"));
+    }
+
     public void Dispose()
     {
         SqliteConnection.ClearAllPools();
@@ -800,6 +866,142 @@ public sealed class LibraryScannerTests : IDisposable
         {
             return Task.FromResult<IReadOnlyList<NetworkShareFolderItem>>([]);
         }
+    }
+
+    private sealed class FakeOmniPlayDockerClient : IOmniPlayDockerClient
+    {
+        public const string PosterAssetId = "poster-asset";
+        public const string StillAssetId = "still-asset";
+        public static readonly byte[] PosterData = [0x89, 0x50, 0x4E, 0x47, 0x01];
+        public static readonly byte[] ThumbnailData = [0x89, 0x50, 0x4E, 0x47, 0x02];
+
+        public List<string> DownloadedPosterAssetIds { get; } = [];
+
+        public List<string> DownloadedThumbnailAssetIds { get; } = [];
+
+        public bool IncludeAlternateEpisodeVersion { get; init; }
+
+        public Task<IReadOnlyList<OmniPlayDockerLibraryItem>> GetLibraryItemsAsync(
+            MediaSource source,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<OmniPlayDockerLibraryItem>>(
+            [
+                new(
+                    "show-1",
+                    "tv",
+                    "Docker Show",
+                    "2026-01-01",
+                    "Overview",
+                    PosterAssetId,
+                    8.5,
+                    null,
+                    0,
+                    1800)
+            ]);
+        }
+
+        public Task<OmniPlayDockerLibraryDetail?> GetLibraryDetailAsync(
+            MediaSource source,
+            string libraryItemId,
+            CancellationToken cancellationToken = default)
+        {
+            var videoFile = new OmniPlayDockerVideoFile(
+                "video-1",
+                "Docker Show/Season 1/Docker.Show.S01E01.mkv",
+                "Docker.Show.S01E01.mkv",
+                "tv",
+                1024,
+                1800,
+                0,
+                false);
+            var alternateVideoFile = IncludeAlternateEpisodeVersion
+                ? new OmniPlayDockerVideoFile(
+                    "video-2",
+                    "Docker Show/Season 1/Docker.Show.S01E01.2160p.mkv",
+                    "Docker.Show.S01E01.2160p.mkv",
+                    "tv",
+                    2048,
+                    3600,
+                    0,
+                    false)
+                : null;
+            var episodeFiles = alternateVideoFile is null
+                ? null
+                : new[] { videoFile, alternateVideoFile };
+            OmniPlayDockerLibraryDetail detail = new(
+                libraryItemId,
+                "tv",
+                "Docker Show",
+                "2026-01-01",
+                "Overview",
+                PosterAssetId,
+                8.5,
+                null,
+                null,
+                [],
+                [
+                    new OmniPlayDockerSeason(
+                    [
+                        new OmniPlayDockerEpisode(
+                            "episode-1",
+                            1,
+                            1,
+                            "Episode 1",
+                            "Episode overview",
+                            StillAssetId,
+                            "2026-01-01",
+                            videoFile,
+                            episodeFiles)
+                    ])
+                ]);
+            return Task.FromResult<OmniPlayDockerLibraryDetail?>(detail);
+        }
+
+        public Task<byte[]> GetPosterDataAsync(
+            MediaSource source,
+            string posterAssetId,
+            CancellationToken cancellationToken = default)
+        {
+            DownloadedPosterAssetIds.Add(posterAssetId);
+            return Task.FromResult(PosterData);
+        }
+
+        public Task<byte[]> GetThumbnailDataAsync(
+            MediaSource source,
+            string thumbnailAssetId,
+            CancellationToken cancellationToken = default)
+        {
+            DownloadedThumbnailAssetIds.Add(thumbnailAssetId);
+            return Task.FromResult(ThumbnailData);
+        }
+
+        public Task<string?> GetPlaybackUrlAsync(
+            string baseUrl,
+            string? authConfig,
+            string videoFileId,
+            CancellationToken cancellationToken = default) => Task.FromResult<string?>(null);
+
+        public Task<OmniPlayDockerPlaybackProgress?> GetPlaybackProgressAsync(
+            string baseUrl,
+            string? authConfig,
+            string videoFileId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<OmniPlayDockerPlaybackProgress?>(null);
+
+        public Task UpdateProgressAsync(
+            string baseUrl,
+            string? authConfig,
+            string videoFileId,
+            double positionSeconds,
+            double durationSeconds,
+            CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task ImportDoubanMetadataAsync(
+            MediaSource source,
+            string libraryItemId,
+            DoubanMetadata metadata,
+            CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
     private sealed class CapturingMetadataEnricher : ILibraryMetadataEnricher

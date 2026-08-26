@@ -82,7 +82,7 @@ public sealed class TmdbMetadataClientTests : IDisposable
     }
 
     [Fact]
-    public async Task TestConnectionPrefersCustomApiWhenBuiltInSourceIsEnabled()
+    public async Task TestConnectionUsesCustomApiKey()
     {
         string? firstApiKey = null;
         var client = CreateClient(request =>
@@ -91,9 +91,7 @@ public sealed class TmdbMetadataClientTests : IDisposable
             return Json("""{ "images": {} }""");
         });
 
-        var result = await client.TestConnectionAsync(new TmdbSettings(
-            EnableBuiltInPublicSource: true,
-            CustomApiKey: "custom-key"));
+        var result = await client.TestConnectionAsync(new TmdbSettings(CustomApiKey: "custom-key"));
 
         Assert.True(result.IsReachable);
         Assert.Equal("custom-key", firstApiKey);
@@ -551,9 +549,7 @@ public sealed class TmdbMetadataClientTests : IDisposable
 
     private static TmdbSettings TestSettings()
     {
-        return new TmdbSettings(
-            CustomApiKey: "test-key",
-            EnableBuiltInPublicSource: false);
+        return new TmdbSettings(CustomApiKey: "test-key");
     }
 
     private static HttpResponseMessage Json(string body)

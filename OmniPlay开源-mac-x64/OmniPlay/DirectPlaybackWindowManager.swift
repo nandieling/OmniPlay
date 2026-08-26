@@ -4,7 +4,6 @@ import AppKit
 @MainActor
 final class DirectPlaybackWindowManager: NSObject, NSWindowDelegate {
     static let shared = DirectPlaybackWindowManager()
-    private static let playbackWindowIdentifier = NSUserInterfaceItemIdentifier("OmniPlayPlaybackWindow")
 
     private var window: NSWindow?
     private weak var primaryWindow: NSWindow?
@@ -58,7 +57,6 @@ final class DirectPlaybackWindowManager: NSObject, NSWindowDelegate {
             defer: false
         )
         win.title = request.movie.title
-        win.identifier = Self.playbackWindowIdentifier
         win.minSize = NSSize(width: 900, height: 560)
         win.titlebarAppearsTransparent = false
         win.titleVisibility = .visible
@@ -91,7 +89,8 @@ final class DirectPlaybackWindowManager: NSObject, NSWindowDelegate {
             return
         }
 
-        finishClosing(existing)
+        NotificationCenter.default.post(name: .standalonePlayerShouldClose, object: nil)
+        hide(existing)
     }
 
     func toggleCurrentWindowFullScreen() {
@@ -110,17 +109,15 @@ final class DirectPlaybackWindowManager: NSObject, NSWindowDelegate {
     }
 
     func restoreWindowForReopen() -> Bool {
-        if let existing = window, existing.isVisible {
+        if let existing = window, isRestorableForDockReopen(existing) {
             if existing.isMiniaturized { existing.deminiaturize(nil) }
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             trace("restoreWindowForReopen managed title=\(existing.title)")
             return true
-        } else if window != nil {
-            trace("restoreWindowForReopen ignored hidden playback window")
         }
 
-        if let candidate = NSApp.windows.first(where: { $0.identifier != Self.playbackWindowIdentifier }) {
+        if let candidate = NSApp.windows.first(where: { isRestorableForDockReopen($0) }) {
             if candidate.isMiniaturized { candidate.deminiaturize(nil) }
             candidate.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -130,6 +127,10 @@ final class DirectPlaybackWindowManager: NSObject, NSWindowDelegate {
 
         trace("restoreWindowForReopen no candidate window")
         return false
+    }
+
+    private func isRestorableForDockReopen(_ candidate: NSWindow) -> Bool {
+        candidate.isVisible || candidate.isMiniaturized
     }
 
     private func apply(_ request: DirectFilePlaybackManager.PlaybackRequest, to window: NSWindow) {
@@ -204,14 +205,13 @@ final class DirectPlaybackWindowManager: NSObject, NSWindowDelegate {
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard sender === window else { return true }
-        trace("windowShouldClose intercepted, hide playback safely")
+        trace("windowShouldClose intercepted, hide window instead of close")
         closeCurrentWindow()
         return false
     }
 
-    private func finishClosing(_ target: NSWindow) {
-        trace("finishClosing playback window")
-        NotificationCenter.default.post(name: .standalonePlayerShouldClose, object: nil)
+    private func hide(_ target: NSWindow) {
+        trace("hide window orderOut")
         target.orderOut(nil)
         recoverCursorVisibility()
         restorePrimaryWindow(excluding: target)

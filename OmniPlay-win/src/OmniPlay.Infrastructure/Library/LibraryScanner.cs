@@ -4,6 +4,7 @@ using OmniPlay.Core.Models;
 using OmniPlay.Core.Models.Entities;
 using OmniPlay.Core.Models.Playback;
 using OmniPlay.Infrastructure.Data;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace OmniPlay.Infrastructure.Library;
@@ -22,6 +23,8 @@ public sealed class LibraryScanner : ILibraryScanner
     private readonly IWebDavDiscoveryClient? webDavDiscoveryClient;
     private readonly ILocalMetadataSidecarService? localMetadataSidecarService;
     private readonly IMediaServerDiscoveryClient? mediaServerDiscoveryClient;
+    private readonly IOmniPlayDockerClient? omniPlayDockerClient;
+    private readonly IStoragePaths? storagePaths;
     private readonly object deferredUnidentifiedScanLock = new();
     private readonly List<DeferredPendingScanGroup> deferredUnidentifiedScanGroups = [];
 
@@ -32,7 +35,9 @@ public sealed class LibraryScanner : ILibraryScanner
         ISettingsService? settingsService = null,
         IWebDavDiscoveryClient? webDavDiscoveryClient = null,
         ILocalMetadataSidecarService? localMetadataSidecarService = null,
-        IMediaServerDiscoveryClient? mediaServerDiscoveryClient = null)
+        IMediaServerDiscoveryClient? mediaServerDiscoveryClient = null,
+        IOmniPlayDockerClient? omniPlayDockerClient = null,
+        IStoragePaths? storagePaths = null)
     {
         this.database = database;
         this.mediaSourceRepository = mediaSourceRepository;
@@ -40,6 +45,8 @@ public sealed class LibraryScanner : ILibraryScanner
         this.webDavDiscoveryClient = webDavDiscoveryClient;
         this.localMetadataSidecarService = localMetadataSidecarService;
         this.mediaServerDiscoveryClient = mediaServerDiscoveryClient;
+        this.omniPlayDockerClient = omniPlayDockerClient;
+        this.storagePaths = storagePaths;
     }
 
     public async Task<LibraryScanSummary> ScanAllAsync(CancellationToken cancellationToken = default)
@@ -274,6 +281,242 @@ public sealed class LibraryScanner : ILibraryScanner
         return await ScanSourceAsync(source, scannedFiles, cancellationToken, afterItemIndexed, deferUnidentifiedGroups);
     }
 
+    private async Task<LibraryScanSummary> ScanOmniPlayDockerSourceAsync(
+        MediaSource source,
+        CancellationToken cancellationToken)
+    {
+        if (omniPlayDockerClient is null || source.Id is null)
+        {
+            return CreateDiagnosticSummary(source, "扫描 OmniPlay Docker 失败：缺少 Docker API 客户端。");
+        }
+
+        try
+        {
+            var items = await omniPlayDockerClient.GetLibraryItemsAsync(source, cancellationToken);
+            var details = new List<OmniPlayDockerLibraryDetail>();
+            foreach (var item in items)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var detail = await omniPlayDockerClient.GetLibraryDetailAsync(source, item.Id, cancellationToken);
+                if (detail is not null)
+                {
+                    details.Add(detail);
+                }
+            }
+
+            return await ImportOmniPlayDockerDetailsAsync(source, details, cancellationToken);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or InvalidOperationException or JsonException)
+        {
+            return CreateDiagnosticSummary(source, $"扫描 OmniPlay Docker“{ResolveSourceDisplayName(source)}”失败：{ex.Message}");
+        }
+    }
+
+    private async Task<LibraryScanSummary> ImportOmniPlayDockerDetailsAsync(
+        MediaSource source,
+        IReadOnlyList<OmniPlayDockerLibraryDetail> details,
+        CancellationToken cancellationToken)
+    {
+        var sourceId = source.Id!.Value;
+        var expectedFileIds = details
+            .SelectMany(FlattenDockerFiles)
+            .Select(file => BuildOmniPlayDockerLocalVideoFileId(sourceId, file.Id))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var newMovies = 0;
+        var newTvShows = 0;
+        var newVideoFiles = 0;
+        var removedVideoFiles = 0;
+        var importedAssets = await ImportOmniPlayDockerAssetsAsync(source, details, cancellationToken);
+        var dockerThumbnailDirectoryPrefix = storagePaths is null
+            ? string.Empty
+            : Path.Combine(storagePaths.ThumbnailsDirectory, "omniplay-docker-");
+
+        using var connection = database.OpenConnection();
+        using var transaction = connection.BeginTransaction();
+        foreach (var detail in details)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var isTv = string.Equals(detail.ItemKind, "tv", StringComparison.OrdinalIgnoreCase) ||
+                       detail.Seasons.Any(season => season.Episodes.Any(episode => GetDockerEpisodeFiles(episode).Count > 0));
+            var entityId = CreateSyntheticEntityId(isTv ? "docker-tv" : "docker-movie", sourceId, detail.Id);
+            importedAssets.Posters.TryGetValue(detail.Id, out var posterPath);
+            var existingPosterPath = await connection.ExecuteScalarAsync<string?>(
+                new CommandDefinition(
+                    isTv
+                        ? "SELECT posterPath FROM tvShow WHERE id = @Id"
+                        : "SELECT posterPath FROM movie WHERE id = @Id",
+                    new { Id = entityId },
+                    transaction,
+                    cancellationToken: cancellationToken));
+            var importedDouban = BuildDoubanMetadata(detail, isTv ? "tv" : "movie", entityId);
+            var effectiveOverview = string.IsNullOrWhiteSpace(detail.Overview)
+                ? importedDouban?.Summary
+                : detail.Overview;
+            posterPath ??= existingPosterPath ?? importedDouban?.PosterUrl;
+
+            if (isTv)
+            {
+                var existed = await connection.ExecuteScalarAsync<int>(
+                    new CommandDefinition(
+                        "SELECT COUNT(*) FROM tvShow WHERE id = @Id",
+                        new { Id = entityId },
+                        transaction,
+                        cancellationToken: cancellationToken));
+                await connection.ExecuteAsync(
+                    new CommandDefinition(
+                        """
+                        INSERT INTO tvShow (id, title, firstAirDate, overview, posterPath, voteAverage, isLocked)
+                        VALUES (@Id, @Title, @FirstAirDate, @Overview, @PosterPath, @VoteAverage, 1)
+                        ON CONFLICT(id) DO UPDATE SET
+                            title = excluded.title,
+                            firstAirDate = excluded.firstAirDate,
+                            overview = excluded.overview,
+                            posterPath = COALESCE(excluded.posterPath, posterPath),
+                            voteAverage = excluded.voteAverage,
+                            isLocked = 1
+                        """,
+                        new
+                        {
+                            Id = entityId,
+                            Title = detail.Title,
+                            FirstAirDate = detail.ReleaseDate,
+                            Overview = effectiveOverview,
+                            PosterPath = posterPath,
+                            VoteAverage = detail.VoteAverage
+                        },
+                        transaction,
+                        cancellationToken: cancellationToken));
+                if (existed == 0)
+                {
+                    newTvShows++;
+                }
+            }
+            else
+            {
+                var existed = await connection.ExecuteScalarAsync<int>(
+                    new CommandDefinition(
+                        "SELECT COUNT(*) FROM movie WHERE id = @Id",
+                        new { Id = entityId },
+                        transaction,
+                        cancellationToken: cancellationToken));
+                await connection.ExecuteAsync(
+                    new CommandDefinition(
+                        """
+                        INSERT INTO movie (id, title, releaseDate, overview, posterPath, voteAverage, isLocked)
+                        VALUES (@Id, @Title, @ReleaseDate, @Overview, @PosterPath, @VoteAverage, 1)
+                        ON CONFLICT(id) DO UPDATE SET
+                            title = excluded.title,
+                            releaseDate = excluded.releaseDate,
+                            overview = excluded.overview,
+                            posterPath = COALESCE(excluded.posterPath, posterPath),
+                            voteAverage = excluded.voteAverage,
+                            isLocked = 1
+                        """,
+                        new
+                        {
+                            Id = entityId,
+                            Title = detail.Title,
+                            ReleaseDate = detail.ReleaseDate,
+                            Overview = effectiveOverview,
+                            PosterPath = posterPath,
+                            VoteAverage = detail.VoteAverage
+                        },
+                        transaction,
+                        cancellationToken: cancellationToken));
+                if (existed == 0)
+                {
+                    newMovies++;
+                }
+            }
+
+            if (importedDouban is not null)
+            {
+                await SaveImportedDoubanMetadataAsync(connection, transaction, importedDouban, cancellationToken);
+            }
+
+            foreach (var file in FlattenDockerFiles(detail))
+            {
+                var localFileId = BuildOmniPlayDockerLocalVideoFileId(sourceId, file.Id);
+                importedAssets.Thumbnails.TryGetValue(file.Id, out var thumbnailPath);
+                var existed = await connection.ExecuteScalarAsync<int>(
+                    new CommandDefinition(
+                        "SELECT COUNT(*) FROM videoFile WHERE id = @Id",
+                        new { Id = localFileId },
+                        transaction,
+                        cancellationToken: cancellationToken));
+                await connection.ExecuteAsync(
+                    new CommandDefinition(
+                        """
+                        INSERT INTO videoFile (
+                            id, sourceId, metadataPath, relativePath, fileName, mediaType,
+                            movieId, episodeId, playProgress, duration, customEpisodeThumbnailPath)
+                        VALUES (
+                            @Id, @SourceId, @MetadataPath, @RelativePath, @FileName, @MediaType,
+                            @MovieId, @EpisodeId, @PlayProgress, @Duration, @CustomEpisodeThumbnailPath)
+                        ON CONFLICT(id) DO UPDATE SET
+                            metadataPath = excluded.metadataPath,
+                            relativePath = excluded.relativePath,
+                            fileName = excluded.fileName,
+                            mediaType = excluded.mediaType,
+                            movieId = excluded.movieId,
+                            episodeId = excluded.episodeId,
+                            playProgress = excluded.playProgress,
+                            duration = excluded.duration,
+                            customEpisodeThumbnailPath = CASE
+                                WHEN videoFile.customEpisodeThumbnailPath IS NULL THEN excluded.customEpisodeThumbnailPath
+                                WHEN @DockerThumbnailDirectoryPrefix <> ''
+                                     AND instr(videoFile.customEpisodeThumbnailPath, @DockerThumbnailDirectoryPrefix) = 1
+                                    THEN COALESCE(excluded.customEpisodeThumbnailPath, videoFile.customEpisodeThumbnailPath)
+                                ELSE videoFile.customEpisodeThumbnailPath
+                            END
+                        """,
+                        new
+                        {
+                            Id = localFileId,
+                            SourceId = sourceId,
+                            MetadataPath = file.RelativePath,
+                            RelativePath = $"api/playback/files/{Uri.EscapeDataString(file.Id)}/stream",
+                            FileName = ResolveOmniPlayDockerDisplayFileName(file),
+                            MediaType = isTv ? "tv" : "movie",
+                            MovieId = isTv ? (long?)null : entityId,
+                            EpisodeId = isTv ? entityId : (long?)null,
+                            PlayProgress = Math.Max(file.PositionSeconds, 0),
+                            Duration = Math.Max(file.DurationSeconds, 0),
+                            CustomEpisodeThumbnailPath = thumbnailPath,
+                            DockerThumbnailDirectoryPrefix = dockerThumbnailDirectoryPrefix
+                        },
+                        transaction,
+                        cancellationToken: cancellationToken));
+                if (existed == 0)
+                {
+                    newVideoFiles++;
+                }
+            }
+        }
+
+        if (expectedFileIds.Count > 0)
+        {
+            var existingIds = (await connection.QueryAsync<string>(
+                new CommandDefinition(
+                    "SELECT id FROM videoFile WHERE sourceId = @SourceId",
+                    new { SourceId = sourceId },
+                    transaction,
+                    cancellationToken: cancellationToken))).ToList();
+            foreach (var staleId in existingIds.Where(id => !expectedFileIds.Contains(id)))
+            {
+                removedVideoFiles += await connection.ExecuteAsync(
+                    new CommandDefinition(
+                        "DELETE FROM videoFile WHERE id = @Id",
+                        new { Id = staleId },
+                        transaction,
+                        cancellationToken: cancellationToken));
+            }
+        }
+
+        transaction.Commit();
+        return new LibraryScanSummary(1, newMovies, newVideoFiles, removedVideoFiles, newTvShows);
+    }
+
     private async Task<LibraryScanSummary> ScanSourceWithDiagnosticsAsync(
         MediaSource source,
         CancellationToken cancellationToken,
@@ -289,6 +532,7 @@ public sealed class LibraryScanner : ILibraryScanner
                 MediaSourceProtocol.Smb => await ScanSmbSourceAsync(source, cancellationToken, afterItemIndexed, deferUnidentifiedGroups),
                 MediaSourceProtocol.Plex or MediaSourceProtocol.Emby or MediaSourceProtocol.Jellyfin =>
                     await ScanMediaServerSourceAsync(source, cancellationToken, afterItemIndexed, deferUnidentifiedGroups),
+                MediaSourceProtocol.OmniPlayDocker => await ScanOmniPlayDockerSourceAsync(source, cancellationToken),
                 MediaSourceProtocol.Direct => CreateDiagnosticSummary(source, $"已跳过媒体源“{ResolveSourceDisplayName(source)}”：当前版本暂不支持直接链接扫描。"),
                 _ => CreateDiagnosticSummary(source, $"已跳过媒体源“{ResolveSourceDisplayName(source)}”：协议类型无效。")
             };
@@ -1566,6 +1810,250 @@ public sealed class LibraryScanner : ILibraryScanner
         return -positive;
     }
 
+    private static string BuildOmniPlayDockerLocalVideoFileId(long sourceId, string remoteFileId)
+    {
+        return $"omniplay-docker:{sourceId}:{Uri.EscapeDataString(remoteFileId)}";
+    }
+
+    private async Task<OmniPlayDockerImportedAssets> ImportOmniPlayDockerAssetsAsync(
+        MediaSource source,
+        IReadOnlyList<OmniPlayDockerLibraryDetail> details,
+        CancellationToken cancellationToken)
+    {
+        if (omniPlayDockerClient is null || storagePaths is null || source.Id is null)
+        {
+            return new OmniPlayDockerImportedAssets(
+                new Dictionary<string, string>(),
+                new Dictionary<string, string>());
+        }
+
+        storagePaths.EnsureCreated();
+        Dictionary<string, string> posters = new(StringComparer.Ordinal);
+        Dictionary<string, string> thumbnails = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var detail in details)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!string.IsNullOrWhiteSpace(detail.PosterAssetId))
+            {
+                var destination = BuildOmniPlayDockerAssetPath(
+                    storagePaths.PostersDirectory,
+                    source.Id.Value,
+                    "poster",
+                    detail.PosterAssetId);
+                if (await TryImportOmniPlayDockerAssetAsync(
+                        destination,
+                        token => omniPlayDockerClient.GetPosterDataAsync(source, detail.PosterAssetId, token),
+                        cancellationToken))
+                {
+                    posters[detail.Id] = destination;
+                }
+            }
+
+            foreach (var episode in detail.Seasons.SelectMany(static season => season.Episodes))
+            {
+                var episodeFiles = GetDockerEpisodeFiles(episode);
+                if (episodeFiles.Count == 0 || string.IsNullOrWhiteSpace(episode.StillAssetId))
+                {
+                    continue;
+                }
+
+                var destination = BuildOmniPlayDockerAssetPath(
+                    storagePaths.ThumbnailsDirectory,
+                    source.Id.Value,
+                    "thumbnail",
+                    episode.StillAssetId);
+                if (await TryImportOmniPlayDockerAssetAsync(
+                        destination,
+                        token => omniPlayDockerClient.GetThumbnailDataAsync(source, episode.StillAssetId, token),
+                        cancellationToken))
+                {
+                    foreach (var file in episodeFiles)
+                    {
+                        thumbnails[file.Id] = destination;
+                    }
+                }
+            }
+        }
+
+        return new OmniPlayDockerImportedAssets(posters, thumbnails);
+    }
+
+    private static async Task<bool> TryImportOmniPlayDockerAssetAsync(
+        string destination,
+        Func<CancellationToken, Task<byte[]>> downloadAsync,
+        CancellationToken cancellationToken)
+    {
+        if (File.Exists(destination) && new FileInfo(destination).Length > 0)
+        {
+            return true;
+        }
+
+        try
+        {
+            var data = await downloadAsync(cancellationToken);
+            if (data.Length == 0)
+            {
+                return false;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            await File.WriteAllBytesAsync(destination, data, cancellationToken);
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static string BuildOmniPlayDockerAssetPath(
+        string directory,
+        long sourceId,
+        string assetKind,
+        string assetId)
+    {
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes($"{sourceId}:{assetKind}:{assetId.Trim()}"))).ToLowerInvariant();
+        return Path.Combine(directory, $"omniplay-docker-{hash}.jpg");
+    }
+
+    private static DoubanMetadata? BuildDoubanMetadata(OmniPlayDockerLibraryDetail detail, string itemKind, long entityId)
+    {
+        if (detail.Douban is { } douban)
+        {
+            return new DoubanMetadata(
+                itemKind,
+                entityId,
+                douban.SubjectId,
+                douban.SubjectUrl,
+                douban.Title,
+                douban.OriginalTitle,
+                douban.Year,
+                douban.Rating,
+                douban.RatingCount,
+                douban.Summary,
+                douban.PosterUrl,
+                douban.FetchedAt);
+        }
+
+        if (!detail.DoubanRating.HasValue)
+        {
+            return null;
+        }
+
+        return new DoubanMetadata(
+            itemKind,
+            entityId,
+            $"docker-{detail.Id}",
+            string.Empty,
+            detail.Title,
+            null,
+            NormalizeYear(detail.ReleaseDate),
+            detail.DoubanRating,
+            null,
+            null,
+            null,
+            DateTimeOffset.UtcNow);
+    }
+
+    private static async Task SaveImportedDoubanMetadataAsync(
+        System.Data.IDbConnection connection,
+        System.Data.IDbTransaction transaction,
+        DoubanMetadata metadata,
+        CancellationToken cancellationToken)
+    {
+        await connection.ExecuteAsync(
+            new CommandDefinition(
+                """
+                INSERT INTO doubanMetadata (
+                    itemKind, entityId, subjectId, subjectUrl, title, originalTitle, year,
+                    rating, ratingCount, summary, posterUrl, fetchedAt)
+                VALUES (
+                    @ItemKind, @EntityId, @SubjectId, @SubjectUrl, @Title, @OriginalTitle, @Year,
+                    @Rating, @RatingCount, @Summary, @PosterUrl, @FetchedAt)
+                ON CONFLICT(itemKind, entityId) DO UPDATE SET
+                    subjectId = excluded.subjectId,
+                    subjectUrl = excluded.subjectUrl,
+                    title = excluded.title,
+                    originalTitle = excluded.originalTitle,
+                    year = excluded.year,
+                    rating = excluded.rating,
+                    ratingCount = excluded.ratingCount,
+                    summary = excluded.summary,
+                    posterUrl = excluded.posterUrl,
+                    fetchedAt = excluded.fetchedAt
+                """,
+                new
+                {
+                    metadata.ItemKind,
+                    metadata.EntityId,
+                    metadata.SubjectId,
+                    metadata.SubjectUrl,
+                    metadata.Title,
+                    metadata.OriginalTitle,
+                    metadata.Year,
+                    metadata.Rating,
+                    metadata.RatingCount,
+                    metadata.Summary,
+                    metadata.PosterUrl,
+                    FetchedAt = metadata.FetchedAt.ToString("O")
+                },
+                transaction,
+                cancellationToken: cancellationToken));
+    }
+
+    private static string? NormalizeYear(string? value)
+    {
+        var match = Regex.Match(value ?? string.Empty, "\\d{4}");
+        return match.Success ? match.Value : null;
+    }
+
+    private static IReadOnlyList<OmniPlayDockerVideoFile> FlattenDockerFiles(OmniPlayDockerLibraryDetail detail)
+    {
+        var files = detail.VideoFiles.ToList();
+        files.AddRange(detail.Seasons
+            .SelectMany(season => season.Episodes)
+            .SelectMany(GetDockerEpisodeFiles));
+        return files
+            .GroupBy(static file => file.Id, StringComparer.OrdinalIgnoreCase)
+            .Select(static group => group.First())
+            .ToList();
+    }
+
+    private static IReadOnlyList<OmniPlayDockerVideoFile> GetDockerEpisodeFiles(OmniPlayDockerEpisode episode)
+    {
+        if (episode.VideoFiles is { Count: > 0 })
+        {
+            return episode.VideoFiles;
+        }
+
+        return episode.VideoFile is { } file ? [file] : [];
+    }
+
+    private static string ResolveOmniPlayDockerDisplayFileName(OmniPlayDockerVideoFile file)
+    {
+        var fileName = file.FileName.Trim();
+        if (!string.IsNullOrWhiteSpace(fileName) &&
+            !MediaSourcePathResolver.IsMediaServerPlaybackEndpointPath(fileName))
+        {
+            return fileName;
+        }
+
+        var relative = file.RelativePath.Trim();
+        if (!string.IsNullOrWhiteSpace(relative) &&
+            !MediaSourcePathResolver.IsMediaServerPlaybackEndpointPath(relative))
+        {
+            return Path.GetFileName(relative.Replace('\\', '/')) is { Length: > 0 } name ? name : relative;
+        }
+
+        return string.IsNullOrWhiteSpace(fileName) ? file.Id : fileName;
+    }
+
     private sealed class ExistingVideoFileRecord
     {
         public string Id { get; init; } = string.Empty;
@@ -1628,6 +2116,10 @@ public sealed class LibraryScanner : ILibraryScanner
         int NewTvShowCount,
         int NewVideoFileCount,
         LibraryScanIndexedItem? IndexedItem);
+
+    private sealed record OmniPlayDockerImportedAssets(
+        IReadOnlyDictionary<string, string> Posters,
+        IReadOnlyDictionary<string, string> Thumbnails);
 
     private static IReadOnlyList<ScannedVideoFile> ResolvePrimaryVideoFiles(IReadOnlyList<ScannedVideoFile> scannedFiles)
     {

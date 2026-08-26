@@ -17,19 +17,25 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.ArrayAdapter;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 
 import com.omniplay.tv.data.Models;
 import com.omniplay.tv.data.OmniPlayApi;
+import com.omniplay.tv.iso.RemoteIsoStreamServer;
 import com.omniplay.tv.player.MpvVideoView;
 import com.omniplay.tv.ui.ImageLoader;
 
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -115,6 +121,86 @@ public final class PhoneMainActivity extends Activity {
         EditText passwordInput = input("密码", api.savedPassword());
         passwordInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         page.addView(passwordInput, margin(matchWidth(), 0, dp(12), 0, 0));
+
+        page.addView(body("Lucky STUN 穿透地址"), margin(matchWidth(), 0, dp(6), 0, dp(2)));
+        page.addView(body("管理地址"), margin(matchWidth(), 0, 0, 0, dp(3)));
+        EditText luckyUrlInput = input("例如 http://192.168.1.1:16601", api.luckyStunManagementUrl());
+        page.addView(luckyUrlInput, margin(matchWidth(), 0, dp(10), 0, 0));
+        page.addView(body("账号"), margin(matchWidth(), 0, 0, 0, dp(3)));
+        EditText luckyUsernameInput = input("Lucky 管理账号", api.luckyStunUsername());
+        page.addView(luckyUsernameInput, margin(matchWidth(), 0, dp(10), 0, 0));
+        page.addView(body("密码"), margin(matchWidth(), 0, 0, 0, dp(3)));
+        EditText luckyPasswordInput = input("Lucky 管理密码", api.luckyStunPassword());
+        luckyPasswordInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        page.addView(luckyPasswordInput, margin(matchWidth(), 0, dp(10), 0, 0));
+        ArrayList<String> luckyRuleIds = new ArrayList<>();
+        ArrayList<String> luckyRuleNames = new ArrayList<>();
+        ArrayList<String> luckyRuleLabels = new ArrayList<>();
+        Spinner luckyRuleSpinner = new Spinner(this);
+        ArrayAdapter<String> luckyRuleAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, luckyRuleLabels);
+        luckyRuleAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        luckyRuleSpinner.setAdapter(luckyRuleAdapter);
+        page.addView(luckyRuleSpinner, margin(matchWidth(), 0, dp(8), 0, 0));
+        TextView luckyRuleList = body("登录后将在此显示规则列表。");
+        luckyRuleList.setMaxLines(8);
+        luckyRuleList.setEllipsize(TextUtils.TruncateAt.END);
+        page.addView(luckyRuleList, margin(matchWidth(), 0, dp(8), 0, 0));
+        CheckBox luckyAutoUpdate = new CheckBox(this);
+        luckyAutoUpdate.setText("定期自动更新 Lucky STUN 地址");
+        luckyAutoUpdate.setTextColor(COLOR_TEXT);
+        luckyAutoUpdate.setChecked(api.luckyStunAutoUpdate());
+        page.addView(luckyAutoUpdate, margin(matchWidth(), 0, dp(4), 0, 0));
+        EditText luckyIntervalInput = input("更新周期（分钟，至少 5）", String.valueOf(api.luckyStunUpdateIntervalMinutes()));
+        luckyIntervalInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        page.addView(luckyIntervalInput, margin(matchWidth(), 0, dp(8), 0, 0));
+        Button luckyUpdate = button("登录检测并更新");
+        page.addView(luckyUpdate, margin(matchWidth(), 0, dp(4), 0, 0));
+        TextView luckyStatus = body("选择规则后点击按钮同步 Docker 地址。");
+        page.addView(luckyStatus, margin(matchWidth(), 0, dp(12), 0, 0));
+        luckyUpdate.setOnClickListener(view -> {
+            int selectedIndex = luckyRuleSpinner.getSelectedItemPosition();
+            String selectedId = selectedIndex >= 0 && selectedIndex < luckyRuleIds.size() ? luckyRuleIds.get(selectedIndex) : api.luckyStunRuleId();
+            String selectedName = selectedIndex >= 0 && selectedIndex < luckyRuleNames.size() ? luckyRuleNames.get(selectedIndex) : "";
+            int interval;
+            try {
+                interval = Math.max(5, Math.min(1440, Integer.parseInt(luckyIntervalInput.getText().toString().trim())));
+            } catch (NumberFormatException error) {
+                interval = 30;
+            }
+            luckyUpdate.setEnabled(false);
+            luckyStatus.setText("正在登录并读取 Lucky STUN 规则...");
+            api.saveLuckyStunSettings(luckyUrlInput.getText().toString(), luckyUsernameInput.getText().toString(), luckyPasswordInput.getText().toString(), selectedId, selectedName, luckyAutoUpdate.isChecked(), interval);
+            runAsync(
+                    () -> api.refreshLuckyStun(luckyUrlInput.getText().toString(), luckyUsernameInput.getText().toString(), luckyPasswordInput.getText().toString(), selectedId, selectedName),
+                    result -> {
+                        luckyRuleIds.clear();
+                        luckyRuleNames.clear();
+                        luckyRuleLabels.clear();
+                        for (com.omniplay.tv.data.LuckyStunClient.Rule rule : result.rules) {
+                            luckyRuleIds.add(rule.id);
+                            luckyRuleNames.add(rule.name);
+                            luckyRuleLabels.add(rule.name + " · " + rule.address);
+                        }
+                        luckyRuleAdapter.notifyDataSetChanged();
+                        StringBuilder ruleSummary = new StringBuilder("已登录规则：\n");
+                        for (com.omniplay.tv.data.LuckyStunClient.Rule rule : result.rules) {
+                            ruleSummary.append("• ").append(rule.name).append("：").append(rule.address).append("\n");
+                        }
+                        luckyRuleList.setText(ruleSummary.toString().trim());
+                        if (result.selectedRule != null) {
+                            int index = luckyRuleIds.indexOf(result.selectedRule.id);
+                            if (index >= 0) {
+                                luckyRuleSpinner.setSelection(index);
+                            }
+                        }
+                        luckyStatus.setText(result.message + "\n当前服务端：" + api.serverUrl());
+                        luckyUpdate.setEnabled(true);
+                    },
+                    error -> {
+                        luckyStatus.setText("Lucky STUN 更新失败：" + error.getMessage());
+                        luckyUpdate.setEnabled(true);
+                    });
+        });
 
         if (message != null && !message.isEmpty()) {
             TextView error = body(message);
@@ -330,13 +416,46 @@ public final class PhoneMainActivity extends Activity {
         root.addView(controls, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(64), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
 
         activePlaybackFile = file;
-        boolean accepted = playerView.play(api.streamUrl(file.id), api.cookieHeader(), file.positionSeconds);
-        if (!accepted) {
-            renderPlayerError(playerView.lastError());
-        } else {
-            loadDefaultSubtitle(file);
-            startProgressUpdates(file);
+        runAsync(
+                () -> resolvePlaybackTarget(file),
+                target -> {
+                    if (screen != Screen.PLAYER || playerView == null || activePlaybackFile != file) {
+                        return;
+                    }
+
+                    boolean accepted = playerView.play(target.url, target.cookieHeader, file.positionSeconds);
+                    if (!accepted) {
+                        renderPlayerError(playerView.lastError());
+                    } else {
+                        loadDefaultSubtitle(file);
+                        startProgressUpdates(file);
+                    }
+                },
+                error -> renderPlayerError(error.getMessage()));
+    }
+
+    private PlaybackTarget resolvePlaybackTarget(Models.VideoFile file) throws Exception {
+        String streamUrl = api.streamUrl(file.id);
+        if (!isIsoFile(file)) {
+            return new PlaybackTarget(streamUrl, api.cookieHeader());
         }
+
+        String proxyUrl = RemoteIsoStreamServer.shared().prepare(streamUrl, api.cookieHeader());
+        if (proxyUrl == null || proxyUrl.isEmpty()) {
+            throw new IOException("客户端 ISO Range 代理没有返回播放地址。");
+        }
+        return new PlaybackTarget(proxyUrl, "");
+    }
+
+    private boolean isIsoFile(Models.VideoFile file) {
+        return file != null &&
+                (hasFileExtension(file.fileName, ".iso") ||
+                        hasFileExtension(file.relativePath, ".iso") ||
+                        "iso".equalsIgnoreCase(file.container == null ? "" : file.container.trim()));
+    }
+
+    private boolean hasFileExtension(String value, String extension) {
+        return value != null && value.trim().toLowerCase(java.util.Locale.ROOT).endsWith(extension);
     }
 
     private void loadDefaultSubtitle(Models.VideoFile file) {
@@ -536,11 +655,22 @@ public final class PhoneMainActivity extends Activity {
     }
 
     private void destroyPlayer() {
+        RemoteIsoStreamServer.shared().clear();
         if (playerView != null) {
             stopProgressUpdates();
             flushPlaybackProgress();
             playerView.destroyPlayer();
             playerView = null;
+        }
+    }
+
+    private static final class PlaybackTarget {
+        final String url;
+        final String cookieHeader;
+
+        PlaybackTarget(String url, String cookieHeader) {
+            this.url = url == null ? "" : url;
+            this.cookieHeader = cookieHeader == null ? "" : cookieHeader;
         }
     }
 

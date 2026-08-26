@@ -227,6 +227,35 @@ public sealed class LibraryScannerTests : IDisposable
     }
 
     [Fact]
+    public async Task ScanAllMergesSameTvShowAcrossMediaSources()
+    {
+        var mediaRootA = Path.Combine(root, "disk-a");
+        var mediaRootB = Path.Combine(root, "disk-b");
+        Touch(Path.Combine(mediaRootA, "Shows", "绝命毒师", "Season 01", "Breaking.Bad.S01E01.mkv"));
+        Touch(Path.Combine(mediaRootB, "TV", "绝命毒师", "Season 02", "Breaking.Bad.S02E01.mkv"));
+
+        var database = new SqliteDatabase(new StoragePaths(Path.Combine(root, "app")));
+        database.EnsureInitialized();
+
+        var sources = new MediaSourceRepository(database);
+        await sources.AddLocalAsync("硬盘 A", mediaRootA);
+        await sources.AddLocalAsync("硬盘 B", mediaRootB);
+        var summary = await new LibraryScanner(database).ScanAllAsync();
+
+        var repository = new LibraryRepository(database);
+        var item = Assert.Single(await repository.GetItemsAsync());
+        var detail = await repository.GetItemDetailAsync(item.Id);
+
+        Assert.NotNull(detail);
+        Assert.Equal(1, summary.NewTvShowCount);
+        Assert.Equal("绝命毒师", item.Title);
+        Assert.Equal(2, item.VideoFileCount);
+        Assert.Contains(detail.Seasons, season => season.SeasonNumber == 1);
+        Assert.Contains(detail.Seasons, season => season.SeasonNumber == 2);
+        Assert.Equal(2, detail.VideoFiles.Select(file => file.SourceId).Distinct().Count());
+    }
+
+    [Fact]
     public async Task ScanAllMergesKnownEnglishAndChineseTvAliases()
     {
         var mediaRoot = Path.Combine(root, "media");

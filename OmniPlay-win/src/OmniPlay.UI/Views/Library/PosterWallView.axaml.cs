@@ -495,7 +495,8 @@ public partial class PosterWallView : UserControl
                 await currentViewModel.Player.OpenAsync(
                     new PlaybackOpenRequest(
                         currentViewModel.PendingPlaybackFilePath,
-                        currentViewModel.PendingPlaybackDisplayPath),
+                        currentViewModel.PendingPlaybackDisplayPath,
+                        currentViewModel.PendingPlaybackMediaFileName),
                     currentViewModel.PendingPlaybackStartPositionSeconds);
                 ShowOverlayControlsTemporarily();
                 UpdateOverlayPopupState();

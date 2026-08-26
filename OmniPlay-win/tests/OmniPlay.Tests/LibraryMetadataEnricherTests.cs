@@ -67,10 +67,11 @@ public sealed class LibraryMetadataEnricherTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var enricher = new LibraryMetadataEnricher(database, client);
 
-        var summary = await enricher.EnrichMissingMetadataAsync();
+        var summary = await enricher.EnrichMissingMetadataAsync(CreateTmdbSettings());
 
         using var verification = database.OpenConnection();
         var movie = await verification.QuerySingleAsync<MovieRecord>(
@@ -124,10 +125,11 @@ public sealed class LibraryMetadataEnricherTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var enricher = new LibraryMetadataEnricher(database, client);
 
-        await enricher.EnrichMissingMetadataAsync();
+        await enricher.EnrichMissingMetadataAsync(CreateTmdbSettings());
 
         using var verification = database.OpenConnection();
         Assert.Equal(1, await verification.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM movie WHERE tmdbId = 27205"));
@@ -169,10 +171,11 @@ public sealed class LibraryMetadataEnricherTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var enricher = new LibraryMetadataEnricher(database, client);
 
-        var summary = await enricher.EnrichMissingMetadataAsync();
+        var summary = await enricher.EnrichMissingMetadataAsync(CreateTmdbSettings());
 
         using var verification = database.OpenConnection();
         var show = await verification.QuerySingleAsync<TvShowRecord>(
@@ -223,13 +226,15 @@ public sealed class LibraryMetadataEnricherTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var enricher = new LibraryMetadataEnricher(database, client);
 
         var summary = await enricher.EnrichMissingMetadataAsync(new TmdbSettings
         {
             EnableMetadataEnrichment = false,
-            EnablePosterDownloads = true
+            EnablePosterDownloads = true,
+            CustomApiKey = "custom-key"
         });
 
         using var verification = database.OpenConnection();
@@ -280,13 +285,15 @@ public sealed class LibraryMetadataEnricherTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var enricher = new LibraryMetadataEnricher(database, client);
 
         var summary = await enricher.EnrichMissingMetadataAsync(new TmdbSettings
         {
             EnableMetadataEnrichment = true,
-            EnablePosterDownloads = false
+            EnablePosterDownloads = false,
+            CustomApiKey = "custom-key"
         });
 
         using var verification = database.OpenConnection();
@@ -336,10 +343,11 @@ public sealed class LibraryMetadataEnricherTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var enricher = new LibraryMetadataEnricher(database, client);
 
-        var summary = await enricher.EnrichMissingMetadataAsync();
+        var summary = await enricher.EnrichMissingMetadataAsync(CreateTmdbSettings());
 
         using var verification = database.OpenConnection();
         var movie = await verification.QuerySingleAsync<MovieOptionalRecord>(
@@ -388,10 +396,11 @@ public sealed class LibraryMetadataEnricherTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var enricher = new LibraryMetadataEnricher(database, client);
 
-        var summary = await enricher.EnrichMissingMetadataAsync();
+        var summary = await enricher.EnrichMissingMetadataAsync(CreateTmdbSettings());
 
         using var verification = database.OpenConnection();
         var movie = await verification.QuerySingleAsync<MovieOptionalRecord>(
@@ -440,10 +449,11 @@ public sealed class LibraryMetadataEnricherTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var enricher = new LibraryMetadataEnricher(database, client);
 
-        var summary = await enricher.EnrichMissingMetadataAsync();
+        var summary = await enricher.EnrichMissingMetadataAsync(CreateTmdbSettings());
 
         using var verification = database.OpenConnection();
         var movie = await verification.QuerySingleAsync<MovieRecord>(
@@ -495,6 +505,7 @@ public sealed class LibraryMetadataEnricherTests : IDisposable
             Timeout = TimeSpan.FromSeconds(5)
         };
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
         var enricher = new LibraryMetadataEnricher(database, client);
 
@@ -502,6 +513,7 @@ public sealed class LibraryMetadataEnricherTests : IDisposable
         {
             EnableMetadataEnrichment = true,
             EnablePosterDownloads = false,
+            CustomApiKey = "custom-key",
             Language = "zh-CN"
         });
 
@@ -566,11 +578,12 @@ public sealed class LibraryMetadataEnricherTests : IDisposable
         }
 
         var settingsService = new JsonSettingsService(storagePaths);
+        await settingsService.SaveAsync(CreateTmdbAppSettings());
         await settingsService.SaveAsync(new AppSettings
         {
             Tmdb = new TmdbSettings
             {
-                EnableBuiltInPublicSource = true,
+                CustomApiKey = "custom-key",
                 Language = "en-US"
             }
         });
@@ -586,7 +599,7 @@ public sealed class LibraryMetadataEnricherTests : IDisposable
         {
             EnableMetadataEnrichment = true,
             EnablePosterDownloads = false,
-            EnableBuiltInPublicSource = true,
+            CustomApiKey = "custom-key",
             Language = "zh-CN"
         });
 
@@ -627,6 +640,25 @@ public sealed class LibraryMetadataEnricherTests : IDisposable
         }
 
         File.WriteAllBytes(fullPath, new byte[sizeBytes]);
+    }
+
+    private static AppSettings CreateTmdbAppSettings()
+    {
+        return new AppSettings
+        {
+            Tmdb = new TmdbSettings
+            {
+                CustomApiKey = "custom-key"
+            }
+        };
+    }
+
+    private static TmdbSettings CreateTmdbSettings()
+    {
+        return new TmdbSettings
+        {
+            CustomApiKey = "custom-key"
+        };
     }
 
     private sealed record MovieRecord(

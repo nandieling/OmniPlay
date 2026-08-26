@@ -6,6 +6,9 @@ extension Notification.Name { static let libraryUpdated = Notification.Name("Omn
 
 enum LibraryUpdateUserInfoKey {
     static let preferredVideoFileId = "preferredVideoFileId"
+    static let metadataScrapeCompleted = "metadataScrapeCompleted"
+    static let replacedMovieId = "replacedMovieId"
+    static let updatedMovieId = "updatedMovieId"
 }
 
 enum MediaNameParser {
@@ -1555,6 +1558,18 @@ class MediaLibraryManager {
                 try fileToUpdate.update(db)
             }
             if let fakeId = oldFakeMovieId, fakeId < 0 { _ = try Movie.deleteOne(db, key: fakeId) }
+        }
+
+        await MainActor.run {
+            var userInfo: [String: Any] = [
+                LibraryUpdateUserInfoKey.metadataScrapeCompleted: true,
+                LibraryUpdateUserInfoKey.preferredVideoFileId: file.id,
+                LibraryUpdateUserInfoKey.updatedMovieId: resultId
+            ]
+            if let oldFakeMovieId {
+                userInfo[LibraryUpdateUserInfoKey.replacedMovieId] = oldFakeMovieId
+            }
+            NotificationCenter.default.post(name: .libraryUpdated, object: nil, userInfo: userInfo)
         }
 
         let exportSource = try? await dbQueue.read { db in
@@ -3592,6 +3607,8 @@ extension MediaLibraryManager {
                 return .config
             case .requestFailed(let status, _):
                 return status == 401 || status == 403 ? .auth : .server
+            case .network:
+                return .network
             case .invalidResponse:
                 return .server
             }
@@ -3608,6 +3625,7 @@ extension MediaLibraryManager {
         client: OmniPlayDockerClient
     ) async throws -> (scannedCount: Int, insertedCount: Int, removedCount: Int) {
         let importedPosters = await importOmniPlayDockerPosters(details: details, client: client)
+        await importOmniPlayDockerThumbnails(details: details, sourceId: sourceId, client: client)
 
         return try await dbQueue.write { db in
             var remoteFileIds = Set<String>()
@@ -3619,8 +3637,9 @@ extension MediaLibraryManager {
                 let effectiveOverview = detail.overview?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
                     ? detail.overview
                     : detail.douban?.summary
+                let existingPosterPath = try Movie.fetchOne(db, key: movieId)?.posterPath
                 let posterPath = importedPosters[detail.id]
-                    ?? detail.posterAssetId.map { client.posterURL(assetId: $0) }
+                    ?? existingPosterPath
                     ?? detail.douban?.posterUrl
                 let movie = Movie(
                     id: movieId,
@@ -3707,9 +3726,11 @@ extension MediaLibraryManager {
                             let destination = PosterManager.shared.cacheDirectory.appendingPathComponent(fileName)
                             return (fileName, destination)
                         }
-                        if !FileManager.default.fileExists(atPath: destination.path) {
-                            _ = try data.write(to: destination)
-                        }
+                        try FileManager.default.createDirectory(
+                            at: destination.deletingLastPathComponent(),
+                            withIntermediateDirectories: true
+                        )
+                        try data.write(to: destination, options: .atomic)
                         await MainActor.run {
                             NotificationCenter.default.post(name: NSNotification.Name("PosterUpdated_\(fileName)"), object: nil)
                         }
@@ -3727,6 +3748,50 @@ extension MediaLibraryManager {
                 }
             }
             return imported
+        }
+    }
+
+    private func importOmniPlayDockerThumbnails(
+        details: [OmniPlayDockerLibraryDetail],
+        sourceId: Int64,
+        client: OmniPlayDockerClient
+    ) async {
+        let candidates: [(String, String)] = details.flatMap { detail in
+            detail.seasons.flatMap { season in
+                season.episodes.flatMap { episode -> [(String, String)] in
+                    guard let assetId = episode.stillAssetId else { return [] }
+                    return episode.videoFiles.map { ($0.id, assetId) }
+                }
+            }
+        }
+        guard !candidates.isEmpty else { return }
+
+        let thumbnailDirectory = await MainActor.run { ThumbnailManager.shared.thumbDirectory }
+        try? FileManager.default.createDirectory(at: thumbnailDirectory, withIntermediateDirectories: true)
+
+        await withTaskGroup(of: Void.self) { group in
+            var iterator = candidates.makeIterator()
+            func addNext() -> Bool {
+                guard let candidate = iterator.next() else { return false }
+                group.addTask {
+                    let localFileId = Self.omniPlayDockerVideoFileId(for: candidate.0, sourceId: sourceId)
+                    let destination = thumbnailDirectory.appendingPathComponent("\(localFileId).jpg")
+                    if FileManager.default.fileExists(atPath: destination.path) { return }
+                    do {
+                        let data = try await client.thumbnailData(assetId: candidate.1)
+                        guard NSImage(data: data) != nil else { return }
+                        try data.write(to: destination, options: .atomic)
+                    } catch {
+                        return
+                    }
+                }
+                return true
+            }
+
+            for _ in 0..<4 where addNext() {}
+            while await group.next() != nil {
+                _ = addNext()
+            }
         }
     }
 
@@ -3748,7 +3813,7 @@ extension MediaLibraryManager {
     nonisolated private static func flattenDockerFiles(_ detail: OmniPlayDockerLibraryDetail) -> [OmniPlayDockerVideoFile] {
         var files = detail.videoFiles
         for season in detail.seasons {
-            files.append(contentsOf: season.episodes.compactMap(\.videoFile))
+            files.append(contentsOf: season.episodes.flatMap(\.videoFiles))
         }
         var seen = Set<String>()
         return files.filter { file in

@@ -147,6 +147,24 @@ C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
 .\dist\览影-OmniPlay-x64-setup.exe /verify /quiet
 ```
 
+### 在 ARM Mac 上交叉打包
+
+ARM Mac 不需要运行 Windows 程序即可交叉生成 `win-x64` 发布物。项目提供了不依赖 PowerShell 的脚本：
+
+```bash
+cd /Users/nan/Downloads/swift/OmniPlay/OmniPlay/OmniPlay-win
+./package-setup.sh
+```
+
+脚本会生成：
+
+```text
+./dist/览影-OmniPlay-x64-setup.exe
+./dist/OmniPlay-win-x64-portable.zip
+```
+
+脚本会校验载荷压缩包、Windows x64 原生依赖和最终 PE 架构。ARM Mac 无法直接执行 Windows 安装程序，因此 `/verify`、安装、卸载等运行时验证需要在 Windows 或兼容的 Windows 虚拟机中完成。当前项目内置的 `libmpv-2.dll` 是 x64 版本，所以暂不支持生成 `win-arm64` 原生包。
+
 ## 日志与运行目录
 
 应用根目录按以下顺序解析：

@@ -157,7 +157,7 @@ const defaultCacheSettings: CacheSettings = {
   webDavMaxGb: 20,
   subtitleCachePath: "",
   subtitleMaxGb: 20,
-  subtitleCacheStrategy: "optimized",
+  subtitleCacheStrategy: "disabled",
 };
 
 export function App() {
@@ -2179,7 +2179,7 @@ function SettingsPanel({
         webDavMaxGb: Math.min(1024, Math.max(1, Math.round(cache.webDavMaxGb || 20))),
         subtitleCachePath: cache.subtitleCachePath?.trim() ?? "",
         subtitleMaxGb: Math.min(1024, Math.max(1, Math.round(cache.subtitleMaxGb || 20))),
-        subtitleCacheStrategy: cache.subtitleCacheStrategy === "full" ? "full" : "optimized",
+        subtitleCacheStrategy: normalizeSubtitleCacheStrategy(cache.subtitleCacheStrategy),
       },
       {
         ...playback,
@@ -2340,15 +2340,7 @@ function SettingsPanel({
                 <span>{isTestingTmdb ? "检测中" : "检测"}</span>
               </button>
             </div>
-            <label className="settingsToggle">
-              <input
-                checked={tmdb.enableBuiltInPublicSource}
-                onChange={(event) => setTmdb({ ...tmdb, enableBuiltInPublicSource: event.target.checked })}
-                type="checkbox"
-              />
-              <span>启用公共源</span>
-            </label>
-            <p className="settingsHint">公开源码不内置个人 TMDB Key。请填写自定义 API，或通过环境变量提供。</p>
+            <p className="settingsHint">请填写自定义 API Key 或 Read Access Token；也可以通过环境变量提供凭据。</p>
             <label className="settingsField">
               <span>自定义 API</span>
               <input
@@ -2498,17 +2490,18 @@ function SettingsPanel({
               />
             </label>
             <label className="settingsField">
-              <span>字幕缓存方案</span>
+              <span>字幕预缓存方案</span>
               <select
                 onChange={(event) => setCache({ ...cache, subtitleCacheStrategy: event.target.value })}
-                value={cache.subtitleCacheStrategy ?? "optimized"}
+                value={cache.subtitleCacheStrategy ?? "disabled"}
               >
+                <option value="disabled">关闭字幕预缓存</option>
                 <option value="optimized">优化缓存方案</option>
                 <option value="full">全量缓存</option>
               </select>
             </label>
             <p className="settingsHint">
-              优化缓存只预处理更可能播放的下一集或未缓存字幕，适合日常后台维护；全量缓存会尽量遍历媒体库里所有可缓存字幕，耗时和磁盘占用更高，适合首次导入或集中预热。
+              默认关闭后台字幕预处理；播放时仍会即时转换所选字幕。优化缓存只预处理更可能播放的下一集；全量缓存会遍历媒体库里所有可缓存字幕，耗时和磁盘占用更高。
             </p>
           </section>
 
@@ -2670,8 +2663,16 @@ function normalizeCacheSettings(settings?: Partial<CacheSettings> | null): Cache
     webDavMaxGb: settings?.webDavMaxGb ?? 20,
     subtitleCachePath: settings?.subtitleCachePath ?? "",
     subtitleMaxGb: settings?.subtitleMaxGb ?? 20,
-    subtitleCacheStrategy: settings?.subtitleCacheStrategy === "full" ? "full" : "optimized",
+    subtitleCacheStrategy: normalizeSubtitleCacheStrategy(settings?.subtitleCacheStrategy),
   };
+}
+
+function normalizeSubtitleCacheStrategy(value?: string | null): "disabled" | "optimized" | "full" {
+  if (value === "full" || value === "optimized") {
+    return value;
+  }
+
+  return "disabled";
 }
 
 function looksLikeTmdbAccessToken(value: string): boolean {
@@ -2765,7 +2766,7 @@ function CacheMaintenance({
   const [imageCleanupScope, setImageCleanupScope] = useState("orphans-and-untracked");
   const [subtitleCachePath, setSubtitleCachePath] = useState("");
   const [subtitleMaxGb, setSubtitleMaxGb] = useState(20);
-  const [subtitleCacheStrategy, setSubtitleCacheStrategy] = useState("optimized");
+  const [subtitleCacheStrategy, setSubtitleCacheStrategy] = useState("disabled");
 
   useEffect(() => {
     if (!cacheSettings) {
@@ -2777,7 +2778,7 @@ function CacheMaintenance({
     setImageCleanupScope(cacheSettings.imageCleanupScope);
     setSubtitleCachePath(cacheSettings.subtitleCachePath ?? "");
     setSubtitleMaxGb(cacheSettings.subtitleMaxGb ?? 20);
-    setSubtitleCacheStrategy(cacheSettings.subtitleCacheStrategy ?? "optimized");
+    setSubtitleCacheStrategy(normalizeSubtitleCacheStrategy(cacheSettings.subtitleCacheStrategy));
   }, [
     cacheSettings?.hlsRetentionHours,
     cacheSettings?.hlsMaxGb,
@@ -2841,6 +2842,7 @@ function CacheMaintenance({
           onChange={(event) => setSubtitleCacheStrategy(event.target.value)}
           value={subtitleCacheStrategy}
         >
+          <option value="disabled">关闭字幕</option>
           <option value="optimized">优化字幕</option>
           <option value="full">全量字幕</option>
         </select>
@@ -3777,6 +3779,7 @@ function DetailView({
                 episode={episode}
                 key={episode.id}
                 onEditMetadata={onEditMetadata}
+                onPlay={onPlay}
                 poster={poster}
                 hlsSelected={!!episode.videoFile && selectedHlsVideoFileIds.includes(episode.videoFile.id)}
                 hlsSelectionMode={hlsSelectionMode}
@@ -3785,6 +3788,20 @@ function DetailView({
               />
             ))}
           </div>
+        </section>
+      ) : null}
+
+      {detail.itemKind === "movie" && movieFiles.length > 0 ? (
+        <section className="fileSection">
+          <h2>版本 / 文件（{movieFiles.length}）</h2>
+          {movieFiles.map((file, index) => (
+            <FileRow
+              file={file}
+              key={file.id}
+              label={movieFiles.length > 1 ? `版本 ${index + 1}` : "正片"}
+              onPlay={onPlay}
+            />
+          ))}
         </section>
       ) : null}
     </main>
@@ -3796,6 +3813,7 @@ function EpisodeCard({
   hlsSelected,
   hlsSelectionMode,
   onEditMetadata,
+  onPlay,
   onToggleHlsFile,
   poster,
   showDetails,
@@ -3804,22 +3822,40 @@ function EpisodeCard({
   hlsSelected: boolean;
   hlsSelectionMode: boolean;
   onEditMetadata: (episode: EpisodeDetail) => void;
+  onPlay: (file: VideoFileSummary, options?: { refreshMain?: boolean }) => void;
   onToggleHlsFile: (fileId: string) => void;
   poster: string | null;
   showDetails: boolean;
 }) {
-  const file = episode.videoFile;
+  const files = episodeVideoFiles(episode);
+  const file = episode.videoFile ?? files[0] ?? null;
   const episodeLabel = episodeDisplayLabel(episode.seasonNumber, episode.episodeNumber);
-  const title = episodeTitleDisplay(episode, episodeLabel, showDetails);
-  const facts = [episode.title ? episodeLabel : null, episode.airDate].filter(Boolean).join(" · ");
-  const progressPercent = fileProgressPercent(file);
-  const showProgress = progressPercent > 0 && progressPercent < 95;
+  const title = episode.title?.trim() || episodeLabel;
+
+  function handlePlay() {
+    if (!hlsSelectionMode && file) {
+      onPlay(file);
+    }
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (hlsSelectionMode || !file || (event.key !== "Enter" && event.key !== " ")) {
+      return;
+    }
+
+    event.preventDefault();
+    onPlay(file);
+  }
 
   return (
     <article
-      className={["episodeCard", showDetails ? "" : "simpleEpisode", hlsSelected ? "selectedForHls" : ""]
+      className={["episodeCard", showDetails ? "" : "simpleEpisode", file ? "clickableEpisode" : "", hlsSelected ? "selectedForHls" : ""]
         .filter(Boolean)
         .join(" ")}
+      onClick={handlePlay}
+      onKeyDown={handleKeyDown}
+      role={file && !hlsSelectionMode ? "button" : undefined}
+      tabIndex={file && !hlsSelectionMode ? 0 : undefined}
     >
       <div className="episodeStillFrame">
         {episode.stillAssetId ? (
@@ -3860,20 +3896,7 @@ function EpisodeCard({
       </div>
       <div className="episodeBody">
         <h3>{title}</h3>
-        {showDetails && facts ? <p>{facts}</p> : null}
-        {showDetails && episode.overview ? <span>{episode.overview}</span> : null}
-        {showDetails && showProgress ? (
-          <div
-            aria-label="播放进度"
-            aria-valuemax={100}
-            aria-valuemin={0}
-            aria-valuenow={progressPercent}
-            className="episodeProgress"
-            role="progressbar"
-          >
-            <div style={{ width: `${progressPercent}%` }} />
-          </div>
-        ) : null}
+        <p>{episodeLabel}</p>
       </div>
     </article>
   );
@@ -3883,13 +3906,16 @@ function episodeDisplayLabel(seasonNumber: number, episodeNumber: number): strin
   return seasonNumber === 0 ? `特别篇第 ${episodeNumber} 集` : `第 ${seasonNumber} 季第 ${episodeNumber} 集`;
 }
 
-function episodeTitleDisplay(episode: EpisodeDetail, episodeLabel: string, showDetails: boolean): string {
-  if (showDetails) {
-    return episode.title ?? episodeLabel;
-  }
-
-  const subtitle = extractEpisodeSubtitle(episode.title);
-  return subtitle ? `${episodeLabel}·${subtitle}` : episodeLabel;
+function episodeVideoFiles(episode: EpisodeDetail): VideoFileSummary[] {
+  const candidates = episode.videoFiles?.length ? episode.videoFiles : episode.videoFile ? [episode.videoFile] : [];
+  const seen = new Set<string>();
+  return candidates.filter((file) => {
+    if (seen.has(file.id)) {
+      return false;
+    }
+    seen.add(file.id);
+    return true;
+  });
 }
 
 function seasonDisplayLabel(season: { seasonNumber: number; title: string | null }, showTitle: string): string {
@@ -4030,8 +4056,7 @@ function resolveMainPlaybackFile(detail: LibraryItemDetail): VideoFileSummary | 
 
   const episodeFiles = detail.seasons
     .flatMap((season) => season.episodes)
-    .map((episode) => episode.videoFile)
-    .filter((file): file is VideoFileSummary => !!file);
+    .flatMap((episode) => episodeVideoFiles(episode));
   return episodeFiles.find((file) => hasUnfinishedProgress(file)) ??
     episodeFiles.find((file) => !isEffectivelyWatched(file)) ??
     episodeFiles[0] ??
@@ -4046,8 +4071,9 @@ function findVideoFileById(detail: LibraryItemDetail, fileId: string): VideoFile
 
   for (const season of detail.seasons) {
     for (const episode of season.episodes) {
-      if (episode.videoFile?.id === fileId) {
-        return episode.videoFile;
+      const file = episodeVideoFiles(episode).find((candidate) => candidate.id === fileId);
+      if (file) {
+        return file;
       }
     }
   }
@@ -4250,9 +4276,11 @@ function subtitleCacheStatusBadge(
 
 function FileRow({
   file,
+  label,
   onPlay,
 }: {
   file: VideoFileSummary;
+  label?: string;
   onPlay: (file: VideoFileSummary) => void;
 }) {
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -4267,8 +4295,7 @@ function FileRow({
   return (
     <div className="fileRow" onClick={() => onPlay(file)} onKeyDown={handleKeyDown} role="button" tabIndex={0}>
       <div>
-        <strong>{file.fileName}</strong>
-        <span>{file.relativePath}</span>
+        <strong>{label ?? "正片"}</strong>
         <span>{formatMediaProbe(file)}</span>
       </div>
     </div>

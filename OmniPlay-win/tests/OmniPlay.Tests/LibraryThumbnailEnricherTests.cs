@@ -71,7 +71,6 @@ public sealed class LibraryThumbnailEnricherTests : IDisposable
         {
             Tmdb = new TmdbSettings
             {
-                EnableBuiltInPublicSource = true,
                 CustomApiKey = "custom-key"
             }
         });
@@ -163,7 +162,6 @@ public sealed class LibraryThumbnailEnricherTests : IDisposable
         {
             Tmdb = new TmdbSettings
             {
-                EnableBuiltInPublicSource = true,
                 CustomApiKey = "custom-key"
             }
         });

@@ -9,17 +9,21 @@ public sealed record CacheSettings(
     int WebDavMaxGb = 20,
     string SubtitleCachePath = "",
     int SubtitleMaxGb = 20,
-    string SubtitleCacheStrategy = SubtitleCacheStrategies.Optimized);
+    string SubtitleCacheStrategy = SubtitleCacheStrategies.Disabled);
 
 public static class SubtitleCacheStrategies
 {
+    public const string Disabled = "disabled";
     public const string Optimized = "optimized";
     public const string Full = "full";
 
     public static string Normalize(string? value)
     {
-        return string.Equals(value?.Trim(), Full, StringComparison.OrdinalIgnoreCase)
-            ? Full
-            : Optimized;
+        return value?.Trim().ToLowerInvariant() switch
+        {
+            Full => Full,
+            Optimized => Optimized,
+            _ => Disabled
+        };
     }
 }

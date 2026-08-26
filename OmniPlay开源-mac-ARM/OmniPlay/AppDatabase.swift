@@ -100,6 +100,13 @@ class AppDatabase {
                 t.column("lastError", .text)
             }
         }
+
+        // v7: 一个媒体源支持局域网入口、多个外网入口和当前入口标签。
+        migrator.registerMigration("v7") { db in
+            try db.alter(table: "mediaSource") { t in
+                t.add(column: "addressConfig", .text)
+            }
+        }
         
         try migrator.migrate(dbQueue)
     }

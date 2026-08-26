@@ -154,6 +154,11 @@ public sealed class FfmpegSubtitleCacheService : ISubtitleCacheService
     {
         var settings = await appSettingsRepository.GetAsync(cancellationToken);
         var strategy = SubtitleCacheStrategies.Normalize(settings.Cache.SubtitleCacheStrategy);
+        if (string.Equals(strategy, SubtitleCacheStrategies.Disabled, StringComparison.OrdinalIgnoreCase))
+        {
+            return new SubtitleCachePrewarmSummary(0, 0, 0, 0);
+        }
+
         progress?.Report(new BackgroundTaskProgress("subtitle-cache", "正在准备字幕缓存", null, null));
 
         var details = await LoadTargetDetailsAsync(targetLibraryItemId, cancellationToken);
@@ -203,7 +208,12 @@ public sealed class FfmpegSubtitleCacheService : ISubtitleCacheService
         CancellationToken cancellationToken = default)
     {
         var normalizedVideoFileId = videoFileId.Trim();
-        if (string.IsNullOrWhiteSpace(normalizedVideoFileId)
+        var settings = await appSettingsRepository.GetAsync(cancellationToken);
+        if (string.Equals(
+                SubtitleCacheStrategies.Normalize(settings.Cache.SubtitleCacheStrategy),
+                SubtitleCacheStrategies.Disabled,
+                StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(normalizedVideoFileId)
             || !nextEpisodePrewarmRequests.TryAdd(normalizedVideoFileId, 0))
         {
             return new SubtitleCachePrewarmSummary(0, 0, 0, 0);
@@ -249,7 +259,6 @@ public sealed class FfmpegSubtitleCacheService : ISubtitleCacheService
             cachedBytes += result.CachedBytes;
         }
 
-        var settings = await appSettingsRepository.GetAsync(cancellationToken);
         if (candidates.Length > 0)
         {
             await CleanupAsync(SettingsToBytes(settings.Cache.SubtitleMaxGb), cancellationToken);

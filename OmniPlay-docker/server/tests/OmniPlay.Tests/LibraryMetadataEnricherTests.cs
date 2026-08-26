@@ -83,6 +83,53 @@ public sealed class LibraryMetadataEnricherTests : IDisposable
     }
 
     [Fact]
+    public async Task EnrichMissingMergesTvItemsWithSameTmdbIdAndPreservesSeasons()
+    {
+        var mediaRoot = Path.Combine(root, "media");
+        Touch(Path.Combine(mediaRoot, "示例剧上篇", "Example.Show.S01E01.mkv"));
+        Touch(Path.Combine(mediaRoot, "示例剧下篇", "Example.Show.S02E01.mkv"));
+
+        var paths = new StoragePaths(Path.Combine(root, "app"));
+        var database = new SqliteDatabase(paths);
+        database.EnsureInitialized();
+
+        await new MediaSourceRepository(database).AddLocalAsync("测试媒体", mediaRoot);
+        await new LibraryScanner(database).ScanAllAsync();
+        Assert.Equal(2, (await new LibraryRepository(database).GetItemsAsync()).Count);
+
+        var match = new TmdbMetadataMatch(
+            2026,
+            "tv",
+            "示例剧",
+            "同一部剧分布在不同目录。",
+            "2026-01-01",
+            "/example-show.jpg",
+            8.0,
+            20);
+        var fakeTmdb = new FakeTmdbMetadataClient(paths);
+        fakeTmdb.SearchMatchesByTitle["示例剧上篇"] = match;
+        fakeTmdb.SearchMatchesByTitle["示例剧下篇"] = match;
+        var enricher = new LibraryMetadataEnricher(
+            database,
+            new AppSettingsRepository(database),
+            fakeTmdb);
+
+        await enricher.EnrichMissingAsync();
+
+        var repository = new LibraryRepository(database);
+        var item = Assert.Single(await repository.GetItemsAsync());
+        var detail = await repository.GetItemDetailAsync(item.Id);
+
+        Assert.NotNull(detail);
+        Assert.Equal("示例剧", item.Title);
+        Assert.Equal(2, item.VideoFileCount);
+        Assert.Equal(2026, detail.TmdbId);
+        Assert.Contains(detail.Seasons, season => season.SeasonNumber == 1);
+        Assert.Contains(detail.Seasons, season => season.SeasonNumber == 2);
+        Assert.Equal(2, detail.VideoFiles.Count);
+    }
+
+    [Fact]
     public async Task EnrichMissingSkipsItemsLockedByPreviousScrape()
     {
         var mediaRoot = Path.Combine(root, "media");

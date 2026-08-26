@@ -6,51 +6,43 @@ struct MovieCardView: View {
     let movie: Movie
     var isContinueWatchingContext: Bool = false
     var isHomeCacheModeActive: Bool = false
-    
+
     @AppStorage("appTheme") var appTheme = ThemeType.appleLight.rawValue
     var theme: AppTheme { ThemeType(rawValue: appTheme)?.colors ?? ThemeType.appleLight.colors }
     @AppStorage("enableFastTooltip") var enableFastTooltip = true
-    
+
     @ObservedObject var cacheManager = OfflineCacheManager.shared
-    
+
     @State private var showSearchModal = false
     @State private var showEditModal = false
     @State private var hasMissingFiles = false
-    
+
     @State private var isHovering = false
     @State private var isFullyWatched = false
     @State private var movieFiles: [VideoFile] = []
     @State private var sourcePairs: [(VideoFile, MediaSource?)] = []
-    
-    private let availabilityTimer = Timer.publish(every: 5.0, on: .main, in: .common).autoconnect()
-    
-    // 🌟 删除了原有的 posterURLString，交由底层的 CachedPosterView 智能处理
-    
+    @State private var doubanMetadata: DoubanMetadata? = nil
+    @State private var refreshTask: Task<Void, Never>? = nil
+
+    private let availabilityTimer = Timer.publish(every: 15.0, on: .main, in: .common).autoconnect()
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .topTrailing) {
                 ZStack {
-                    
-                    // 🌟 核心升级：替换为智能本地缓存海报组件
                     CachedPosterView(posterPath: movie.posterPath)
                         .frame(width: 160, height: 240)
                         .cornerRadius(12)
                         .shadow(color: .black.opacity(0.1), radius: 8, y: 4)
-                    
+
                     VStack {
                         Spacer()
-                        HStack {
-                            if let vote = movie.voteAverage, vote > 0 {
-                                Text(String(format: "%.1f", vote))
-                                    .font(.caption.bold())
-                                    .padding(.horizontal, 6).padding(.vertical, 4)
-                                    .background(Color.black.opacity(0.7))
-                                    .foregroundColor(Color(hex: "FFD700"))
-                                    .cornerRadius(6)
-                                    .padding(8)
-                            }
-                            Spacer()
+                        HStack(alignment: .bottom, spacing: 5) {
+                            ratingBadge(value: movie.voteAverage, tint: Color(hex: "FFD700"))
+                            ratingBadge(value: doubanMetadata?.rating, tint: Color(hex: "00B51D"))
+                            Spacer(minLength: 0)
                         }
+                        .padding(8)
                     }
 
                     if isHomeCacheModeActive {
@@ -62,61 +54,92 @@ struct MovieCardView: View {
                         .conditionalHelp(cacheOverlayHelpText, show: enableFastTooltip)
                     }
                 }
-                
-                // 搜索与编辑按钮 (悬停显示)
+
                 if isHovering {
                     HStack(spacing: 8) {
                         Button(action: { showSearchModal = true }) {
-                            Image(systemName: "magnifyingglass.circle.fill").font(.title2).foregroundColor(.white).shadow(radius: 3)
-                        }.buttonStyle(.plain)
-                        
+                            Image(systemName: "magnifyingglass.circle.fill")
+                                .font(.title2)
+                                .foregroundColor(.white)
+                                .shadow(radius: 3)
+                        }
+                        .buttonStyle(.plain)
+
                         Button(action: { showEditModal = true }) {
-                            Image(systemName: "pencil.circle.fill").font(.title2).foregroundColor(.white).shadow(radius: 3)
-                        }.buttonStyle(.plain)
+                            Image(systemName: "pencil.circle.fill")
+                                .font(.title2)
+                                .foregroundColor(.white)
+                                .shadow(radius: 3)
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(8)
                     .transition(.opacity)
                 }
             }
             .onHover { isHovering = $0 }
-            
+
             Text(movie.title)
                 .font(.headline)
                 .foregroundColor(theme.textPrimary)
-                .lineLimit(1)
-            
-            // 底部状态栏
-            HStack(spacing: 8) {
-                if let date = movie.releaseDate, date.count >= 4 {
-                    Text(String(date.prefix(4))).font(.caption).foregroundColor(theme.textSecondary)
+                .lineLimit(2)
+                .frame(height: 42, alignment: .topLeading)
+                .multilineTextAlignment(.leading)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    if let date = movie.releaseDate, date.count >= 4 {
+                        Text(String(date.prefix(4)))
+                            .font(.caption)
+                            .foregroundColor(theme.textSecondary)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    if hasMissingFiles {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(.orange)
+                            .conditionalHelp("部分源文件不存在，需重新连接外置硬盘/NAS 或使用本地缓存播放", show: enableFastTooltip)
+                    }
+                    Button(action: toggleWatched) {
+                        Image(systemName: isFullyWatched ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 13))
+                            .foregroundColor(isFullyWatched ? theme.accent : theme.textSecondary.opacity(0.5))
+                    }
+                    .buttonStyle(.plain)
                 }
-                
-                Spacer(minLength: 0)
-                
-                if hasMissingFiles {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 12))
-                        .foregroundColor(.orange)
-                        .conditionalHelp("部分源文件不存在，需重新连接外置硬盘/NAS 或使用本地缓存播放", show: enableFastTooltip)
+
+                if let progressRatio = continueWatchingProgressRatio {
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(theme.surface.opacity(0.75))
+                                .frame(height: 4)
+                            Capsule()
+                                .fill(theme.accent)
+                                .frame(width: max(4, geo.size.width * progressRatio), height: 4)
+                        }
+                    }
+                    .frame(height: 4)
                 }
-                // 标记已播/未播按钮
-                Button(action: toggleWatched) {
-                    Image(systemName: isFullyWatched ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 13))
-                        .foregroundColor(isFullyWatched ? theme.accent : theme.textSecondary.opacity(0.5))
-                }.buttonStyle(.plain)
             }
+            .frame(height: isContinueWatchingContext ? 20 : 18, alignment: .topLeading)
         }
-        .frame(width: 160)
-        .onAppear { checkWatchedStatus(); checkFileAvailability() }
-        .onReceive(NotificationCenter.default.publisher(for: .libraryUpdated)) { _ in checkWatchedStatus(); checkFileAvailability() }
-        .onReceive(cacheManager.$cachedFileKeys) { _ in checkFileAvailability() }
-        .onReceive(cacheManager.$cachedFileNames) { _ in checkFileAvailability() }
+        .frame(width: 160, height: isContinueWatchingContext ? 318 : 310, alignment: .topLeading)
+        .onAppear { refreshCardState() }
+        .onDisappear {
+            refreshTask?.cancel()
+            refreshTask = nil
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .libraryUpdated)) { _ in refreshCardState() }
+        .onReceive(cacheManager.$cachedFileKeys) { _ in refreshAvailabilityWithoutDB() }
+        .onReceive(cacheManager.$cachedFileNames) { _ in refreshAvailabilityWithoutDB() }
         .onReceive(availabilityTimer) { _ in refreshAvailabilityWithoutDB() }
         .sheet(isPresented: $showSearchModal) { MovieSearchModalView(movie: movie) }
         .sheet(isPresented: $showEditModal) { MovieEditModalView(movie: movie) }
     }
-    
+
     private var isDownloadingAnyFile: Bool {
         movieFiles.contains { cacheManager.downloadProgress[$0.id] != nil }
     }
@@ -149,6 +172,20 @@ struct MovieCardView: View {
     }
 
     @ViewBuilder
+    private func ratingBadge(value: Double?, tint: Color) -> some View {
+        if let value, value > 0 {
+            Text(String(format: "%.1f", value))
+                .font(.caption.bold())
+            .padding(.horizontal, 5)
+            .padding(.vertical, 4)
+            .background(Color.black.opacity(0.72))
+            .foregroundColor(tint)
+            .cornerRadius(6)
+            .lineLimit(1)
+        }
+    }
+
+    @ViewBuilder
     private var posterCacheOverlayContent: some View {
         if let progress = aggregateCacheProgress {
             OfflineCacheProgressBadge(progress: progress, tint: theme.accent)
@@ -163,29 +200,59 @@ struct MovieCardView: View {
             }
         }
     }
-    
-    // ======== 私有数据库操作方法 ========
-    private func checkWatchedStatus() {
-        Task {
+
+    private var continueWatchingProgressRatio: Double? {
+        guard isContinueWatchingContext else { return nil }
+        let sortedFiles = movieFiles.enumerated().sorted {
+            MediaNameParser.episodeSortKey(for: $0.element.fileName, fallbackIndex: $0.offset) <
+            MediaNameParser.episodeSortKey(for: $1.element.fileName, fallbackIndex: $1.offset)
+        }.map(\.element)
+        let unfinishedFiles = sortedFiles.filter { file in
+            guard file.duration > 0 else { return false }
+            let ratio = file.playProgress / file.duration
+            return file.playProgress > 5.0 && ratio < 0.95
+        }
+        guard let targetFile = unfinishedFiles.max(by: { lhs, rhs in
+            (lhs.lastPlayedAt ?? 0) < (rhs.lastPlayedAt ?? 0)
+        }) ?? unfinishedFiles.first else {
+            return nil
+        }
+        let duration = targetFile.duration
+        let progress = min(max(targetFile.playProgress, 0), duration)
+        return min(max(progress / duration, 0), 1)
+    }
+
+    private func refreshCardState() {
+        refreshTask?.cancel()
+        refreshTask = Task {
             do {
-                let movieId = movie.id
-                let files = try await AppDatabase.shared.dbQueue.read { db in
-                    try Self.fetchVisibleFiles(movieId: movieId, in: db)
+                let snapshot = try await AppDatabase.shared.dbQueue.read { db -> (pairs: [(VideoFile, MediaSource?)], douban: DoubanMetadata?) in
+                    let pairs = try VideoFile.fetchVisibleSourcePairs(movieId: movie.id, in: db)
+                    let douban = try movie.id.flatMap { try DoubanMetadata.fetchOne(db, key: $0) }
+                    return (pairs, douban)
                 }
+                if Task.isCancelled { return }
+                let files = snapshot.pairs.map(\.0)
                 let allFilesWatched = !files.isEmpty && files.allSatisfy { file in
                     file.duration > 0 && (file.playProgress / file.duration) >= 0.95
                 }
-                await MainActor.run { self.isFullyWatched = allFilesWatched }
+                let missingFiles = evaluateMissingState(with: snapshot.pairs)
+                await MainActor.run {
+                    self.movieFiles = files
+                    self.sourcePairs = snapshot.pairs
+                    self.doubanMetadata = snapshot.douban?.isInvalidPlaceholder == true ? nil : snapshot.douban
+                    self.isFullyWatched = allFilesWatched
+                    self.hasMissingFiles = missingFiles
+                }
             } catch {}
         }
     }
-    
+
     private func toggleWatched() {
         Task {
             do {
-                let movieId = movie.id
                 try await AppDatabase.shared.dbQueue.write { db in
-                    let files = try Self.fetchVisibleFiles(movieId: movieId, in: db)
+                    let files = try VideoFile.fetchVisibleFiles(movieId: movie.id, in: db)
                     let shouldMarkWatched = files.contains { file in
                         !(file.duration > 0 && (file.playProgress / file.duration) >= 0.95)
                     }
@@ -205,13 +272,12 @@ struct MovieCardView: View {
             } catch {}
         }
     }
-    
+
     private func fetchFilesAndStartCache() {
         Task {
             do {
-                let movieId = movie.id
                 let pairs = try await AppDatabase.shared.dbQueue.read { db in
-                    try Self.fetchVisibleSourcePairs(movieId: movieId, in: db)
+                    try VideoFile.fetchVisibleSourcePairs(movieId: movie.id, in: db)
                 }
                 let cacheableFiles = pairs.filter { file, source in
                     cacheManager.supportsCaching(mediaSource: source) && !cacheManager.isCached(file)
@@ -226,23 +292,7 @@ struct MovieCardView: View {
             } catch {}
         }
     }
-    
-    private func checkFileAvailability() {
-        Task {
-            do {
-                let movieId = movie.id
-                let pairs = try await AppDatabase.shared.dbQueue.read { db in
-                    try Self.fetchVisibleSourcePairs(movieId: movieId, in: db)
-                }
-                await MainActor.run {
-                    self.movieFiles = pairs.map(\.0)
-                    self.sourcePairs = pairs
-                    self.hasMissingFiles = evaluateMissingState(with: pairs)
-                }
-            } catch {}
-        }
-    }
-    
+
     private func refreshAvailabilityWithoutDB() {
         guard !sourcePairs.isEmpty else { return }
         let latestMissing = evaluateMissingState(with: sourcePairs)
@@ -250,32 +300,11 @@ struct MovieCardView: View {
             hasMissingFiles = latestMissing
         }
     }
-    
+
     private func evaluateMissingState(with pairs: [(VideoFile, MediaSource?)]) -> Bool {
         pairs.contains { file, source in
             cacheManager.hasMissingSource(for: file, mediaSource: source)
         }
     }
 
-    nonisolated private static func fetchVisibleFiles(movieId: Int64?, in db: Database) throws -> [VideoFile] {
-        guard let movieId else { return [] }
-        return try VideoFile.fetchAll(
-            db,
-            sql: """
-            SELECT videoFile.*
-            FROM videoFile
-            JOIN mediaSource ON mediaSource.id = videoFile.sourceId
-            WHERE videoFile.movieId = ?
-              AND COALESCE(mediaSource.isEnabled, 1) = 1
-            """,
-            arguments: [movieId]
-        )
-    }
-
-    nonisolated private static func fetchVisibleSourcePairs(movieId: Int64?, in db: Database) throws -> [(VideoFile, MediaSource?)] {
-        let files = try fetchVisibleFiles(movieId: movieId, in: db)
-        return try files.map { file in
-            (file, try file.request(for: VideoFile.mediaSource).fetchOne(db))
-        }
-    }
 }

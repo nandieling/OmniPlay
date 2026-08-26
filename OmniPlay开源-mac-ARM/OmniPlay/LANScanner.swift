@@ -121,7 +121,9 @@ class LANScanner: NSObject, ObservableObject, NetServiceBrowserDelegate, NetServ
         probeLANMediaServerPorts()
         probeEmbyUdpDiscovery()
         
-        scanTimer = Timer.scheduledTimer(withTimeInterval: 12.0, repeats: false) { [weak self] _ in
+        // A NAS can take a few seconds to answer while waking disks or
+        // starting the container.  Do not cancel the subnet probes too early.
+        scanTimer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: false) { [weak self] _ in
             self?.stopScanning()
         }
     }
@@ -512,7 +514,7 @@ class LANScanner: NSObject, ObservableObject, NetServiceBrowserDelegate, NetServ
     }
 
     private func privateIPv4SubnetHosts() -> [String] {
-        var prefixes = Set<String>()
+        var hosts = Set<String>()
         var interfaces: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&interfaces) == 0, let first = interfaces else { return [] }
         defer { freeifaddrs(interfaces) }
@@ -522,38 +524,63 @@ class LANScanner: NSObject, ObservableObject, NetServiceBrowserDelegate, NetServ
             defer { pointer = current.pointee.ifa_next }
             let flags = Int32(current.pointee.ifa_flags)
             guard flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0 else { continue }
-            guard let address = current.pointee.ifa_addr, address.pointee.sa_family == UInt8(AF_INET) else { continue }
+            guard let address = current.pointee.ifa_addr,
+                  let netmask = current.pointee.ifa_netmask,
+                  address.pointee.sa_family == UInt8(AF_INET),
+                  netmask.pointee.sa_family == UInt8(AF_INET) else { continue }
 
-            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            let result = getnameinfo(
-                address,
-                socklen_t(address.pointee.sa_len),
-                &hostname,
-                socklen_t(hostname.count),
-                nil,
-                0,
-                NI_NUMERICHOST
-            )
-            guard result == 0 else { continue }
-            let ip = String(cString: hostname)
-            guard isPrivateIPv4(ip) else { continue }
-            let parts = ip.split(separator: ".")
-            guard parts.count == 4 else { continue }
-            prefixes.insert("\(parts[0]).\(parts[1]).\(parts[2]).")
+            let ipValue = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                UInt32(bigEndian: $0.pointee.sin_addr.s_addr)
+            }
+            let maskValue = netmask.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                UInt32(bigEndian: $0.pointee.sin_addr.s_addr)
+            }
+            let ip = ipv4String(ipValue)
+            guard isPrivateIPv4(ip), maskValue != 0 else { continue }
+
+            let network = ipValue & maskValue
+            let broadcast = network | ~maskValue
+            guard broadcast > network + 1 else { continue }
+
+            let hostCount = broadcast - network - 1
+            // Avoid expanding a VPN or a corporate /16 into tens of
+            // thousands of requests.  A normal home LAN (/24) is scanned
+            // completely; larger networks retain the old bounded behaviour.
+            if hostCount <= 1022 {
+                for value in (network + 1)..<broadcast {
+                    hosts.insert(ipv4String(value))
+                }
+            } else {
+                let local24 = ipValue & 0xFFFFFF00
+                for suffix in 1...254 {
+                    hosts.insert(ipv4String(local24 | UInt32(suffix)))
+                }
+            }
         }
 
-        return prefixes.sorted().flatMap { prefix in
-            (1...254).map { "\(prefix)\($0)" }
-        }
+        return hosts.sorted()
     }
 
     private func isPrivateIPv4(_ ip: String) -> Bool {
         let parts = ip.split(separator: ".").compactMap { Int($0) }
         guard parts.count == 4 else { return false }
         if parts[0] == 10 { return true }
+        if parts[0] == 100 && (64...127).contains(parts[1]) { return true }
+        if parts[0] == 169 && parts[1] == 254 { return true }
         if parts[0] == 192 && parts[1] == 168 { return true }
         if parts[0] == 172 && (16...31).contains(parts[1]) { return true }
         return false
+    }
+
+    private func ipv4String(_ value: UInt32) -> String {
+        var address = in_addr(s_addr: value.bigEndian)
+        var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        let converted = withUnsafePointer(to: &address) { addressPointer in
+            buffer.withUnsafeMutableBufferPointer { bufferPointer in
+                inet_ntop(AF_INET, addressPointer, bufferPointer.baseAddress, socklen_t(bufferPointer.count))
+            }
+        }
+        return converted == nil ? "" : String(cString: buffer)
     }
 
     private func detectHTTPServiceType(serviceName: String, serviceType: String, ipAddress: String, port: Int) async -> DiscoveredDevice.DeviceType? {
@@ -637,6 +664,12 @@ class LANScanner: NSObject, ObservableObject, NetServiceBrowserDelegate, NetServ
             guard let http = response as? HTTPURLResponse else { return false }
             let body = String(data: data, encoding: .utf8)?.lowercased() ?? ""
             guard (200...299).contains(http.statusCode) || [401, 403].contains(http.statusCode) else { return false }
+            if path == "api/health",
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let service = object["service"] as? String,
+               service.lowercased().contains("omniplay") {
+                return true
+            }
             if path == "api/auth/status",
                (body.contains("\"issetuprequired\"") || body.contains("\"isauthenticated\"")) {
                 return true

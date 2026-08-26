@@ -1,8 +1,18 @@
 # 觅影 OmniPlay
 
-觅影 OmniPlay 是一款使用 Swift / SwiftUI 编写的 macOS 视频媒体库播放器，重点面向本地硬盘、外接硬盘和 NAS WebDAV 片库场景。它可以扫描媒体文件、自动刮削 TMDB 元数据、生成海报墙和分集剧照，并使用 mpv/FFmpeg 播放器栈完成本地与 WebDAV 媒体播放。
+觅影 OmniPlay 是一款使用 Swift / SwiftUI 编写的 macOS 视频媒体库播放器，重点面向本地硬盘、外接硬盘、NAS 和家庭媒体服务器场景。它可以扫描媒体文件、自动刮削 TMDB 元数据、生成海报墙和分集剧照，并使用 mpv/FFmpeg 播放器栈完成本地与远程媒体播放。
 
 本仓库是 macOS 开源版工程，项目入口为 `OmniPlay.xcodeproj`，主应用显示名称为“觅影”。当前播放器链路使用 MPVKit-GPL / libmpv / FFmpeg 相关组件，适合自编译、本机使用和开源再分发评估；如果要对外正式分发，请先完成签名、公证和开源许可证合规审查。
+
+## 1.7 更新要点
+
+- 新增 Lucky STUN 穿透媒体源，可为 OmniPlay Docker、WebDAV、Plex、Emby 和 Jellyfin 分别配置 Lucky 管理端、穿透规则与自动更新周期。
+- 新增局域网 OmniPlay Docker、Plex、Emby 和 Jellyfin 媒体源的发现、登录和媒体库挂载流程。
+- 播放页标题只显示刮削后的影视名称与季/集信息，不再附加原文件名片段。
+- 修复继续播放可能跳到已保存进度之后的问题，续播定位只执行一次，避免播放器就绪过程中重复 seek。
+- 离线缓存改为按剧集顺序串行执行，首页和详情页会自动恢复显示当前进度。
+- 离线缓存进度环支持点击取消并二次确认；新任务会预检文件大小并确保完成后至少保留 1 GiB 可用空间。
+- 缓存数据直接写入用户选定的磁盘和目录，不再经过内置磁盘中转，也不再新建以媒体源 ID 命名的数字目录。
 
 ## 功能特色
 
@@ -36,6 +46,20 @@
 - WebDAV 用户名和密码保存到 macOS Keychain。
 - 删除 WebDAV 源时可在设置中选择是否同步删除保存的登录凭据。
 
+### 家庭媒体服务器
+
+- 支持 OmniPlay Docker、Plex、Emby 和 Jellyfin。
+- 支持局域网预扫描和手动输入服务器地址。
+- 支持登录或访问令牌验证，并选择需要挂载的媒体库。
+- OmniPlay Docker 支持同步媒体库和播放进度。
+
+### Lucky STUN 穿透媒体源
+
+- 每个 Lucky STUN 媒体源独立保存 Lucky 管理地址、账号、密码和穿透规则。
+- 支持 OmniPlay Docker、WebDAV、Plex、Emby 和 Jellyfin 穿透地址。
+- 支持登录检测并读取 Lucky 管理端的穿透规则。
+- 可开启自动更新穿透地址，并设置 5 至 1440 分钟的更新周期。
+
 ### 自动扫描与刮削
 
 - 支持启动时自动扫描并同步库。
@@ -63,12 +87,20 @@
 - 支持默认字幕偏好。
 - 支持播放画质模式：流畅优先、平衡、画质优先。
 - 支持直接播放单个视频文件，并在窗口中播放。
+- 播放页使用刮削后的影视名称和季/集信息作为标题。
+- 续播时会精确定位到上次保存的播放进度。
 
 ### 离线缓存
 
 - 支持设置本地离线缓存目录。
-- 支持在详情页将支持缓存的媒体加入离线缓存。
-- 支持整季缓存入口。
+- 支持在首页、详情页按整部、整季或单集加入离线缓存。
+- 多集任务按剧集顺序串行缓存，不会同时写入多集。
+- 返回首页后，左上角会显示当前文件、任务顺序和总进度；重新进入详情页时会自动显示未完成进度。
+- 点击缓存进度环可取消当前单集、整季或整部任务，取消前会弹窗确认。
+- 任务开始前会检查目标磁盘空间，并在缓存所需空间之外预留 1 GiB。
+- 未完成内容以同盘 `.part` 文件写入，完成后再转为最终文件，避免进度误判为 100%。
+- 新缓存文件直接保存在选定目录，不再创建以媒体源 ID 命名的数字子目录；旧目录仍可兼容读取。
+- 当前支持缓存本地目录、直接文件和 WebDAV 媒体源。
 - 对不支持缓存的远程源会跳过并提示。
 
 ### 偏好设置
@@ -83,7 +115,8 @@
 - 软件与刮削语言。
 - 默认音轨、默认字幕。
 - 播放画质模式。
-- TMDB 公共源和自定义 API。
+- TMDB 自定义 API。
+- TMDB API 自定义代理网关，无法直连 TMDB 时可通过反向代理完成刮削。
 - 开源组件信息与许可证线索。
 
 ## 使用教程
@@ -164,7 +197,31 @@ https://nas.example.com:5006/dav/Movies
 - 使用域名、反向代理或公网地址访问 NAS。
 - WebDAV 路径不是默认服务根。
 
-### 5. 管理媒体源
+### 5. 添加局域网媒体源
+
+1. 点击首页右上角“文件夹 +”按钮。
+2. 在“新增媒体源”中点击“局域网媒体源”。
+3. 选择 OmniPlay Docker、WebDAV、Plex、Emby 或 Jellyfin。
+4. 输入服务器地址和对应的账号、密码、API Key 或访问令牌。
+5. Plex 可使用“登录 Plex”打开 Plex Link 页面完成授权。
+6. 登录成功后选择需要挂载的媒体库，应用会立即扫描和同步。
+
+媒体源管理弹窗也会预扫描局域网服务，发现设备后可直接点击进入登录流程。
+
+### 6. 添加 Lucky STUN 穿透媒体源
+
+1. 点击首页右上角“文件夹 +”按钮。
+2. 在“新增媒体源”中点击“Lucky STUN 穿透媒体源”。
+3. 选择 OmniPlay Docker、WebDAV、Plex、Emby 或 Jellyfin 类型。
+4. 输入 Lucky 管理地址、管理账号和管理密码。
+5. 点击“登录检测”，应用会读取当前 Lucky 实例的穿透规则。
+6. 选择对应规则，按需开启“自动更新穿透地址”并设置更新周期。
+7. 填写实际媒体服务的登录信息，点击“保存并同步”。
+8. WebDAV、Plex、Emby 和 Jellyfin 会继续进入目录或媒体库选择流程。
+
+Lucky 管理信息属于每个媒体源，不是全局设置。开启自动更新后，应用会按该媒体源自己的周期刷新穿透地址。
+
+### 7. 管理媒体源
 
 打开首页右上角“文件夹 +”按钮后，可对已挂载源执行：
 
@@ -175,7 +232,7 @@ https://nas.example.com:5006/dav/Movies
 
 如果移除的是 WebDAV 源，是否同时删除 Keychain 中保存的账号密码，取决于偏好设置里的“移除 WebDAV 源时同时删除保存的登录凭据”。
 
-### 6. 扫描与同步
+### 8. 扫描与同步
 
 首页右上角“循环箭头”按钮用于手动同步：
 
@@ -187,7 +244,7 @@ https://nas.example.com:5006/dav/Movies
 
 如果开启“启动时自动扫描并同步库”，应用启动后会自动执行一次同步。
 
-### 7. 播放与续播
+### 9. 播放与续播
 
 1. 在首页点击影片海报进入详情页。
 2. 点击“开始播放”或“继续播放”。
@@ -195,7 +252,9 @@ https://nas.example.com:5006/dav/Movies
 4. 剧集播放接近结尾时可切换下一集。
 5. 详情页中可手动切换已播/未播。
 
-### 8. 分集剧照与副标题
+播放页左上角会显示刮削后的影视名称和季/集信息。点击“继续播放”时，应用会从上次保存的进度恢复。
+
+### 10. 分集剧照与副标题
 
 在剧集详情页：
 
@@ -214,26 +273,29 @@ https://nas.example.com:5006/dav/Movies
 
 其中“导师版”只有在手动填写并保存后才会显示。
 
-### 9. TMDB 配置
+### 11. TMDB 配置
 
 进入偏好设置的“刮削服务 (TMDB)”：
 
 - 默认可使用公共 TMDB 源。
 - 长期使用建议填写自己的 TMDB API Key 或 v4 Token。
+- 如当前网络无法直连 TMDB，可填写自定义 API 代理网关；留空则仍使用官方地址。
 - 填写后点击“验证”检查密钥可用性。
 - “软件与刮削语言”会影响 TMDB 元数据语言。
 
 如果没有可用 TMDB 凭据，刮削、海报和剧照获取会受影响。
 
-### 10. 离线缓存
+### 12. 离线缓存
 
 1. 打开偏好设置。
 2. 在“离线缓存”中设置保存位置。
 3. 进入影视详情页。
 4. 打开离线缓存模式。
-5. 对支持缓存的剧集或整季执行缓存。
+5. 对支持缓存的电影、整季或单集执行缓存。
+6. 多集任务会按剧集顺序依次执行；离开详情页不会中断任务。
+7. 需要终止时，点击首页或详情页的缓存进度环，并在弹窗中确认。
 
-远程源是否支持缓存由当前实现策略决定；不支持时应用会跳过并提示。
+当前可缓存本地目录、直接文件和 WebDAV 媒体源。任务启动前必须能确定文件大小，且完成后磁盘至少还有 1 GiB 可用空间；否则不会开始缓存。
 
 ## 自行编译教程
 
@@ -251,10 +313,10 @@ https://nas.example.com:5006/dav/Movies
 ```text
 PRODUCT_BUNDLE_IDENTIFIER = nan.OmniPlay
 PRODUCT_NAME = 觅影
-MARKETING_VERSION = 1.0
+MARKETING_VERSION = 1.7
 CURRENT_PROJECT_VERSION = 1
 MACOSX_DEPLOYMENT_TARGET = 14.0
-DEVELOPMENT_TEAM = DT95MB3RG4
+DEVELOPMENT_TEAM =
 ENABLE_HARDENED_RUNTIME = YES
 ```
 
@@ -482,7 +544,23 @@ mp4, mkv, mov, avi, rmvb, flv, webm, m2ts, ts, iso, m4v, wmv
 - 文件是否被移动或删除。
 - 应用是否有网络访问权限。
 
-### 7. 数据库和缓存在哪里
+### 7. Lucky STUN 登录后读取不到规则
+
+请检查：
+
+- 填写的是 Lucky 管理端地址，而不是已经穿透出去的媒体服务地址。
+- 管理账号和密码正确，并且该账号有权限读取 STUN 穿透规则。
+- Lucky 管理端可从当前 Mac 访问，本机防火墙或反向代理没有拦截 API 请求。
+- 选中的规则已经启用，并且规则响应中包含可用的公网地址。
+
+### 8. 离线缓存无法开始或需要取消
+
+- 先在偏好设置中选择可写的缓存目录。
+- 缓存所需空间之外必须至少保留 1 GiB 可用空间。
+- 服务器无法提供文件大小时，应用不会跳过空间预检强行开始。
+- 缓存中可点击进度环，在确认弹窗中选择“取消缓存”。已完成的内容会保留，未完成的 `.part` 文件会被删除。
+
+### 9. 数据库和缓存在哪里
 
 数据库默认位置：
 
@@ -490,7 +568,7 @@ mp4, mkv, mov, avi, rmvb, flv, webm, m2ts, ts, iso, m4v, wmv
 ~/Library/Application Support/OmniPlay/omniplay.sqlite
 ```
 
-海报、剧照、离线缓存等数据由应用内部管理，离线缓存目录可在偏好设置中更改。
+海报和剧照缓存由应用内部管理。离线媒体会直接保存到偏好设置中选定的目录，新缓存不会额外创建以媒体源 ID 命名的数字子目录。
 
 ## 开发说明
 
@@ -500,12 +578,14 @@ mp4, mkv, mov, avi, rmvb, flv, webm, m2ts, ts, iso, m4v, wmv
 OmniPlay/
   OmniPlayApp.swift                 App 入口与数据库初始化
   ContentView.swift                 主视图入口
-  PosterWallView.swift              首页海报墙、媒体源管理、WebDAV 入口
+  PosterWallView.swift              首页海报墙、媒体源管理与缓存状态
   MovieDetailView.swift             详情页、分集卡片、播放入口
   PlayerScreen.swift                播放窗口 UI
   MPVPlayerManager.swift            mpv 播放管理
-  MediaLibraryManager.swift         扫描、刮削、WebDAV 扫描
-  DatabaseModels.swift              数据模型与 Keychain 凭据
+  MediaLibraryManager.swift         扫描、刮削与远程媒体库同步
+  DatabaseModels.swift              数据模型、媒体源配置与 Keychain 凭据
+  LuckyStun.swift                   Lucky 登录、规则解析与穿透地址更新
+  OmniPlayDockerClient.swift        OmniPlay Docker 登录、库与进度同步
   ThumbnailManager.swift            分集剧照获取与缓存
   PosterManager.swift               海报缓存
   OfflineCacheManager.swift         离线缓存
@@ -514,7 +594,7 @@ OmniPlay/
 
 ### 测试
 
-仓库包含业务集成测试和 WebDAV Mock 测试：
+仓库包含业务集成测试、WebDAV Mock 测试和 Lucky STUN 配置测试：
 
 ```text
 OmniPlayTests/

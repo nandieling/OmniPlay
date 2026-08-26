@@ -5,15 +5,16 @@ import GRDB
 
 class ThumbnailManager: ObservableObject {
     static let shared = ThumbnailManager()
-    
+
     @Published var progressMessage: String = ""
-    
+
     // 本地图片存储目录
     let thumbDirectory: URL
-    
-    private struct WebFetchTask: Equatable {
+
+    private struct EpisodeThumbnailTask {
         let fileId: String
         let title: String
+        let tmdbTVId: Int64?
         let season: Int
         let episode: Int
         let sourceId: Int64
@@ -24,7 +25,7 @@ class ThumbnailManager: ObservableObject {
         let episodeCount: Int
     }
 
-    private var webFetchQueue: [WebFetchTask] = []
+    private var webFetchQueue: [EpisodeThumbnailTask] = []
     private var isFetching = false
     private var currentFetchTask: Task<Void, Never>? = nil
     private var currentFetchSourceID: Int64? = nil
@@ -35,7 +36,7 @@ class ThumbnailManager: ObservableObject {
     private let currentTMDBMappingVersion = 2
     private var tvSeasonSummaryCache: [Int: [TMDBSeasonSummary]] = [:]
     private let tvSeasonSummaryCacheQueue = DispatchQueue(label: "nan.omniplay.thumbnail.tmdb-season-summary")
-    
+
     private init() {
         let cachePaths = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
         thumbDirectory = cachePaths[0].appendingPathComponent("OmniPlayThumbnails")
@@ -45,18 +46,18 @@ class ThumbnailManager: ObservableObject {
             UserDefaults.standard.set([], forKey: failedTMDBStoreKey)
             UserDefaults.standard.set(currentTMDBMappingVersion, forKey: failedTMDBMappingVersionKey)
         }
-        
+
         if !FileManager.default.fileExists(atPath: thumbDirectory.path) {
             try? FileManager.default.createDirectory(at: thumbDirectory, withIntermediateDirectories: true)
         }
     }
-    
-    func startBatchWebFetch(tasks: [(String, String, Int, Int)], retryFailed: Bool = false) {
+
+    func startBatchWebFetch(tasks: [(String, String, Int64?, Int, Int)], forceRetry: Bool = false) {
         DispatchQueue.global(qos: .background).async {
             guard let queue = AppDatabase.shared.dbQueue else { return }
-            let convertedTasks: [WebFetchTask]
+            let typedTasks: [EpisodeThumbnailTask]
             do {
-                convertedTasks = try queue.read { db in
+                typedTasks = try queue.read { db in
                     try tasks.compactMap { task in
                         guard let sourceId = try Int64.fetchOne(
                             db,
@@ -65,24 +66,38 @@ class ThumbnailManager: ObservableObject {
                         ) else {
                             return nil
                         }
-                        return WebFetchTask(fileId: task.0, title: task.1, season: task.2, episode: task.3, sourceId: sourceId)
+                        return EpisodeThumbnailTask(
+                            fileId: task.0,
+                            title: task.1,
+                            tmdbTVId: task.2,
+                            season: task.3,
+                            episode: task.4,
+                            sourceId: sourceId
+                        )
                     }
                 }
             } catch {
                 return
             }
-            self.startBatchWebFetch(tasks: convertedTasks, retryFailed: retryFailed)
+            self.startBatchWebFetch(tasks: typedTasks, forceRetry: forceRetry)
         }
     }
 
-    private func startBatchWebFetch(tasks: [WebFetchTask], retryFailed: Bool = false) {
+    private func startBatchWebFetch(tasks: [EpisodeThumbnailTask], forceRetry: Bool = false) {
         DispatchQueue.global(qos: .background).async {
             for task in tasks {
                 // 核心防重复拦截：本地已存在，直接跳过
                 let localFileURL = self.thumbDirectory.appendingPathComponent("\(task.fileId).jpg")
                 if FileManager.default.fileExists(atPath: localFileURL.path) { continue }
-                if !retryFailed && self.failedTMDBFileIDs.contains(task.fileId) { continue }
-                
+                if self.failedTMDBFileIDs.contains(task.fileId) {
+                    if forceRetry {
+                        self.failedTMDBFileIDs.remove(task.fileId)
+                        UserDefaults.standard.set(Array(self.failedTMDBFileIDs), forKey: self.failedTMDBStoreKey)
+                    } else {
+                        continue
+                    }
+                }
+
                 if !self.webFetchQueue.contains(where: { $0.fileId == task.fileId }) {
                     self.webFetchQueue.append(task)
                 }
@@ -108,7 +123,7 @@ class ThumbnailManager: ObservableObject {
             }
         }
     }
-    
+
     private func processNextWebFetch() {
         guard !webFetchQueue.isEmpty else {
             isFetching = false
@@ -120,32 +135,42 @@ class ThumbnailManager: ObservableObject {
             }
             return
         }
-        
+
         isFetching = true
         let task = webFetchQueue.removeFirst()
         let fetchID = UUID()
         currentFetchID = fetchID
         currentFetchSourceID = task.sourceId
-        
+        let fileId = task.fileId
+        let title = task.title
+        let season = task.season
+        let episode = task.episode
+
         DispatchQueue.main.async {
-            self.progressMessage = "获取剧照: \(task.title) S\(String(format: "%02d", task.season))E\(String(format: "%02d", task.episode))"
+            self.progressMessage = "获取剧照: \(title) S\(String(format: "%02d", season))E\(String(format: "%02d", episode))"
         }
-        
+
         let fetchTask = Task {
             guard !Task.isCancelled, await self.sourceExists(task.sourceId) else {
                 self.finishCurrentFetch(fetchID: fetchID)
                 return
             }
             // 1. 先尝试向 TMDB 请求官方剧照
-            let tmdbSuccess = await fetchFromTMDB(task: task)
+            let tmdbSuccess = await fetchFromTMDB(
+                fileId: fileId,
+                title: title,
+                tmdbTVId: task.tmdbTVId,
+                season: season,
+                episode: episode
+            )
             if !Task.isCancelled, await self.sourceExists(task.sourceId) {
                 if tmdbSuccess {
-                    clearTMDBFailure(for: task.fileId)
+                    clearTMDBFailure(for: fileId)
                 } else {
-                    markTMDBFailure(for: task.fileId)
+                    markTMDBFailure(for: fileId)
                 }
             }
-            
+
             try? await Task.sleep(nanoseconds: 1_000_000_000) // 延迟防封IP
             self.finishCurrentFetch(fetchID: fetchID)
         }
@@ -161,67 +186,67 @@ class ThumbnailManager: ObservableObject {
             self.processNextWebFetch()
         }
     }
-    
+
     // ==========================================
     // 🎬 引擎 1：TMDB 剧照本地化下载
     // ==========================================
-    private func fetchFromTMDB(task: WebFetchTask) async -> Bool {
-        let apiKey = TMDBAPIConfig.resolvedApiKey
-        guard !apiKey.isEmpty else { return false }
-        guard !Task.isCancelled, await sourceExists(task.sourceId) else { return false }
-        
-        let cleanTitle = task.title.replacingOccurrences(of: #"\(\d{4}\)"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let encodedTitle = cleanTitle.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return false }
-        
-        do {
-            let searchURL = URL(string: "https://api.themoviedb.org/3/search/tv?query=\(encodedTitle)&language=zh-CN")!
-            var req1 = URLRequest(url: searchURL)
-            if apiKey.count >= 50 {
-                req1.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            } else {
-                req1.url = URL(string: "https://api.themoviedb.org/3/search/tv?query=\(encodedTitle)&language=zh-CN&api_key=\(apiKey)")
-            }
-            
-            let (data1, _) = try await URLSession.shared.data(for: req1)
-            guard !Task.isCancelled, await sourceExists(task.sourceId) else { return false }
-            guard let json1 = try JSONSerialization.jsonObject(with: data1) as? [String: Any],
-                  let results = json1["results"] as? [[String: Any]],
-                  let firstResult = results.first,
-                  let tvId = firstResult["id"] as? Int else { return false }
-            
-            guard !Task.isCancelled, await sourceExists(task.sourceId) else { return false }
-            let stillPath = await fetchMappedEpisodeStillPath(
-                tvId: tvId,
-                season: task.season,
-                episode: task.episode,
-                language: "zh-CN",
-                apiKey: apiKey
-            )
-            guard let stillPath else { return false }
-            
-            let imageURL = URL(string: "https://image.tmdb.org/t/p/w500\(stillPath)")!
-            let (imageData, _) = try await URLSession.shared.data(from: imageURL)
-            guard !Task.isCancelled, await sourceExists(task.sourceId) else { return false }
-            
-            let localFileURL = thumbDirectory.appendingPathComponent("\(task.fileId).jpg")
-            try imageData.write(to: localFileURL, options: .atomic)
+    private func fetchFromTMDB(fileId: String, title: String, tmdbTVId: Int64?, season: Int, episode: Int) async -> Bool {
+        if let tmdbTVId, tmdbTVId > 0 {
+            return await fetchEpisodeStill(fileId: fileId, tvId: Int(tmdbTVId), season: season, episode: episode)
+        }
 
-            if UserDefaults.standard.bool(forKey: "enableLocalMetadataExport") {
-                await exportLocalSidecarThumbnail(task: task, thumbnailURL: localFileURL)
+        let cleanTitle = title.replacingOccurrences(of: #"\(\d{4}\)"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty else { return false }
+
+        do {
+            guard let candidate = try await TMDBService.shared.multiSearch(
+                query: cleanTitle,
+                preferredMediaType: "tv",
+                preferredSeason: season
+            ) else {
+                return false
             }
-            
-            await MainActor.run { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
-            return true
-            
+            let mediaType = candidate.mediaType?.lowercased()
+            guard mediaType == "tv" || (mediaType == nil && candidate.firstAirDate?.isEmpty == false) else {
+                return false
+            }
+            return await fetchEpisodeStill(fileId: fileId, tvId: candidate.id, season: season, episode: episode)
         } catch {
             return false
         }
     }
 
-    private func exportLocalSidecarThumbnail(task: WebFetchTask, thumbnailURL: URL) async {
+    private func fetchEpisodeStill(fileId: String, tvId: Int, season: Int, episode: Int) async -> Bool {
+        let appLang = UserDefaults.standard.string(forKey: "appLanguage") ?? "zh-Hans"
+        let tmdbLang = appLang == "en" ? "en-US" : "zh-CN"
+
+        do {
+            let stillPath = await fetchMappedEpisodeStillPath(tvId: tvId, season: season, episode: episode, language: tmdbLang)
+            guard let stillPath else { return false }
+
+            let imageURL = URL(string: "https://image.tmdb.org/t/p/w500\(stillPath)")!
+            let (imageData, _) = try await URLSession.shared.data(from: imageURL)
+
+            let localFileURL = thumbDirectory.appendingPathComponent("\(fileId).jpg")
+            try imageData.write(to: localFileURL, options: .atomic)
+
+            if UserDefaults.standard.bool(forKey: "enableLocalMetadataExport") {
+                await exportLocalSidecarThumbnail(fileId: fileId, thumbnailURL: localFileURL)
+            }
+
+            await MainActor.run {
+                NotificationCenter.default.post(name: NSNotification.Name("ThumbnailGenerated_\(fileId)"), object: nil)
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func exportLocalSidecarThumbnail(fileId: String, thumbnailURL: URL) async {
         guard let queue = AppDatabase.shared.dbQueue else { return }
         let snapshot = try? await queue.read { db -> (VideoFile, MediaSource)? in
-            guard let file = try VideoFile.fetchOne(db, key: task.fileId),
+            guard let file = try VideoFile.fetchOne(db, key: fileId),
                   let source = try MediaSource.fetchOne(db, key: file.sourceId) else {
                 return nil
             }
@@ -233,62 +258,38 @@ class ThumbnailManager: ObservableObject {
         LocalMetadataSidecarStore.shared.exportEpisodeThumbnail(sourceURL: thumbnailURL, videoURL: videoURL)
     }
 
-    private func tmdbData(urlString: String, apiKey: String) async throws -> Data {
-        guard var components = URLComponents(string: urlString) else {
-            throw URLError(.badURL)
-        }
-        var requestURL: URL?
-        if apiKey.count >= 50 {
-            requestURL = components.url
-        } else {
-            var queryItems = components.queryItems ?? []
-            queryItems.append(URLQueryItem(name: "api_key", value: apiKey))
-            components.queryItems = queryItems
-            requestURL = components.url
-        }
-        guard let requestURL else { throw URLError(.badURL) }
-        var request = URLRequest(url: requestURL)
-        if apiKey.count >= 50 {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        }
-        let (data, response) = try await URLSession.shared.data(for: request)
-        if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
-            throw URLError(.badServerResponse)
-        }
-        return data
-    }
-
-    private func fetchMappedEpisodeStillPath(tvId: Int, season: Int, episode: Int, language: String, apiKey: String) async -> String? {
-        let candidates = await episodeStillCoordinateCandidates(tvId: tvId, requestedSeason: season, requestedEpisode: episode, apiKey: apiKey)
+    private func fetchMappedEpisodeStillPath(tvId: Int, season: Int, episode: Int, language: String) async -> String? {
+        let candidates = await episodeStillCoordinateCandidates(tvId: tvId, requestedSeason: season, requestedEpisode: episode)
         for candidate in candidates {
-            if let stillPath = await fetchEpisodeStillPath(tvId: tvId, season: candidate.season, episode: candidate.episode, language: language, apiKey: apiKey) {
+            if let stillPath = await fetchEpisodeStillPath(tvId: tvId, season: candidate.season, episode: candidate.episode, language: language) {
                 return stillPath
             }
         }
         return nil
     }
 
-    private func fetchEpisodeStillPath(tvId: Int, season: Int, episode: Int, language: String, apiKey: String) async -> String? {
+    private func fetchEpisodeStillPath(tvId: Int, season: Int, episode: Int, language: String) async -> String? {
         let episodeURL = "https://api.themoviedb.org/3/tv/\(tvId)/season/\(season)/episode/\(episode)?language=\(language)"
         do {
-            let data = try await tmdbData(urlString: episodeURL, apiKey: apiKey)
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            guard let (data, response) = try await TMDBService.shared.requestTMDB(urlString: episodeURL),
+                  response.statusCode == 200,
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 return nil
             }
             if let stillPath = json["still_path"] as? String {
                 return stillPath
             }
-            return await fetchEpisodeStillImagePath(tvId: tvId, season: season, episode: episode, language: language, apiKey: apiKey)
+            return await fetchEpisodeStillImagePath(tvId: tvId, season: season, episode: episode, language: language)
         } catch {
             return nil
         }
     }
 
-    private func episodeStillCoordinateCandidates(tvId: Int, requestedSeason: Int, requestedEpisode: Int, apiKey: String) async -> [(season: Int, episode: Int)] {
+    private func episodeStillCoordinateCandidates(tvId: Int, requestedSeason: Int, requestedEpisode: Int) async -> [(season: Int, episode: Int)] {
         guard requestedEpisode > 0 else { return [(requestedSeason, requestedEpisode)] }
         var candidates: [(season: Int, episode: Int)] = [(requestedSeason, requestedEpisode)]
 
-        let seasons = await fetchTVSeasonSummaries(tvId: tvId, apiKey: apiKey)
+        let seasons = await fetchTVSeasonSummaries(tvId: tvId)
         let regularSeasons = seasons
             .filter { $0.seasonNumber > 0 && $0.episodeCount > 0 }
             .sorted { lhs, rhs in
@@ -324,15 +325,16 @@ class ThumbnailManager: ObservableObject {
         candidates.append(candidate)
     }
 
-    private func fetchTVSeasonSummaries(tvId: Int, apiKey: String) async -> [TMDBSeasonSummary] {
+    private func fetchTVSeasonSummaries(tvId: Int) async -> [TMDBSeasonSummary] {
         if let cached = tvSeasonSummaryCacheQueue.sync(execute: { tvSeasonSummaryCache[tvId] }) {
             return cached
         }
 
         let url = "https://api.themoviedb.org/3/tv/\(tvId)?language=en-US"
         do {
-            let data = try await tmdbData(urlString: url, apiKey: apiKey)
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            guard let (data, response) = try await TMDBService.shared.requestTMDB(urlString: url),
+                  response.statusCode == 200,
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let seasons = json["seasons"] as? [[String: Any]] else {
                 return []
             }
@@ -349,12 +351,13 @@ class ThumbnailManager: ObservableObject {
         }
     }
 
-    private func fetchEpisodeStillImagePath(tvId: Int, season: Int, episode: Int, language: String, apiKey: String) async -> String? {
+    private func fetchEpisodeStillImagePath(tvId: Int, season: Int, episode: Int, language: String) async -> String? {
         let imageLanguage = language == "en-US" ? "en,null" : "zh,null,en"
         let imagesURL = "https://api.themoviedb.org/3/tv/\(tvId)/season/\(season)/episode/\(episode)/images?include_image_language=\(imageLanguage)"
         do {
-            let data = try await tmdbData(urlString: imagesURL, apiKey: apiKey)
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            guard let (data, response) = try await TMDBService.shared.requestTMDB(urlString: imagesURL),
+                  response.statusCode == 200,
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let stills = json["stills"] as? [[String: Any]],
                   !stills.isEmpty else {
                 return nil
@@ -403,50 +406,37 @@ class ThumbnailManager: ObservableObject {
             return false
         }
     }
-    
+
+    func replaceThumbnail(fileId: String, with sourceURL: URL) throws {
+        let destinationURL = thumbnailURL(for: fileId)
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try FileManager.default.removeItem(at: destinationURL)
+        }
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        clearTMDBFailure(for: fileId)
+
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: NSNotification.Name("ThumbnailGenerated_\(fileId)"), object: nil)
+        }
+    }
+
+    func removeAssets(for fileIDs: [String]) {
+        guard !fileIDs.isEmpty else { return }
+        for fileId in fileIDs {
+            let localFileURL = thumbDirectory.appendingPathComponent("\(fileId).jpg")
+            try? FileManager.default.removeItem(at: localFileURL)
+            failedTMDBFileIDs.remove(fileId)
+        }
+        UserDefaults.standard.set(Array(failedTMDBFileIDs), forKey: failedTMDBStoreKey)
+    }
+
     func enqueueEpisodeThumbnails(for movieId: Int64) {
         DispatchQueue.global(qos: .background).async {
             guard let queue = AppDatabase.shared.dbQueue else { return }
             do {
-                let tasks = try queue.read { db -> [WebFetchTask] in
-                    guard let movie = try Movie.fetchOne(db, key: movieId) else { return [] }
-                    let fetchedFiles = try VideoFile.fetchAll(
-                        db,
-                        sql: """
-                        SELECT videoFile.*
-                        FROM videoFile
-                        JOIN mediaSource ON mediaSource.id = videoFile.sourceId
-                        WHERE videoFile.movieId = ?
-                        """,
-                        arguments: [movieId]
-                    )
-                    let files = fetchedFiles.filter { $0.mediaType != "direct" }
-                    guard !files.isEmpty else { return [] }
-                    
-                    let isTVShow = movie.title.contains("季")
-                        || movie.title.contains("集")
-                        || files.contains { file in
-                            let name = file.fileName
-                            return name.range(of: #"[sS]\d{1,2}[eE]\d{1,2}"#, options: .regularExpression) != nil
-                                || name.range(of: #"[eE][pP]?\d{1,3}"#, options: .regularExpression) != nil
-                                || name.range(of: #"第\d{1,3}[集话]"#, options: .regularExpression) != nil
-                        }
-                    guard isTVShow else { return [] }
-                    
-                    let sortedFiles = files.enumerated().sorted {
-                        MediaNameParser.episodeSortKey(for: $0.element.fileName, fallbackIndex: $0.offset) <
-                        MediaNameParser.episodeSortKey(for: $1.element.fileName, fallbackIndex: $1.offset)
-                    }.map(\.element)
-                    
-                    var tasks: [WebFetchTask] = []
-                    
-                    for (index, file) in sortedFiles.enumerated() {
-                        let parsed = MediaNameParser.parseEpisodeInfo(from: file.fileName, fallbackIndex: index)
-                        tasks.append(WebFetchTask(fileId: file.id, title: movie.title, season: parsed.season, episode: parsed.episode, sourceId: file.sourceId))
-                    }
-                    return tasks
+                let tasks = try queue.read { db -> [EpisodeThumbnailTask] in
+                    try self.buildEpisodeTasks(for: movieId, in: db, missingOnly: false)
                 }
-                
                 if !tasks.isEmpty {
                     self.startBatchWebFetch(tasks: tasks)
                 }
@@ -454,16 +444,16 @@ class ThumbnailManager: ObservableObject {
         }
     }
 
-    func enqueueMissingEpisodeThumbnailsForLibrary(retryFailed: Bool = false, orderedMovieIDs: [Int64] = []) {
+    func enqueueMissingEpisodeThumbnailsAcrossLibrary(orderedMovieIDs: [Int64] = []) {
         DispatchQueue.global(qos: .background).async {
             guard let queue = AppDatabase.shared.dbQueue else { return }
             do {
-                let tasks = try queue.read { db -> [WebFetchTask] in
+                let tasks = try queue.read { db -> [EpisodeThumbnailTask] in
                     var order: [Int64: Int] = [:]
                     for (index, movieID) in orderedMovieIDs.enumerated() where order[movieID] == nil {
                         order[movieID] = index
                     }
-                    let allMovies: [Movie]
+                    let movies: [Movie]
                     if !orderedMovieIDs.isEmpty {
                         var seenMovieIDs = Set<Int64>()
                         var orderedMovies: [Movie] = []
@@ -472,70 +462,70 @@ class ThumbnailManager: ObservableObject {
                                 orderedMovies.append(movie)
                             }
                         }
-                        allMovies = orderedMovies
+                        movies = orderedMovies
                     } else {
-                        allMovies = try Movie.fetchAll(
-                            db,
-                            sql: """
-                            SELECT DISTINCT movie.*
-                            FROM movie
-                            JOIN videoFile ON videoFile.movieId = movie.id
-                            JOIN mediaSource ON mediaSource.id = videoFile.sourceId
-                            """
-                        ).sorted { lhs, rhs in
+                        movies = try Movie.fetchAll(db).sorted { lhs, rhs in
                             let lhsRank = lhs.id.flatMap { order[$0] } ?? Int.max
                             let rhsRank = rhs.id.flatMap { order[$0] } ?? Int.max
                             if lhsRank != rhsRank { return lhsRank < rhsRank }
                             return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
                         }
                     }
-                    var collected: [WebFetchTask] = []
-                    
-                    for movie in allMovies {
-                        guard let movieID = movie.id else { continue }
-                        let fetchedFiles = try VideoFile.fetchAll(
-                            db,
-                            sql: """
-                            SELECT videoFile.*
-                            FROM videoFile
-                            JOIN mediaSource ON mediaSource.id = videoFile.sourceId
-                            WHERE videoFile.movieId = ?
-                            """,
-                            arguments: [movieID]
-                        )
-                        let files = fetchedFiles.filter { $0.mediaType != "direct" }
-                        guard !files.isEmpty else { continue }
-                        
-                        let isTVShow = movie.title.contains("季")
-                            || movie.title.contains("集")
-                            || files.contains { file in
-                                let name = file.fileName
-                                return name.range(of: #"[sS]\d{1,2}[eE]\d{1,2}"#, options: .regularExpression) != nil
-                                    || name.range(of: #"[eE][pP]?\d{1,3}"#, options: .regularExpression) != nil
-                                    || name.range(of: #"第\d{1,3}[集话]"#, options: .regularExpression) != nil
-                            }
-                        guard isTVShow else { continue }
-                        
-                        let sortedFiles = files.enumerated().sorted {
-                            MediaNameParser.episodeSortKey(for: $0.element.fileName, fallbackIndex: $0.offset) <
-                            MediaNameParser.episodeSortKey(for: $1.element.fileName, fallbackIndex: $1.offset)
-                        }.map(\.element)
-                        
-                        for (index, file) in sortedFiles.enumerated() {
-                            let localFileURL = self.thumbDirectory.appendingPathComponent("\(file.id).jpg")
-                            if FileManager.default.fileExists(atPath: localFileURL.path) { continue }
-                            
-                            let parsed = MediaNameParser.parseEpisodeInfo(from: file.fileName, fallbackIndex: index)
-                            collected.append(WebFetchTask(fileId: file.id, title: movie.title, season: parsed.season, episode: parsed.episode, sourceId: file.sourceId))
+                    var aggregated: [EpisodeThumbnailTask] = []
+                    for movie in movies {
+                        if let mid = movie.id {
+                            aggregated.append(contentsOf: try self.buildEpisodeTasks(for: mid, in: db, missingOnly: true))
                         }
                     }
-                    return collected
+                    return aggregated
                 }
-                
                 if !tasks.isEmpty {
-                    self.startBatchWebFetch(tasks: tasks, retryFailed: retryFailed)
+                    self.startBatchWebFetch(tasks: tasks, forceRetry: true)
                 }
             } catch {}
         }
+    }
+
+    private func buildEpisodeTasks(for movieId: Int64, in db: Database, missingOnly: Bool) throws -> [EpisodeThumbnailTask] {
+        guard let movie = try Movie.fetchOne(db, key: movieId) else { return [] }
+        let files = try VideoFile.fetchVisibleFiles(movieId: movieId, in: db).filter { $0.mediaType != "direct" }
+        guard !files.isEmpty else { return [] }
+
+        let isTVShow = movie.title.contains("季")
+            || movie.title.contains("集")
+            || files.contains { file in
+                let name = file.fileName
+                return name.range(of: #"[sS]\d{1,2}[eE]\d{1,2}"#, options: .regularExpression) != nil
+                    || name.range(of: #"[eE][pP]?\d{1,3}"#, options: .regularExpression) != nil
+                    || name.range(of: #"第\d{1,3}[集话]"#, options: .regularExpression) != nil
+            }
+        guard isTVShow else { return [] }
+
+        let sortedFiles = files.enumerated().sorted {
+            MediaNameParser.episodeSortKey(for: $0.element.fileName, fallbackIndex: $0.offset) <
+            MediaNameParser.episodeSortKey(for: $1.element.fileName, fallbackIndex: $1.offset)
+        }.map(\.element)
+
+        var tasks: [EpisodeThumbnailTask] = []
+        for (index, file) in sortedFiles.enumerated() {
+            let localPath = thumbDirectory.appendingPathComponent("\(file.id).jpg").path
+            if missingOnly && FileManager.default.fileExists(atPath: localPath) { continue }
+            let resolvedInfo = EpisodeMetadataOverrideStore.shared.resolvedEpisodeInfo(
+                fileId: file.id,
+                fileName: file.fileName,
+                fallbackIndex: index
+            )
+            tasks.append(
+                EpisodeThumbnailTask(
+                    fileId: file.id,
+                    title: movie.title,
+                    tmdbTVId: movie.id ?? movieId,
+                    season: resolvedInfo.season,
+                    episode: resolvedInfo.episode,
+                    sourceId: file.sourceId
+                )
+            )
+        }
+        return tasks
     }
 }

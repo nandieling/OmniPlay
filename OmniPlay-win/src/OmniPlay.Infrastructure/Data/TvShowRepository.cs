@@ -26,6 +26,7 @@ public sealed class TvShowRepository : ITvShowRepository
                                 tvShow.overview,
                                 tvShow.posterPath,
                                 tvShow.voteAverage,
+                                doubanMetadata.rating AS DoubanRating,
                                 tvShow.isLocked,
                                 tvShow.productionCountryCodes,
                                 tvShow.originalLanguage,
@@ -35,6 +36,8 @@ public sealed class TvShowRepository : ITvShowRepository
                 JOIN mediaSource ON mediaSource.id = videoFile.sourceId
                                 AND mediaSource.isEnabled = 1
                                 AND mediaSource.removedAt IS NULL
+                LEFT JOIN doubanMetadata ON doubanMetadata.itemKind = 'tv'
+                                        AND doubanMetadata.entityId = tvShow.id
                 ORDER BY tvShow.title COLLATE NOCASE ASC
                 """,
                 cancellationToken: cancellationToken));

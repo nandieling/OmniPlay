@@ -30,7 +30,6 @@ public sealed class JsonSettingsServiceTests : IDisposable
         Assert.True(defaults.Tmdb.EnableMetadataEnrichment);
         Assert.True(defaults.Tmdb.EnablePosterDownloads);
         Assert.True(defaults.Tmdb.EnableEpisodeThumbnailDownloads);
-        Assert.True(defaults.Tmdb.EnableBuiltInPublicSource);
         Assert.Equal(string.Empty, defaults.Tmdb.CustomApiKey);
         Assert.Equal(string.Empty, defaults.Tmdb.CustomAccessToken);
         Assert.Equal(string.Empty, defaults.Tmdb.Language);
@@ -53,7 +52,6 @@ public sealed class JsonSettingsServiceTests : IDisposable
                 EnableMetadataEnrichment = false,
                 EnablePosterDownloads = false,
                 EnableEpisodeThumbnailDownloads = false,
-                EnableBuiltInPublicSource = false,
                 CustomApiKey = "custom-key",
                 CustomAccessToken = "custom-token",
                 Language = "en-US"
@@ -71,7 +69,6 @@ public sealed class JsonSettingsServiceTests : IDisposable
         Assert.False(reloaded.Tmdb.EnableMetadataEnrichment);
         Assert.False(reloaded.Tmdb.EnablePosterDownloads);
         Assert.False(reloaded.Tmdb.EnableEpisodeThumbnailDownloads);
-        Assert.False(reloaded.Tmdb.EnableBuiltInPublicSource);
         Assert.Equal("custom-key", reloaded.Tmdb.CustomApiKey);
         Assert.Equal("custom-token", reloaded.Tmdb.CustomAccessToken);
         Assert.Equal("en-US", reloaded.Tmdb.Language);

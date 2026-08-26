@@ -918,6 +918,15 @@ app.MapPost("/api/playback/progress", async (
     return updated ? Results.NoContent() : Results.NotFound();
 });
 
+app.MapGet("/api/playback/files/{fileId}/progress", async (
+    string fileId,
+    ILibraryRepository repository,
+    CancellationToken cancellationToken) =>
+{
+    var progress = await repository.GetPlaybackProgressAsync(fileId, cancellationToken);
+    return progress is null ? Results.NotFound() : Results.Ok(progress);
+});
+
 app.MapPost("/api/playback/watched", async (
     HttpRequest httpRequest,
     ILibraryRepository repository,
@@ -1375,17 +1384,25 @@ app.MapPost("/api/playback/files/{fileId}/cache/cancel", async (
     return status is null ? Results.NotFound() : Results.Ok(status);
 });
 
-app.MapPost("/api/playback/files/{fileId}/ticket", (string fileId) =>
+app.MapPost("/api/playback/files/{fileId}/ticket", async (
+    string fileId,
+    ILibraryRepository repository,
+    CancellationToken cancellationToken) =>
 {
     CleanupExpiredPlaybackTickets(playbackTickets);
     var token = RandomNumberGenerator.GetHexString(32);
     var expiresAt = DateTimeOffset.UtcNow.AddMinutes(30);
     playbackTickets[token] = new PlaybackAccessTicket(fileId, expiresAt);
+    var progress = await repository.GetPlaybackProgressAsync(fileId, cancellationToken)
+        ?? new PlaybackProgressState(0, 0, false);
 
     return Results.Ok(new
     {
         token,
         expiresAt,
+        positionSeconds = progress.PositionSeconds,
+        durationSeconds = progress.DurationSeconds,
+        isWatched = progress.IsWatched,
         streamUrl = $"/api/playback/files/{Uri.EscapeDataString(fileId)}/stream?ticket={Uri.EscapeDataString(token)}"
     });
 });
@@ -1837,13 +1854,28 @@ static bool TryAuthorizePlaybackTicket(
         return false;
     }
 
-    if (ticket.ExpiresAt <= DateTimeOffset.UtcNow)
+    var now = DateTimeOffset.UtcNow;
+    if (ticket.ExpiresAt <= now)
     {
         playbackTickets.TryRemove(token, out _);
         return false;
     }
 
-    return string.Equals(ticket.FileId, fileId, StringComparison.Ordinal);
+    if (!string.Equals(ticket.FileId, fileId, StringComparison.Ordinal))
+    {
+        return false;
+    }
+
+    // A long movie can issue Range requests for longer than the original
+    // 30-minute ticket lifetime. Refresh only active tickets that are close to
+    // expiry so the same stream URL remains usable without weakening the
+    // authentication check above.
+    if (ticket.ExpiresAt - now < TimeSpan.FromMinutes(10))
+    {
+        playbackTickets[token] = ticket with { ExpiresAt = now.AddMinutes(30) };
+    }
+
+    return true;
 }
 
 static bool TryResolvePlaybackTicketFileId(PathString path, out string fileId)

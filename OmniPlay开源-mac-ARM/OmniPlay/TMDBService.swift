@@ -42,18 +42,10 @@ private struct TMDBTranslationsResponse: Codable {
 enum TMDBCredentialSource: Equatable {
     case customAPIKey(String)
     case customBearerToken(String)
-    case publicAPIKey(String)
     case none
 
     var isAvailable: Bool {
         self != .none
-    }
-
-    var isPublicShared: Bool {
-        if case .publicAPIKey = self {
-            return true
-        }
-        return false
     }
 }
 
@@ -64,17 +56,17 @@ struct TMDBConnectionCheckResult {
 
 class TMDBService {
     static let shared = TMDBService()
-    static let publicSourceDefaultsKey = "tmdbUsePublicSource"
-    static let sharedPublicAPIKey = ""
-    
-    private let baseURL = "https://api.themoviedb.org/3"
+
+    static let officialAPIBaseURL = URL(string: "https://api.themoviedb.org/3")!
+    static let proxyURLDefaultsKey = "tmdbProxyURL"
+
+    private var baseURL: String { Self.officialAPIBaseURL.absoluteString }
     private var tvSeasonCountCache: [Int: Int] = [:]
     private var tvSeasonAirYearCache: [String: Int] = [:]
     private let seasonCacheQueue = DispatchQueue(label: "nan.omniplay.tmdb.season-cache")
     private var localizedResultCache: [String: TMDBResult] = [:]
     private let localizedCacheQueue = DispatchQueue(label: "nan.omniplay.tmdb.localized-cache")
     private let customRateLimiter = TMDBRateLimiter(requestsPerSecond: 3.2)
-    private let publicRateLimiter = TMDBRateLimiter(requestsPerSecond: 1.5)
     private let tmdbSession: URLSession
     
     private init() {
@@ -89,11 +81,6 @@ class TMDBService {
         tmdbSession = URLSession(configuration: config)
     }
 
-    static func isPublicSourceEnabled(in defaults: UserDefaults = .standard) -> Bool {
-        guard defaults.object(forKey: publicSourceDefaultsKey) != nil else { return true }
-        return defaults.bool(forKey: publicSourceDefaultsKey)
-    }
-
     static func credentialSource(customAPIInput: String? = nil, defaults: UserDefaults = .standard) -> TMDBCredentialSource {
         let explicitInput = customAPIInput?.trimmingCharacters(in: .whitespacesAndNewlines)
         let userKey = (explicitInput?.isEmpty == false ? explicitInput! : (defaults.string(forKey: "tmdbApiKey") ?? ""))
@@ -101,21 +88,76 @@ class TMDBService {
         if !userKey.isEmpty {
             return userKey.count > 50 ? .customBearerToken(userKey) : .customAPIKey(userKey)
         }
-        return isPublicSourceEnabled(in: defaults) && !sharedPublicAPIKey.isEmpty ? .publicAPIKey(sharedPublicAPIKey) : .none
+        return .none
     }
 
     func currentCredentialSource() -> TMDBCredentialSource {
         Self.credentialSource()
     }
 
-    func checkConnection(customAPIInput: String? = nil) async -> TMDBConnectionCheckResult {
+    static func proxyAPIBaseURL(
+        customProxyURL: String? = nil,
+        defaults: UserDefaults = .standard
+    ) -> URL? {
+        let input = (customProxyURL ?? defaults.string(forKey: proxyURLDefaultsKey) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else { return officialAPIBaseURL }
+
+        let valueWithScheme = input.contains("://") ? input : "https://\(input)"
+        guard var components = URLComponents(string: valueWithScheme),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              components.host?.isEmpty == false,
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil else {
+            return nil
+        }
+
+        components.scheme = scheme
+        var path = components.percentEncodedPath
+        while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
+        if path.isEmpty { path = "/3" }
+        else if path != "/3" && !path.hasSuffix("/3") { path += "/3" }
+        components.percentEncodedPath = path
+        return components.url
+    }
+
+    static func resolvedAPIURL(
+        for officialURLString: String,
+        customProxyURL: String? = nil,
+        defaults: UserDefaults = .standard
+    ) -> URL? {
+        guard let sourceURL = URL(string: officialURLString),
+              let source = URLComponents(url: sourceURL, resolvingAgainstBaseURL: false),
+              let proxyBaseURL = proxyAPIBaseURL(customProxyURL: customProxyURL, defaults: defaults),
+              var destination = URLComponents(url: proxyBaseURL, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+
+        let sourcePath = source.percentEncodedPath
+        let endpointPath = sourcePath == "/3" ? "" : (sourcePath.hasPrefix("/3/") ? String(sourcePath.dropFirst(2)) : sourcePath)
+        let basePath = destination.percentEncodedPath.hasSuffix("/")
+            ? String(destination.percentEncodedPath.dropLast())
+            : destination.percentEncodedPath
+        destination.percentEncodedPath = basePath + endpointPath
+        destination.percentEncodedQuery = source.percentEncodedQuery
+        return destination.url
+    }
+
+    func checkConnection(customAPIInput: String? = nil, customProxyURL: String? = nil) async -> TMDBConnectionCheckResult {
         let credential = Self.credentialSource(customAPIInput: customAPIInput)
         guard credential.isAvailable else {
             return TMDBConnectionCheckResult(isConnected: false, message: "当前未配置可用的 TMDB API。")
         }
 
+        guard Self.proxyAPIBaseURL(customProxyURL: customProxyURL) != nil else {
+            return TMDBConnectionCheckResult(isConnected: false, message: "TMDB 代理网关地址无效。")
+        }
+
         let urlString = "\(baseURL)/configuration"
-        guard let request = makeRequest(urlString: urlString, credential: credential) else {
+        guard let request = makeRequest(urlString: urlString, credential: credential, customProxyURL: customProxyURL) else {
             return TMDBConnectionCheckResult(isConnected: false, message: "TMDB 请求地址无效。")
         }
 
@@ -480,7 +522,7 @@ class TMDBService {
         let credential = currentCredentialSource()
         guard credential.isAvailable else { return nil }
 
-        let maxAttempts = credential.isPublicShared ? 3 : 2
+        let maxAttempts = 2
         for attempt in 0..<maxAttempts {
             await rateLimiter(for: credential).acquire()
             guard let request = makeRequest(urlString: urlString, credential: credential) else { return nil }
@@ -489,17 +531,22 @@ class TMDBService {
             if http.statusCode != 429 || attempt == maxAttempts - 1 {
                 return (data, http)
             }
-            try? await Task.sleep(nanoseconds: retryDelayNanoseconds(for: http, attempt: attempt, isPublicSource: credential.isPublicShared))
+            try? await Task.sleep(nanoseconds: retryDelayNanoseconds(for: http, attempt: attempt))
         }
         return nil
     }
 
     private func rateLimiter(for credential: TMDBCredentialSource) -> TMDBRateLimiter {
-        credential.isPublicShared ? publicRateLimiter : customRateLimiter
+        customRateLimiter
     }
 
-    private func makeRequest(urlString: String, credential: TMDBCredentialSource) -> URLRequest? {
-        guard let url = URL(string: authenticatedURLString(for: urlString, credential: credential)) else {
+    private func makeRequest(
+        urlString: String,
+        credential: TMDBCredentialSource,
+        customProxyURL: String? = nil
+    ) -> URLRequest? {
+        guard let resolvedURL = Self.resolvedAPIURL(for: urlString, customProxyURL: customProxyURL),
+              let url = authenticatedURL(for: resolvedURL, credential: credential) else {
             return nil
         }
         var request = URLRequest(url: url)
@@ -511,23 +558,28 @@ class TMDBService {
         return request
     }
 
-    private func authenticatedURLString(for urlString: String, credential: TMDBCredentialSource) -> String {
+    private func authenticatedURL(for url: URL, credential: TMDBCredentialSource) -> URL? {
         switch credential {
-        case .customAPIKey(let key), .publicAPIKey(let key):
-            return urlString + (urlString.contains("?") ? "&" : "?") + "api_key=\(key)"
+        case .customAPIKey(let key):
+            guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+            var queryItems = components.queryItems ?? []
+            queryItems.removeAll { $0.name == "api_key" }
+            queryItems.append(URLQueryItem(name: "api_key", value: key))
+            components.queryItems = queryItems
+            return components.url
         case .customBearerToken, .none:
-            return urlString
+            return url
         }
     }
 
-    private func retryDelayNanoseconds(for response: HTTPURLResponse, attempt: Int, isPublicSource: Bool) -> UInt64 {
+    private func retryDelayNanoseconds(for response: HTTPURLResponse, attempt: Int) -> UInt64 {
         if let retryAfter = response.value(forHTTPHeaderField: "Retry-After")?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            let seconds = Double(retryAfter),
            seconds > 0 {
             return UInt64(seconds * 1_000_000_000)
         }
-        let baseDelaySeconds = isPublicSource ? 3.0 : 1.5
+        let baseDelaySeconds = 1.5
         return UInt64(baseDelaySeconds * Double(attempt + 1) * 1_000_000_000)
     }
 
@@ -535,7 +587,7 @@ class TMDBService {
         let appLang = UserDefaults.standard.string(forKey: "appLanguage") ?? "zh-Hans"
         guard appLang != "en" else { return items }
         let targetLanguage = "zh-CN"
-        let detailLocalizationLimit = currentCredentialSource().isPublicShared ? 6 : 12
+        let detailLocalizationLimit = 12
 
         var localized: [TMDBResult] = []
         localized.reserveCapacity(items.count)

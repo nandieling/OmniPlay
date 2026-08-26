@@ -111,7 +111,6 @@ public sealed class SettingsViewModelTests
                 EnableMetadataEnrichment = false,
                 EnablePosterDownloads = false,
                 EnableEpisodeThumbnailDownloads = false,
-                EnableBuiltInPublicSource = false,
                 CustomApiKey = "custom-key",
                 CustomAccessToken = "custom-token",
                 Language = " en-US "
@@ -126,13 +125,29 @@ public sealed class SettingsViewModelTests
         Assert.True(viewModel.EnableTmdbMetadataEnrichment);
         Assert.True(viewModel.EnableTmdbPosterDownloads);
         Assert.True(viewModel.EnableTmdbEpisodeThumbnailDownloads);
-        Assert.False(viewModel.EnableBuiltInPublicTmdbSource);
         Assert.Equal("custom-key", viewModel.CustomTmdbApiKey);
         Assert.Equal("custom-token", viewModel.CustomTmdbAccessToken);
         Assert.Equal("custom-token", viewModel.CustomTmdbCredential);
         Assert.Equal("en-US", viewModel.TmdbLanguage);
         Assert.Equal(PlaybackPreferenceSettings.DefaultAudioSmart, viewModel.DefaultAudioTrackMode);
         Assert.Equal(PlaybackPreferenceSettings.DefaultSubtitleChinese, viewModel.DefaultSubtitleTrack);
+    }
+
+    [Fact]
+    public async Task LoadAsync_HandlesNullLuckyStunSettingsFromOldConfig()
+    {
+        var settingsService = new FakeSettingsService(new AppSettings
+        {
+            LuckyStun = null!
+        });
+        var viewModel = CreateViewModel(settingsService: settingsService);
+
+        await viewModel.LoadAsync();
+
+        Assert.Empty(viewModel.LuckyStunManagementUrl);
+        Assert.Empty(viewModel.LuckyStunUsername);
+        Assert.False(viewModel.LuckyStunAutoUpdate);
+        Assert.Equal(30, viewModel.LuckyStunUpdateIntervalMinutes);
     }
 
     [Fact]
@@ -176,7 +191,6 @@ public sealed class SettingsViewModelTests
         viewModel.ShowMediaSourceRealPath = false;
         viewModel.EnableLocalMetadataImport = true;
         viewModel.EnableLocalMetadataExport = true;
-        viewModel.EnableBuiltInPublicTmdbSource = false;
         viewModel.CustomTmdbCredential = "  custom-key  ";
         viewModel.SelectedTmdbLanguageOption = viewModel.TmdbLanguageOptions.Single(option => option.Value == "en-US");
         viewModel.SelectedDefaultAudioTrackOption = viewModel.DefaultAudioTrackOptions.Single(option => option.Value == PlaybackPreferenceSettings.AudioJapanese);
@@ -190,7 +204,6 @@ public sealed class SettingsViewModelTests
         Assert.False(savedSettings.ShowMediaSourceRealPath);
         Assert.True(savedSettings.LocalMetadata.EnableLocalMetadataImport);
         Assert.True(savedSettings.LocalMetadata.EnableLocalMetadataExport);
-        Assert.False(savedSettings.Tmdb.EnableBuiltInPublicSource);
         Assert.Equal("custom-key", savedSettings.Tmdb.CustomApiKey);
         Assert.Equal("en-US", savedSettings.Tmdb.Language);
         Assert.Equal(PlaybackPreferenceSettings.AudioJapanese, savedSettings.Playback.DefaultAudioTrack);
@@ -201,7 +214,6 @@ public sealed class SettingsViewModelTests
         Assert.False(viewModel.ShowMediaSourceRealPath);
         Assert.True(viewModel.EnableLocalMetadataImport);
         Assert.True(viewModel.EnableLocalMetadataExport);
-        Assert.False(viewModel.EnableBuiltInPublicTmdbSource);
         Assert.Equal("custom-key", viewModel.CustomTmdbCredential);
         Assert.Equal("en-US", viewModel.TmdbLanguage);
         Assert.Equal(PlaybackPreferenceSettings.AudioJapanese, viewModel.DefaultAudioTrackMode);

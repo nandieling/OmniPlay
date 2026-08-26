@@ -25,24 +25,47 @@ enum MediaSourceProtocol: String, Codable, CaseIterable {
             }
             return value
         case .webdav, .plex, .emby, .jellyfin, .omniplayDocker:
-            guard let url = URL(string: trimmed) else { return trimmed }
-            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-            if components?.host?.caseInsensitiveCompare("localhost") == .orderedSame {
-                components?.host = "127.0.0.1"
+            // The address is often copied from a NAS UI as `nas:45722` or
+            // `http://nas:45722/api/health`.  URL(string:) treats the former
+            // as a custom URL scheme and the latter makes every subsequent
+            // API request become `/api/health/api/...`.  Normalize both forms
+            // here so discovery, manual setup and background sync use exactly
+            // the same origin.
+            var candidate = trimmed
+            if !candidate.contains("://") {
+                candidate = "http://\(candidate)"
             }
-            if components?.scheme?.lowercased() == "http", components?.port == nil {
+            guard let url = URL(string: candidate),
+                  var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                  let scheme = components.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  components.host?.isEmpty == false else {
+                return trimmed
+            }
+
+            let path = components.path
+            if let apiRange = path.range(of: "/api", options: .backwards),
+               apiRange.upperBound == path.endIndex || path[apiRange.upperBound] == "/" {
+                components.path = String(path[..<apiRange.lowerBound])
+            }
+            components.query = nil
+            components.fragment = nil
+            if components.host?.caseInsensitiveCompare("localhost") == .orderedSame {
+                components.host = "127.0.0.1"
+            }
+            if scheme == "http", components.port == nil {
                 switch self {
                 case .plex:
-                    components?.port = 32400
+                    components.port = 32400
                 case .emby, .jellyfin:
-                    components?.port = 8096
+                    components.port = 8096
                 case .omniplayDocker:
-                    components?.port = 45722
+                    components.port = 45722
                 default:
                     break
                 }
             }
-            var normalized = components?.url?.absoluteString ?? url.absoluteString
+            var normalized = components.url?.absoluteString ?? url.absoluteString
             if normalized.hasSuffix("/") {
                 normalized.removeLast()
             }
@@ -117,13 +140,133 @@ nonisolated struct MediaServerAuthConfig: Codable {
     }
 }
 
+nonisolated struct MediaSourceExternalAddress: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var address: String
+    var label: String = ""
+    var useLuckyStun: Bool = false
+    var luckyRuleId: String = ""
+    var luckyRuleName: String = ""
+
+    var displayLabel: String {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "外网" : trimmed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case address, label, useLuckyStun, luckyRuleId, luckyRuleName
+    }
+
+    init(address: String = "", label: String = "", useLuckyStun: Bool = false, luckyRuleId: String = "", luckyRuleName: String = "") {
+        self.address = address
+        self.label = label
+        self.useLuckyStun = useLuckyStun
+        self.luckyRuleId = luckyRuleId
+        self.luckyRuleName = luckyRuleName
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.address = try container.decodeIfPresent(String.self, forKey: .address) ?? ""
+        self.label = try container.decodeIfPresent(String.self, forKey: .label) ?? ""
+        self.useLuckyStun = try container.decodeIfPresent(Bool.self, forKey: .useLuckyStun) ?? false
+        self.luckyRuleId = try container.decodeIfPresent(String.self, forKey: .luckyRuleId) ?? ""
+        self.luckyRuleName = try container.decodeIfPresent(String.self, forKey: .luckyRuleName) ?? ""
+    }
+}
+
+nonisolated struct LuckyStunSourceConfiguration: Codable, Hashable {
+    var managementURL: String
+    var username: String
+    var password: String
+    var ruleID: String
+    var ruleName: String
+    var autoUpdate: Bool
+    var updateIntervalMinutes: Int
+    var lastUpdatedAt: Double
+    var pathSuffix: String
+
+    init(
+        managementURL: String = "",
+        username: String = "",
+        password: String = "",
+        ruleID: String = "",
+        ruleName: String = "",
+        autoUpdate: Bool = true,
+        updateIntervalMinutes: Int = 30,
+        lastUpdatedAt: Double = 0,
+        pathSuffix: String = ""
+    ) {
+        self.managementURL = managementURL
+        self.username = username
+        self.password = password
+        self.ruleID = ruleID
+        self.ruleName = ruleName
+        self.autoUpdate = autoUpdate
+        self.updateIntervalMinutes = updateIntervalMinutes
+        self.lastUpdatedAt = lastUpdatedAt
+        self.pathSuffix = pathSuffix
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case managementURL, username, password, ruleID, ruleName
+        case autoUpdate, updateIntervalMinutes, lastUpdatedAt, pathSuffix
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        managementURL = try container.decodeIfPresent(String.self, forKey: .managementURL) ?? ""
+        username = try container.decodeIfPresent(String.self, forKey: .username) ?? ""
+        password = try container.decodeIfPresent(String.self, forKey: .password) ?? ""
+        ruleID = try container.decodeIfPresent(String.self, forKey: .ruleID) ?? ""
+        ruleName = try container.decodeIfPresent(String.self, forKey: .ruleName) ?? ""
+        autoUpdate = try container.decodeIfPresent(Bool.self, forKey: .autoUpdate) ?? true
+        updateIntervalMinutes = try container.decodeIfPresent(Int.self, forKey: .updateIntervalMinutes) ?? 30
+        lastUpdatedAt = try container.decodeIfPresent(Double.self, forKey: .lastUpdatedAt) ?? 0
+        pathSuffix = try container.decodeIfPresent(String.self, forKey: .pathSuffix) ?? ""
+    }
+}
+
+nonisolated struct MediaSourceAddressConfiguration: Codable, Hashable {
+    var localAddress: String
+    var localLabel: String
+    var externalAddresses: [MediaSourceExternalAddress]
+    var activeAddress: String
+    var activeLabel: String
+    var luckyStun: LuckyStunSourceConfiguration?
+
+    private enum CodingKeys: String, CodingKey {
+        case localAddress, localLabel, externalAddresses, activeAddress, activeLabel, luckyStun
+    }
+
+    init(localAddress: String = "", localLabel: String = "局域网", externalAddresses: [MediaSourceExternalAddress] = [], activeAddress: String = "", activeLabel: String = "", luckyStun: LuckyStunSourceConfiguration? = nil) {
+        self.localAddress = localAddress
+        self.localLabel = localLabel
+        self.externalAddresses = externalAddresses
+        self.activeAddress = activeAddress
+        self.activeLabel = activeLabel
+        self.luckyStun = luckyStun
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.localAddress = try container.decodeIfPresent(String.self, forKey: .localAddress) ?? ""
+        self.localLabel = try container.decodeIfPresent(String.self, forKey: .localLabel) ?? "局域网"
+        self.externalAddresses = try container.decodeIfPresent([MediaSourceExternalAddress].self, forKey: .externalAddresses) ?? []
+        self.activeAddress = try container.decodeIfPresent(String.self, forKey: .activeAddress) ?? ""
+        self.activeLabel = try container.decodeIfPresent(String.self, forKey: .activeLabel) ?? ""
+        self.luckyStun = try container.decodeIfPresent(LuckyStunSourceConfiguration.self, forKey: .luckyStun)
+    }
+}
+
 // 1. 媒体源
-struct MediaSource: Codable, FetchableRecord, PersistableRecord {
+nonisolated struct MediaSource: Codable, FetchableRecord, PersistableRecord {
     var id: Int64?
     var name: String
     var protocolType: String
     var baseUrl: String
     var authConfig: String?
+    var addressConfig: String? = nil
     var isEnabled: Bool = true
     var disabledAt: Double?
 
@@ -134,6 +277,38 @@ struct MediaSource: Codable, FetchableRecord, PersistableRecord {
     nonisolated func normalizedBaseURL() -> String {
         guard let kind = protocolKind else { return baseUrl }
         return kind.normalizedBaseURL(baseUrl)
+    }
+
+    nonisolated func addressConfiguration() -> MediaSourceAddressConfiguration {
+        var configuration = addressConfig.flatMap { value -> MediaSourceAddressConfiguration? in
+            guard let data = value.data(using: .utf8) else { return nil }
+            return try? JSONDecoder().decode(MediaSourceAddressConfiguration.self, from: data)
+        } ?? MediaSourceAddressConfiguration()
+        if configuration.localAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            configuration.localAddress = baseUrl
+        }
+        if configuration.activeAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            configuration.activeAddress = baseUrl
+        }
+        if configuration.activeLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            configuration.activeLabel = configuration.activeAddress.caseInsensitiveCompare(configuration.localAddress) == .orderedSame
+                ? configuration.localLabel
+                : ""
+        }
+        return configuration
+    }
+
+    nonisolated mutating func setAddressConfiguration(_ configuration: MediaSourceAddressConfiguration) {
+        guard let data = try? JSONEncoder().encode(configuration) else { return }
+        addressConfig = String(data: data, encoding: .utf8)
+    }
+
+    nonisolated var displayNameWithActiveLabel: String {
+        name
+    }
+
+    nonisolated var activeAddressLabel: String {
+        addressConfiguration().activeLabel
     }
 
     nonisolated func isValidConfiguration() -> Bool {

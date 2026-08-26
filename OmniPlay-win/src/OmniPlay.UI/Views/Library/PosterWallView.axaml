@@ -308,8 +308,11 @@
                         <DataTemplate>
                           <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,0,8">
                             <Grid ColumnDefinitions="*,Auto,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
-                              <TextBlock FontSize="15" FontWeight="SemiBold" Foreground="#1A1A1A" Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
-                              <Button Grid.Column="1" Margin="10,0,10,0" Classes="sourceAction" Command="{Binding $parent[UserControl].DataContext.ToggleSourceEnabledCommand}" CommandParameter="{Binding}" Content="{Binding ToggleActionText}" />
+                              <TextBlock FontSize="15" FontWeight="SemiBold" Foreground="#1A1A1A" Text="{Binding DisplayNameWithActiveLabel}" TextTrimming="CharacterEllipsis" />
+                              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                                <Button Classes="sourceAction" Command="{Binding $parent[UserControl].DataContext.CheckSourceConnectivityCommand}" CommandParameter="{Binding}" Content="检测连通性" />
+                                <Button Classes="sourceAction" Command="{Binding $parent[UserControl].DataContext.ToggleSourceEnabledCommand}" CommandParameter="{Binding}" Content="{Binding ToggleActionText}" />
+                              </StackPanel>
                               <Button Grid.Column="2" Classes="dangerAction" Command="{Binding $parent[UserControl].DataContext.RemoveSourceCommand}" CommandParameter="{Binding}" Content="移除" />
                               <StackPanel Grid.Row="1" Grid.ColumnSpan="3" Margin="0,8,0,0" Orientation="Horizontal" Spacing="8">
                                 <TextBlock Opacity="0.72" Foreground="#605E5C" Text="{Binding ProtocolLabel}" />
@@ -317,6 +320,7 @@
                                 <TextBlock Opacity="0.72" Foreground="#605E5C" Text="{Binding SourceStateText}" />
                               </StackPanel>
                               <TextBlock Grid.Row="2" Grid.ColumnSpan="3" Margin="0,6,0,0" IsVisible="{Binding $parent[UserControl].DataContext.ShowMediaSourceRealPath}" Opacity="0.62" Foreground="#605E5C" Text="{Binding BaseUrl}" TextWrapping="Wrap" />
+                              <TextBlock Grid.Row="3" Grid.ColumnSpan="3" Margin="0,6,0,0" Opacity="0.62" Foreground="#605E5C" Text="{Binding ActiveAddressLabel, StringFormat=当前入口标签：{0}}" />
                             </Grid>
                           </Border>
                         </DataTemplate>
@@ -327,7 +331,7 @@
                   <StackPanel Spacing="10">
                     <Button Classes="sourceAction" Command="{Binding AddFolderSourceCommand}" Content="添加本地文件夹" />
                     <Button Classes="sourceAction" Command="{Binding OpenManualNetworkLoginCommand}" Content="添加 SMB/WebDAV" />
-                    <Button Classes="sourceAction" Command="{Binding OpenMediaServerPanelCommand}" Content="添加 Plex/Emby/Jellyfin" />
+                    <Button Classes="sourceAction" Command="{Binding OpenMediaServerPanelCommand}" Content="添加 Docker/Plex/Emby/Jellyfin" />
                   </StackPanel>
                   <Border Height="1" Background="#E5E5E5" />
 
@@ -399,6 +403,62 @@
 
                   <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="16">
                     <StackPanel Spacing="12">
+                      <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="Lucky STUN 穿透地址" />
+                      <TextBlock Opacity="0.68" Foreground="#605E5C" TextWrapping="Wrap" Text="登录 Lucky 管理端读取指定规则的最新穿透地址，并同步到 OmniPlay Docker 媒体源。" />
+                      <StackPanel Spacing="5">
+                        <TextBlock Foreground="#323130" Text="Lucky 管理地址" />
+                        <TextBox Classes="popupSearchBox" Watermark="例如 http://192.168.1.1:16601" Text="{Binding Settings.LuckyStunManagementUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                      </StackPanel>
+                      <StackPanel Spacing="5">
+                        <TextBlock Foreground="#323130" Text="Lucky 账号" />
+                        <TextBox Classes="popupSearchBox" Watermark="请输入账号" Text="{Binding Settings.LuckyStunUsername, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                      </StackPanel>
+                      <StackPanel Spacing="5">
+                        <TextBlock Foreground="#323130" Text="Lucky 密码" />
+                        <TextBox Classes="popupSearchBox" PasswordChar="●" Watermark="请输入密码" Text="{Binding Settings.LuckyStunPassword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                      </StackPanel>
+                      <StackPanel Spacing="8">
+                        <TextBlock Foreground="#323130" Text="穿透地址指定规则" />
+                        <ComboBox Classes="popupSelect" ItemsSource="{Binding Settings.LuckyStunRules}" SelectedItem="{Binding Settings.SelectedLuckyStunRule, Mode=TwoWay}">
+                          <ComboBox.ItemTemplate>
+                            <DataTemplate>
+                              <StackPanel Spacing="2">
+                                <TextBlock Text="{Binding Name}" />
+                                <TextBlock Opacity="0.62" FontSize="12" Text="{Binding Address}" />
+                              </StackPanel>
+                            </DataTemplate>
+                          </ComboBox.ItemTemplate>
+                        </ComboBox>
+                      </StackPanel>
+                      <StackPanel Spacing="6" IsVisible="{Binding Settings.HasLuckyStunRules}">
+                        <TextBlock Foreground="#323130" Text="已读取的 Lucky STUN 规则" />
+                        <ItemsControl ItemsSource="{Binding Settings.LuckyStunRules}">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                              <Border Background="#FFFFFF" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="5" Padding="8" Margin="0,0,0,5">
+                                <StackPanel Spacing="2">
+                                  <TextBlock FontWeight="SemiBold" Text="{Binding Name}" />
+                                  <TextBlock Opacity="0.65" FontSize="12" Text="{Binding Address}" TextWrapping="Wrap" />
+                                </StackPanel>
+                              </Border>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </StackPanel>
+                      <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Classes="sourceAction" Command="{Binding Settings.RefreshLuckyStunCommand}" Content="登录检测并更新" />
+                        <CheckBox VerticalAlignment="Center" Foreground="#323130" IsChecked="{Binding Settings.LuckyStunAutoUpdate, Mode=TwoWay}" Content="定期自动更新" />
+                      </StackPanel>
+                      <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock VerticalAlignment="Center" Foreground="#323130" Text="更新周期（分钟）" />
+                        <NumericUpDown Minimum="5" Maximum="1440" Value="{Binding Settings.LuckyStunUpdateIntervalMinutes, Mode=TwoWay}" Width="110" />
+                      </StackPanel>
+                      <TextBlock Opacity="0.72" Foreground="#605E5C" TextWrapping="Wrap" Text="{Binding Settings.LuckyStunStatusMessage}" />
+                    </StackPanel>
+                  </Border>
+
+                  <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="16">
+                    <StackPanel Spacing="12">
                       <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="离线缓存" />
                       <TextBlock Opacity="0.72" Foreground="#605E5C" TextWrapping="Wrap" Text="{Binding Settings.OfflineCacheDirectory}" />
                       <Button Classes="sourceAction" Command="{Binding ChooseOfflineCacheDirectoryCommand}" Content="选择缓存位置" />
@@ -416,7 +476,6 @@
 
                   <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="16">
                     <StackPanel Spacing="14">
-                      <CheckBox Foreground="#323130" IsChecked="{Binding Settings.EnableBuiltInPublicTmdbSource, Mode=TwoWay}" Content="启用内置公共 TMDB 源（受限）" />
                       <StackPanel Spacing="8">
                         <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="自定义 TMDB API" />
                         <TextBox Classes="popupSearchBox" Watermark="API Key 或 Read Access Token" Text="{Binding Settings.CustomTmdbCredential, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
@@ -526,7 +585,7 @@
                       <Border Background="#FFF6E7" BorderBrush="#F0D7A1" BorderThickness="1" CornerRadius="6" Padding="12">
                         <StackPanel Spacing="6">
                           <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="TMDB 归属与限制" />
-                          <TextBlock Opacity="0.82" Foreground="#323130" TextWrapping="Wrap" Text="内置公共源是共享 TMDB Key，仅提供低频、轻量刮削。为遵守 TMDB 官方要求，公共源会限制搜索请求量，不补全单集剧照；大批量扫库或完整刮削请填写你自己的 API Key。" />
+                          <TextBlock Opacity="0.82" Foreground="#323130" TextWrapping="Wrap" Text="TMDB 元数据和图片刮削需要配置你自己的 API Key 或 Read Access Token；也可以通过环境变量提供凭据。" />
                           <TextBlock Opacity="0.72" Foreground="#323130" TextWrapping="Wrap" Text="This product uses the TMDB API but is not endorsed or certified by TMDB." />
                         </StackPanel>
                       </Border>
@@ -581,7 +640,7 @@
                                 <Rectangle.Fill><ImageBrush Source="{Binding PosterPath, Converter={StaticResource ImagePathToBitmapConverter}}" Stretch="UniformToFill" /></Rectangle.Fill>
                               </Rectangle>
                               <Border Classes="ratingBadge" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="10">
-                                <TextBlock Foreground="#B45309" FontSize="13" FontWeight="Bold" Text="{Binding VoteAverage, StringFormat={}{0:F1}}" />
+                                <TextBlock Foreground="#B45309" FontSize="13" FontWeight="Bold" Text="{Binding RatingDisplayText}" TextTrimming="CharacterEllipsis" />
                               </Border>
                             </Grid>
                           </Button>
@@ -666,7 +725,7 @@
                                 <Rectangle.Fill><ImageBrush Source="{Binding PosterPath, Converter={StaticResource ImagePathToBitmapConverter}}" Stretch="UniformToFill" /></Rectangle.Fill>
                               </Rectangle>
                               <Border Classes="ratingBadge" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="10">
-                                <TextBlock Foreground="#B45309" FontSize="13" FontWeight="Bold" Text="{Binding VoteAverage, StringFormat={}{0:F1}}" />
+                                <TextBlock Foreground="#B45309" FontSize="13" FontWeight="Bold" Text="{Binding RatingDisplayText}" TextTrimming="CharacterEllipsis" />
                               </Border>
                             </Grid>
                           </Button>
@@ -786,6 +845,25 @@
             </StackPanel>
           </Grid>
 
+          <StackPanel Spacing="16" IsVisible="{Binding !IsDetailSeries}">
+            <TextBlock FontSize="24" FontWeight="Bold" Foreground="#1A1A1A" Text="版本 / 文件" />
+            <ItemsControl ItemsSource="{Binding DetailFiles}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="10" Margin="0,0,0,10">
+                    <Button Background="Transparent" BorderThickness="0" HorizontalContentAlignment="Stretch" Command="{Binding $parent[UserControl].DataContext.SelectDetailFileCommand}" CommandParameter="{Binding}" Padding="18,14">
+                      <StackPanel Spacing="5">
+                        <TextBlock FontSize="17" FontWeight="SemiBold" Foreground="#1A1A1A" Text="{Binding FileName}" TextWrapping="Wrap" />
+                        <TextBlock FontSize="13" Foreground="#605E5C" Text="{Binding RelativePath}" TextWrapping="Wrap" />
+                        <TextBlock FontSize="13" Foreground="#605E5C" Text="{Binding PositionText} / {Binding DurationText} · {Binding ProgressText}" TextWrapping="Wrap" />
+                      </StackPanel>
+                    </Button>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+
           <StackPanel Spacing="20" IsVisible="{Binding IsDetailSeries}">
             <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
               <!-- ====== 修改季数下拉框宽度 ====== -->
@@ -889,7 +967,31 @@
                 <TextBlock FontSize="18" FontWeight="SemiBold" Foreground="#1A1A1A" Text="{Binding NetworkLoginTitle}" />
                 <Button Grid.Column="1" Classes="dangerAction" Command="{Binding CloseNetworkLoginCommand}" Content="取消" />
               </Grid>
+              <TextBlock Foreground="#323130" Text="局域网地址" IsVisible="{Binding IsNetworkCredentialFormVisible}" />
               <TextBox Classes="popupSearchBox" Watermark="SMB 路径或 WebDAV 地址" Text="{Binding PendingNetworkBaseUrl}" IsVisible="{Binding IsNetworkCredentialFormVisible}" />
+              <TextBlock Foreground="#323130" Text="外网地址（可选，可添加多个）" IsVisible="{Binding IsNetworkCredentialFormVisible}" />
+              <ItemsControl ItemsSource="{Binding PendingExternalAddresses}" IsVisible="{Binding IsNetworkCredentialFormVisible}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,0,0,8">
+                      <StackPanel Spacing="8">
+                        <Grid ColumnDefinitions="*,*">
+                          <TextBox Classes="popupSearchBox" Watermark="外网地址" Text="{Binding Address, Mode=TwoWay}" />
+                          <TextBox Grid.Column="1" Margin="8,0,0,0" Classes="popupSearchBox" Watermark="自定义标签" Text="{Binding Label, Mode=TwoWay}" />
+                        </Grid>
+                        <Grid ColumnDefinitions="Auto,*">
+                          <CheckBox Foreground="#323130" IsChecked="{Binding UseLuckyStun, Mode=TwoWay}" Content="指定 Lucky STUN 规则" />
+                          <ComboBox Grid.Column="1" Margin="8,0,0,0" Classes="popupSelect" ItemsSource="{Binding $parent[UserControl].DataContext.Settings.LuckyStunRules}" SelectedValue="{Binding LuckyRuleId, Mode=TwoWay}" SelectedValueBinding="{Binding Id}" IsEnabled="{Binding UseLuckyStun}">
+                            <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Name}" /></DataTemplate></ComboBox.ItemTemplate>
+                          </ComboBox>
+                        </Grid>
+                        <Button Classes="dangerAction" HorizontalAlignment="Right" Command="{Binding $parent[UserControl].DataContext.RemovePendingExternalAddressCommand}" CommandParameter="{Binding}" Content="删除此地址" />
+                      </StackPanel>
+                    </Border>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+              <Button Classes="sourceAction" HorizontalAlignment="Left" Command="{Binding AddPendingExternalAddressCommand}" Content="添加外网地址" IsVisible="{Binding IsNetworkCredentialFormVisible}" />
               <Grid ColumnDefinitions="*,*" IsVisible="{Binding IsNetworkCredentialFormVisible}">
                 <TextBox Classes="popupSearchBox" Watermark="用户名（可选）" Text="{Binding PendingNetworkUsername}" />
                 <Grid Grid.Column="1" Margin="10,0,0,0" ColumnDefinitions="*,Auto">
@@ -1072,6 +1174,17 @@
                   <TextBox Classes="popupSearchBox" Watermark="0.0 - 10.0" Text="{Binding PosterEditVoteAverage}" />
                 </StackPanel>
               </Grid>
+
+              <Border Background="#F9F9F9" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="14,12">
+                <StackPanel Spacing="10">
+                  <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="豆瓣手动匹配" />
+                  <Grid ColumnDefinitions="*,Auto">
+                    <TextBox Classes="popupSearchBox" Watermark="豆瓣 subject ID 或链接" Text="{Binding PosterDoubanSubject}" />
+                    <Button Grid.Column="1" Margin="10,0,0,0" Classes="sourceAction" Command="{Binding BindPosterDoubanCommand}" Content="绑定豆瓣" />
+                  </Grid>
+                  <TextBlock FontSize="13" Foreground="#605E5C" Text="{Binding PosterDoubanStatus}" TextWrapping="Wrap" />
+                </StackPanel>
+              </Border>
 
               <StackPanel Spacing="8">
                 <TextBlock FontWeight="SemiBold" Foreground="#1A1A1A" Text="简介" />

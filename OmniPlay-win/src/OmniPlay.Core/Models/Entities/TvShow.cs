@@ -14,6 +14,8 @@ public sealed class TvShow
 
     public double? VoteAverage { get; set; }
 
+    public double? DoubanRating { get; set; }
+
     public bool IsLocked { get; set; }
 
     public string? ProductionCountryCodes { get; set; }

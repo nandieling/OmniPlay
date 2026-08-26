@@ -4,10 +4,11 @@ import GRDB
 struct MovieSearchModalView: View {
     let movie: Movie
     @Environment(\.dismiss) var dismiss
-    
+
     @State private var searchQuery: String = ""
     @State private var searchYear: String = ""
     @State private var originalFilename: String = "正在加载源文件信息..."
+    @State private var doubanMetadata: DoubanMetadata? = nil
     
     @State private var searchResults: [TMDBResult] = []
     @State private var isSearching = false
@@ -21,7 +22,7 @@ struct MovieSearchModalView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("重新匹配 TMDB").font(.title2).fontWeight(.bold)
+                Text("手动匹配").font(.title2).fontWeight(.bold)
                 Spacer()
                 Button(action: { dismiss() }) { Image(systemName: "xmark.circle.fill").font(.title2).foregroundColor(.gray) }.buttonStyle(.plain)
             }
@@ -36,53 +37,73 @@ struct MovieSearchModalView: View {
                         .padding(10).frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.blue.opacity(0.1)).cornerRadius(8).textSelection(.enabled)
                 }
-                
-                HStack(spacing: 12) {
-                    TextField("输入正确的影视名称...", text: $searchQuery)
-                        .textFieldStyle(RoundedBorderTextFieldStyle())
-                    
-                    TextField("年份(可选)", text: $searchYear)
-                        .textFieldStyle(RoundedBorderTextFieldStyle())
-                        .frame(width: 80)
-                    
-                    Button("搜索") { performSearch() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isSearching || searchQuery.isEmpty)
-                        .keyboardShortcut(.defaultAction)
-                }
-                
-                if isSearching {
-                    ProgressView("正在向 TMDB 请求数据...").frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if !errorMessage.isEmpty {
-                    Text(errorMessage).foregroundColor(.red).frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if searchResults.isEmpty {
-                    Text("暂无搜索结果，请输入关键字后回车开始匹配").foregroundColor(.gray).frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    List(searchResults, id: \.id) { result in
-                        HStack(spacing: 12) {
-                            CachedPosterView(posterPath: result.posterPath)
-                                .frame(width: 50, height: 75).cornerRadius(6)
-                            
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(displayTitle(for: result)).font(.headline)
-                                let displayDate = result.releaseDate ?? result.firstAirDate ?? ""
-                                Text(String(displayDate.prefix(4))).font(.subheadline).foregroundColor(.secondary)
-                                if let overview = result.overview, !overview.isEmpty {
-                                    Text(overview).font(.caption).foregroundColor(.gray).lineLimit(2)
-                                }
-                            }
-                            Spacer()
-                            Button("关联此项") { saveResult(result) }.buttonStyle(.bordered)
-                        }
-                        .padding(.vertical, 4)
+
+                VStack(alignment: .leading, spacing: 15) {
+                    HStack(spacing: 12) {
+                        TextField("输入正确的影视名称...", text: $searchQuery)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+
+                        TextField("年份(可选)", text: $searchYear)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .frame(width: 80)
+
+                        Button("搜索") { performSearch() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(isSearching || searchQuery.isEmpty)
+                            .keyboardShortcut(.defaultAction)
                     }
-                    .listStyle(.plain)
+
+                    DoubanBindingPanel(
+                        movie: movie,
+                        existingMetadata: doubanMetadata,
+                        onSaved: { metadata in
+                            doubanMetadata = metadata
+                        },
+                        onRemoved: {
+                            doubanMetadata = nil
+                        },
+                        showsTitle: false,
+                        usesFlexibleSpacer: false
+                    )
+
+                    Divider()
+
+                    if isSearching {
+                        ProgressView("正在向 TMDB 请求数据...").frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if !errorMessage.isEmpty {
+                        Text(errorMessage).foregroundColor(.red).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if searchResults.isEmpty {
+                        Text("暂无搜索结果，请输入关键字后回车开始匹配").foregroundColor(.gray).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        List(searchResults, id: \.id) { result in
+                            HStack(spacing: 12) {
+                                CachedPosterView(posterPath: result.posterPath)
+                                    .frame(width: 50, height: 75).cornerRadius(6)
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(displayTitle(for: result)).font(.headline)
+                                    let displayDate = result.releaseDate ?? result.firstAirDate ?? ""
+                                    Text(String(displayDate.prefix(4))).font(.subheadline).foregroundColor(.secondary)
+                                    if let overview = result.overview, !overview.isEmpty {
+                                        Text(overview).font(.caption).foregroundColor(.gray).lineLimit(2)
+                                    }
+                                }
+                                Spacer()
+                                Button("关联此项") { saveResult(result) }.buttonStyle(.bordered)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                        .listStyle(.plain)
+                    }
                 }
             }
             .padding(20)
         }
-        .frame(width: 600, height: 500)
-        .onAppear { fetchOriginalFile() }
+        .frame(width: 640, height: 650)
+        .onAppear {
+            fetchOriginalFile()
+            loadDoubanMetadata()
+        }
     }
     
     private func performSearch() {
@@ -180,16 +201,16 @@ struct MovieSearchModalView: View {
         
         Task {
             do {
-                let generatedTasks = try await AppDatabase.shared.dbQueue.write { db -> [(String, String, Int, Int)] in
-                    var tempTasks: [(String, String, Int, Int)] = []
+                let generatedTasks = try await AppDatabase.shared.dbQueue.write { db -> [(String, String, Int64?, Int, Int)] in
+                    var tempTasks: [(String, String, Int64?, Int, Int)] = []
                     let newMovie = Movie(id: resultId, title: resultTitle, releaseDate: resultReleaseDate, overview: resultOverview, posterPath: resultPoster, voteAverage: resultVoteAverage, isLocked: true)
                     
                     if try Movie.fetchOne(db, key: resultId) != nil { try newMovie.update(db) } else { try newMovie.insert(db) }
                     
-                    let seedFiles = try VideoFile.filter(Column("movieId") == oldMovieId).fetchAll(db)
+                    let seedFiles = try VideoFile.fetchVisibleFiles(movieId: oldMovieId, in: db)
                     let sourceIds = Set(seedFiles.map(\.sourceId))
                     let parentFolders = Set(seedFiles.map { (($0.relativePath as NSString).deletingLastPathComponent) })
-                    let siblingFiles = try VideoFile.fetchAll(db).filter { file in
+                    let siblingFiles = try VideoFile.fetchAllVisible(in: db).filter { file in
                         sourceIds.contains(file.sourceId) &&
                         parentFolders.contains((file.relativePath as NSString).deletingLastPathComponent) &&
                         (file.movieId == oldMovieId || file.mediaType == "unmatched" || (file.movieId ?? 0) < 0)
@@ -215,8 +236,16 @@ struct MovieSearchModalView: View {
                         if isTVShow {
                             let parsed = MediaNameParser.parseEpisodeInfo(from: file.fileName, fallbackIndex: index)
                             let oldImageURL = localThumbDirectory.appendingPathComponent("\(file.id).jpg"); try? FileManager.default.removeItem(at: oldImageURL)
-                            tempTasks.append((file.id, resultTitle, parsed.season, parsed.episode))
+                            tempTasks.append((file.id, resultTitle, resultId, parsed.season, parsed.episode))
                         }
+                    }
+                    if let oldMovieId,
+                       oldMovieId != resultId,
+                       var douban = try DoubanMetadata.fetchOne(db, key: oldMovieId) {
+                        _ = try DoubanMetadata.deleteOne(db, key: oldMovieId)
+                        _ = try DoubanMetadata.deleteOne(db, key: resultId)
+                        douban.movieId = resultId
+                        try douban.insert(db)
                     }
                     if oldMovieId != resultId { let remainingFilesCount = try VideoFile.filter(Column("movieId") == oldMovieId).fetchCount(db); if remainingFilesCount == 0 { _ = try Movie.deleteOne(db, key: oldMovieId) } }
                     return tempTasks
@@ -233,16 +262,14 @@ struct MovieSearchModalView: View {
         Task {
             do {
                 let currentMovieId = movie.id
-                // 🌟 修复警告：去除不必要的 await，因为 dbQueue.read 是同步执行的！
-                let row = try AppDatabase.shared.dbQueue.read { db -> Row? in
-                    return try Row.fetchOne(db, sql: "SELECT fileName, relativePath FROM videoFile WHERE movieId = ?", arguments: [currentMovieId])
+                let file = try await AppDatabase.shared.dbQueue.read { db -> VideoFile? in
+                    try VideoFile.fetchVisibleFirstFile(movieId: currentMovieId, in: db)
                 }
 	                await MainActor.run {
-	                    if let row = row {
-	                        let fileName: String = row["fileName"] ?? ""; let relativePath: String = row["relativePath"] ?? ""
+	                    if let file {
 	                        self.originalFilename = self.originalDisplayName(
-	                            fileName: fileName,
-	                            relativePath: relativePath
+	                            fileName: file.fileName,
+	                            relativePath: file.relativePath
 	                        )
 	                        
 	                        let extracted = self.smartExtractMovieTitleAndYear(from: self.originalFilename)
@@ -255,6 +282,18 @@ struct MovieSearchModalView: View {
             }
         }
 	    }
+
+    private func loadDoubanMetadata() {
+        guard let movieId = movie.id else { return }
+        Task {
+            let metadata = try? await AppDatabase.shared.dbQueue.read { db in
+                try DoubanMetadata.fetchOne(db, key: movieId)
+            }
+            await MainActor.run {
+                self.doubanMetadata = metadata?.isInvalidPlaceholder == true ? nil : metadata
+            }
+        }
+    }
 	    
 	    private func originalDisplayName(fileName: String, relativePath: String) -> String {
 	        let trimmedFileName = fileName.trimmingCharacters(in: .whitespacesAndNewlines)

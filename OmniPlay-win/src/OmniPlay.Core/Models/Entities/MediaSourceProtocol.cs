@@ -8,5 +8,6 @@ public enum MediaSourceProtocol
     Direct,
     Plex,
     Emby,
-    Jellyfin
+    Jellyfin,
+    OmniPlayDocker
 }

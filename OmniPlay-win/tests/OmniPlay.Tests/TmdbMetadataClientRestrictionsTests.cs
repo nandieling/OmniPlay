@@ -24,7 +24,7 @@ public sealed class TmdbMetadataClientRestrictionsTests : IDisposable
     }
 
     [Fact]
-    public async Task SearchMovieCandidatesAsync_BuiltInPublicSourceLimitsFanOutAndResultCount()
+    public async Task SearchMovieCandidatesAsync_NoCredentialReturnsNoResults()
     {
         var handler = new CountingTmdbHttpMessageHandler();
         using var httpClient = new HttpClient(handler)
@@ -36,10 +36,8 @@ public sealed class TmdbMetadataClientRestrictionsTests : IDisposable
 
         var results = await client.SearchMovieCandidatesAsync(["One", "Two", "Three", "Four", "Five"], null);
 
-        Assert.Equal(new[] { "One", "Two" }, handler.SearchQueries.Distinct().ToArray());
-        Assert.Equal(4, handler.SearchRequestCount);
-        Assert.Equal([1, 1, 1, 1], handler.SearchPages);
-        Assert.Equal(6, results.Count);
+        Assert.Empty(results);
+        Assert.Equal(0, handler.SearchRequestCount);
     }
 
     [Fact]
@@ -55,7 +53,6 @@ public sealed class TmdbMetadataClientRestrictionsTests : IDisposable
         {
             Tmdb = new TmdbSettings
             {
-                EnableBuiltInPublicSource = true,
                 CustomApiKey = "custom-key"
             }
         });
@@ -83,7 +80,6 @@ public sealed class TmdbMetadataClientRestrictionsTests : IDisposable
         {
             Tmdb = new TmdbSettings
             {
-                EnableBuiltInPublicSource = true,
                 CustomApiKey = "custom-key",
                 Language = "en-US"
             }
@@ -96,7 +92,7 @@ public sealed class TmdbMetadataClientRestrictionsTests : IDisposable
     }
 
     [Fact]
-    public async Task SearchMovieCandidatesAsync_CustomApiKeyRejectedFallsBackToBuiltInPublicSourceLimits()
+    public async Task SearchMovieCandidatesAsync_CustomApiKeyRejectedReturnsNoResults()
     {
         var handler = new CustomRejectingTmdbHttpMessageHandler();
         using var httpClient = new HttpClient(handler)
@@ -108,35 +104,6 @@ public sealed class TmdbMetadataClientRestrictionsTests : IDisposable
         {
             Tmdb = new TmdbSettings
             {
-                EnableBuiltInPublicSource = true,
-                CustomApiKey = "bad-custom-key"
-            }
-        });
-        var client = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
-
-        var results = await client.SearchMovieCandidatesAsync(["One", "Two", "Three", "Four", "Five"], null);
-
-        Assert.Equal(1, handler.CustomRejectedRequestCount);
-        Assert.Equal(new[] { "One", "Two" }, handler.BuiltInSearchQueries.Distinct().ToArray());
-        Assert.Equal(4, handler.BuiltInSearchRequestCount);
-        Assert.Equal([1, 1, 1, 1], handler.BuiltInSearchPages);
-        Assert.Equal(6, results.Count);
-    }
-
-    [Fact]
-    public async Task SearchMovieCandidatesAsync_CustomApiKeyRejectedWithoutBuiltInSourceReturnsNoResults()
-    {
-        var handler = new CustomRejectingTmdbHttpMessageHandler();
-        using var httpClient = new HttpClient(handler)
-        {
-            Timeout = TimeSpan.FromSeconds(5)
-        };
-        var settingsService = new JsonSettingsService(storagePaths);
-        await settingsService.SaveAsync(new AppSettings
-        {
-            Tmdb = new TmdbSettings
-            {
-                EnableBuiltInPublicSource = false,
                 CustomApiKey = "bad-custom-key"
             }
         });
@@ -146,11 +113,11 @@ public sealed class TmdbMetadataClientRestrictionsTests : IDisposable
 
         Assert.Empty(results);
         Assert.Equal(1, handler.CustomRejectedRequestCount);
-        Assert.Equal(0, handler.BuiltInSearchRequestCount);
+        Assert.Equal(0, handler.SearchRequestCount);
     }
 
     [Fact]
-    public async Task DownloadEpisodeStillAsync_BuiltInPublicSourceSkipsEpisodeRequest()
+    public async Task DownloadEpisodeStillAsync_NoCredentialSkipsEpisodeRequest()
     {
         var handler = new CountingTmdbHttpMessageHandler();
         using var httpClient = new HttpClient(handler)
@@ -180,7 +147,6 @@ public sealed class TmdbMetadataClientRestrictionsTests : IDisposable
         {
             Tmdb = new TmdbSettings
             {
-                EnableBuiltInPublicSource = true,
                 CustomApiKey = "custom-key",
                 Language = "ja-JP"
             }
@@ -209,7 +175,6 @@ public sealed class TmdbMetadataClientRestrictionsTests : IDisposable
         {
             Tmdb = new TmdbSettings
             {
-                EnableBuiltInPublicSource = true,
                 CustomApiKey = "custom-key",
                 Language = "zh-CN"
             }
@@ -365,13 +330,11 @@ public sealed class TmdbMetadataClientRestrictionsTests : IDisposable
 
     private sealed class CustomRejectingTmdbHttpMessageHandler : HttpMessageHandler
     {
-        public List<string> BuiltInSearchQueries { get; } = [];
-
-        public List<int> BuiltInSearchPages { get; } = [];
+        public List<string> SearchQueries { get; } = [];
 
         public int CustomRejectedRequestCount { get; private set; }
 
-        public int BuiltInSearchRequestCount => BuiltInSearchQueries.Count;
+        public int SearchRequestCount => SearchQueries.Count;
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -386,9 +349,7 @@ public sealed class TmdbMetadataClientRestrictionsTests : IDisposable
             if (requestUri.Contains("/search/movie", StringComparison.Ordinal))
             {
                 var query = ReadQueryValue(request.RequestUri, "query");
-                var page = int.TryParse(ReadQueryValue(request.RequestUri, "page"), out var parsedPage) ? parsedPage : 0;
-                BuiltInSearchQueries.Add(query);
-                BuiltInSearchPages.Add(page);
+                SearchQueries.Add(query);
                 return Task.FromResult(CreateJsonResponse(BuildSearchPayload(query)));
             }
 

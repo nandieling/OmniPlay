@@ -44,6 +44,8 @@ public sealed class NetworkShareDiscoveryService : INetworkShareDiscoveryService
         (Uri.UriSchemeHttp, 8099),
         (Uri.UriSchemeHttps, 8099),
         (Uri.UriSchemeHttps, 8920),
+        (Uri.UriSchemeHttp, 45722),
+        (Uri.UriSchemeHttp, 45721),
         (Uri.UriSchemeHttp, 32400)
     ];
     private readonly HttpClient httpClient;
@@ -271,6 +273,12 @@ public sealed class NetworkShareDiscoveryService : INetworkShareDiscoveryService
 
         var baseUri = new Uri(candidate.GetLeftPart(UriPartial.Authority));
 
+        var docker = await ProbeOmniPlayDockerAsync(baseUri, cancellationToken);
+        if (docker is not null)
+        {
+            return docker;
+        }
+
         if (baseUri.Port == 32400)
         {
             var plex = await ProbePlexAsync(baseUri, cancellationToken);
@@ -287,6 +295,45 @@ public sealed class NetworkShareDiscoveryService : INetworkShareDiscoveryService
         }
 
         return await ProbePlexAsync(baseUri, cancellationToken);
+    }
+
+    private async Task<NetworkSourceDiscoveryItem?> ProbeOmniPlayDockerAsync(Uri baseUri, CancellationToken cancellationToken)
+    {
+        foreach (var path in new[] { "/api/health", "/api/auth/status" })
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(baseUri, path));
+            request.Headers.Accept.ParseAdd("application/json");
+            try
+            {
+                using var response = await SendProbeAsync(request, cancellationToken);
+                if (response is null ||
+                    (!response.IsSuccessStatusCode &&
+                     response.StatusCode is not HttpStatusCode.Unauthorized and not HttpStatusCode.Forbidden))
+                {
+                    continue;
+                }
+
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                if (!LooksLikeOmniPlayDockerResponse(path, body, response))
+                {
+                    continue;
+                }
+
+                var normalized = MediaSourceNormalizer.NormalizeBaseUrl(MediaSourceProtocol.OmniPlayDocker, baseUri.AbsoluteUri);
+                return new NetworkSourceDiscoveryItem
+                {
+                    Name = "OmniPlay Docker",
+                    ProtocolType = "omniplay-docker",
+                    BaseUrl = normalized,
+                    Description = $"预扫描到的 OmniPlay Docker 服务：{normalized}"
+                };
+            }
+            catch
+            {
+            }
+        }
+
+        return null;
     }
 
     private async Task<NetworkSourceDiscoveryItem?> ProbePlexAsync(Uri baseUri, CancellationToken cancellationToken)
@@ -408,8 +455,10 @@ public sealed class NetworkShareDiscoveryService : INetworkShareDiscoveryService
         AddUri(results, "http://localhost:8097");
         AddUri(results, "http://127.0.0.1:8098");
         AddUri(results, "http://localhost:8098");
-        AddUri(results, "http://127.0.0.1:8099");
-        AddUri(results, "http://localhost:8099");
+        AddUri(results, "http://127.0.0.1:45722");
+        AddUri(results, "http://localhost:45722");
+        AddUri(results, "http://127.0.0.1:45721");
+        AddUri(results, "http://localhost:45721");
         AddUri(results, "https://127.0.0.1:8920");
         AddUri(results, "https://localhost:8920");
 
@@ -737,6 +786,24 @@ public sealed class NetworkShareDiscoveryService : INetworkShareDiscoveryService
                TryGetJsonString(root, "LocalAddress", out _) ||
                TryGetJsonString(root, "Id", out _) ||
                TryGetJsonString(root, "Version", out _);
+    }
+
+    private static bool LooksLikeOmniPlayDockerResponse(string path, string body, HttpResponseMessage response)
+    {
+        var normalized = body.ToLowerInvariant();
+        if (path.Contains("auth/status", StringComparison.OrdinalIgnoreCase) &&
+            (normalized.Contains("\"issetuprequired\"", StringComparison.Ordinal) ||
+             normalized.Contains("\"isauthenticated\"", StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        return normalized.Contains("omniplay.server", StringComparison.Ordinal) ||
+               normalized.Contains("\"omniplay\"", StringComparison.Ordinal) ||
+               (normalized.Contains("\"service\"", StringComparison.Ordinal) &&
+                normalized.Contains("omniplay", StringComparison.Ordinal)) ||
+               (response.Headers.Server.Any(product => product.Product?.Name?.Contains("Kestrel", StringComparison.OrdinalIgnoreCase) == true) &&
+                normalized.Contains("database", StringComparison.Ordinal));
     }
 
     private static bool IsLikelyEmbyCompatiblePort(int port)

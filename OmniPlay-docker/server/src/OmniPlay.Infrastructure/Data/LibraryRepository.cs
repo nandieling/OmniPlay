@@ -691,6 +691,47 @@ public sealed class LibraryRepository : ILibraryRepository
         return true;
     }
 
+    public async Task<PlaybackProgressState?> GetPlaybackProgressAsync(
+        string videoFileId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(videoFileId))
+        {
+            return null;
+        }
+
+        using var connection = database.OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT vf.duration_seconds,
+                   COALESCE(pp.position_seconds, 0),
+                   COALESCE(pp.duration_seconds, 0),
+                   COALESCE(pp.is_watched, 0)
+            FROM video_files vf
+            LEFT JOIN playback_progress pp
+                ON pp.video_file_id = vf.id
+               AND pp.user_id = $userId
+            WHERE vf.id = $videoFileId
+              AND vf.missing_at IS NULL
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$videoFileId", videoFileId.Trim());
+        command.Parameters.AddWithValue("$userId", DefaultUserId);
+
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        var storedDuration = reader.IsDBNull(0) ? 0 : reader.GetDouble(0);
+        var progressDuration = reader.IsDBNull(2) ? 0 : reader.GetDouble(2);
+        return new PlaybackProgressState(
+            Math.Max(reader.IsDBNull(1) ? 0 : reader.GetDouble(1), 0),
+            Math.Max(storedDuration, progressDuration),
+            !reader.IsDBNull(3) && reader.GetInt64(3) == 1);
+    }
+
     public async Task<bool> SetWatchedAsync(
         WatchedStatusUpdateRequest request,
         CancellationToken cancellationToken = default)
@@ -945,7 +986,12 @@ public sealed class LibraryRepository : ILibraryRepository
             .GroupBy(static file => file.EpisodeId!, StringComparer.Ordinal)
             .ToDictionary(
                 static group => group.Key,
-                static group => SelectEpisodeVideoFile(group),
+                static group => group
+                    .OrderByDescending(static file => file.PositionSeconds > 0 && !file.IsWatched)
+                    .ThenBy(static file => file.IsWatched)
+                    .ThenByDescending(static file => file.DurationSeconds)
+                    .ThenBy(static file => file.RelativePath, StringComparer.OrdinalIgnoreCase)
+                    .ToArray(),
                 StringComparer.Ordinal);
         var seasons = new Dictionary<string, MutableSeason>(StringComparer.Ordinal);
 
@@ -969,7 +1015,8 @@ public sealed class LibraryRepository : ILibraryRepository
             }
 
             var episodeId = reader.GetString(4);
-            filesByEpisodeId.TryGetValue(episodeId, out var videoFile);
+            filesByEpisodeId.TryGetValue(episodeId, out var episodeFiles);
+            episodeFiles ??= [];
             season.Episodes.Add(new EpisodeDetail(
                 episodeId,
                 seasonId,
@@ -979,7 +1026,8 @@ public sealed class LibraryRepository : ILibraryRepository
                 reader.IsDBNull(7) ? null : reader.GetString(7),
                 reader.IsDBNull(8) ? null : reader.GetString(8),
                 reader.IsDBNull(9) ? null : reader.GetString(9),
-                videoFile));
+                episodeFiles.FirstOrDefault(),
+                episodeFiles));
         }
 
         return seasons.Values
@@ -996,16 +1044,6 @@ public sealed class LibraryRepository : ILibraryRepository
     private static int SeasonSortNumber(int seasonNumber)
     {
         return seasonNumber == 0 ? int.MaxValue : seasonNumber;
-    }
-
-    private static VideoFileSummary SelectEpisodeVideoFile(IEnumerable<VideoFileSummary> files)
-    {
-        return files
-            .OrderByDescending(static file => file.PositionSeconds > 0 && !file.IsWatched)
-            .ThenBy(static file => file.IsWatched)
-            .ThenByDescending(static file => file.DurationSeconds)
-            .ThenBy(static file => file.RelativePath, StringComparer.OrdinalIgnoreCase)
-            .First();
     }
 
     private static async Task<int?> GetTmdbIdAsync(
@@ -1127,7 +1165,17 @@ public sealed class LibraryRepository : ILibraryRepository
         command.Parameters.AddWithValue("$libraryItemId", libraryItemId);
         command.Parameters.AddWithValue("$tmdbId", tmdbId);
         await command.ExecuteNonQueryAsync(cancellationToken);
-        if (!isTv)
+        if (isTv)
+        {
+            await TvLibraryItemMerger.MergeDuplicatesByTmdbIdAsync(
+                connection,
+                transaction,
+                libraryItemId,
+                tmdbId,
+                DateTimeOffset.UtcNow.ToString("O"),
+                cancellationToken);
+        }
+        else
         {
             await MergeDuplicateMovieItemsByTmdbIdAsync(
                 connection,

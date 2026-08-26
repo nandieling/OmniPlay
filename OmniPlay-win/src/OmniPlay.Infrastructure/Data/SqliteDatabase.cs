@@ -32,6 +32,7 @@ public sealed class SqliteDatabase
                 name TEXT NOT NULL,
                 protocolType TEXT NOT NULL,
                 baseUrl TEXT NOT NULL,
+                addressConfig TEXT NULL,
                 authConfig TEXT NULL,
                 isEnabled INTEGER NOT NULL DEFAULT 1,
                 disabledAt TEXT NULL,
@@ -84,6 +85,22 @@ public sealed class SqliteDatabase
             CREATE INDEX IF NOT EXISTS ix_videoFile_sourceId ON videoFile(sourceId);
             CREATE INDEX IF NOT EXISTS ix_videoFile_movieId ON videoFile(movieId);
             CREATE INDEX IF NOT EXISTS ix_videoFile_episodeId ON videoFile(episodeId);
+
+            CREATE TABLE IF NOT EXISTS doubanMetadata (
+                itemKind TEXT NOT NULL,
+                entityId INTEGER NOT NULL,
+                subjectId TEXT NOT NULL,
+                subjectUrl TEXT NOT NULL,
+                title TEXT NOT NULL,
+                originalTitle TEXT NULL,
+                year TEXT NULL,
+                rating REAL NULL,
+                ratingCount INTEGER NULL,
+                summary TEXT NULL,
+                posterUrl TEXT NULL,
+                fetchedAt TEXT NOT NULL,
+                PRIMARY KEY (itemKind, entityId)
+            );
             """;
         command.ExecuteNonQuery();
 
@@ -118,6 +135,7 @@ public sealed class SqliteDatabase
         EnsureColumn(connection, "videoFile", "customEpisodeThumbnailPath", "TEXT NULL");
 
         EnsureColumn(connection, "mediaSource", "isEnabled", "INTEGER NOT NULL DEFAULT 1");
+        EnsureColumn(connection, "mediaSource", "addressConfig", "TEXT NULL");
         EnsureColumn(connection, "mediaSource", "disabledAt", "TEXT NULL");
         EnsureColumn(connection, "mediaSource", "removedAt", "TEXT NULL");
     }

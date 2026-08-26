@@ -536,7 +536,17 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
         if (updated)
         {
             await UpdateTmdbIdAsync(connection, transaction, candidate.Id, candidate.ItemKind, match.Id, cancellationToken);
-            if (string.Equals(candidate.ItemKind, "movie", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(candidate.ItemKind, "tv", StringComparison.OrdinalIgnoreCase))
+            {
+                await TvLibraryItemMerger.MergeDuplicatesByTmdbIdAsync(
+                    connection,
+                    transaction,
+                    candidate.Id,
+                    match.Id,
+                    now,
+                    cancellationToken);
+            }
+            else
             {
                 await MergeDuplicateMovieItemsByTmdbIdAsync(
                     connection,

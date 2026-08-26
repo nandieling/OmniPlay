@@ -20,7 +20,7 @@ public sealed class MediaSourceRepository : IMediaSourceRepository
         var sources = (await connection.QueryAsync<MediaSource>(
             new CommandDefinition(
                 """
-                SELECT id, name, protocolType, baseUrl, authConfig, isEnabled, disabledAt, removedAt
+                SELECT id, name, protocolType, baseUrl, addressConfig, authConfig, isEnabled, disabledAt, removedAt
                 FROM mediaSource
                 WHERE removedAt IS NULL
                 ORDER BY id ASC
@@ -54,6 +54,7 @@ public sealed class MediaSourceRepository : IMediaSourceRepository
                     """
                     UPDATE mediaSource
                     SET name = @Name,
+                        addressConfig = @AddressConfig,
                         authConfig = @AuthConfig,
                         isEnabled = 1,
                         disabledAt = NULL,
@@ -64,6 +65,7 @@ public sealed class MediaSourceRepository : IMediaSourceRepository
                     {
                         Id = existingId.Value,
                         source.Name,
+                        source.AddressConfig,
                         AuthConfig = protectedAuthConfig
                     },
                     cancellationToken: cancellationToken));
@@ -73,14 +75,15 @@ public sealed class MediaSourceRepository : IMediaSourceRepository
         await connection.ExecuteAsync(
             new CommandDefinition(
                 """
-                INSERT INTO mediaSource (name, protocolType, baseUrl, authConfig, isEnabled, disabledAt, removedAt)
-                VALUES (@Name, @ProtocolType, @BaseUrl, @AuthConfig, @IsEnabled, NULL, NULL)
+                INSERT INTO mediaSource (name, protocolType, baseUrl, addressConfig, authConfig, isEnabled, disabledAt, removedAt)
+                VALUES (@Name, @ProtocolType, @BaseUrl, @AddressConfig, @AuthConfig, @IsEnabled, NULL, NULL)
                 """,
                 new
                 {
                     source.Name,
                     source.ProtocolType,
                     BaseUrl = normalizedBaseUrl,
+                    source.AddressConfig,
                     AuthConfig = protectedAuthConfig,
                     source.IsEnabled
                 },
@@ -131,6 +134,7 @@ public sealed class MediaSourceRepository : IMediaSourceRepository
                 SET name = @Name,
                     protocolType = @ProtocolType,
                     baseUrl = @BaseUrl,
+                    addressConfig = @AddressConfig,
                     authConfig = @AuthConfig,
                     isEnabled = @IsEnabled,
                     disabledAt = @DisabledAt,
@@ -143,6 +147,7 @@ public sealed class MediaSourceRepository : IMediaSourceRepository
                     source.Name,
                     source.ProtocolType,
                     BaseUrl = normalizedBaseUrl,
+                    source.AddressConfig,
                     AuthConfig = protectedAuthConfig,
                     source.IsEnabled,
                     source.DisabledAt,

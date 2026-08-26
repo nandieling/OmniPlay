@@ -1,6 +1,16 @@
 # 觅影 OmniPlay
 
-觅影 OmniPlay 是一款原生开发的海报墙播放器，支持mac、win、docker、安卓TV系统。mac采用swift开发，win采用C# + .net + Avalonia UI。底层播放器核心为 MPVKit-GPL / libmpv / FFmpeg 相关组件。 
+觅影 OmniPlay 是一款原生开发的海报墙播放器，支持 macOS、Windows、Docker 和安卓 TV。macOS 版采用 Swift / SwiftUI 开发，Windows 版采用 C# / .NET / Avalonia UI。底层播放器核心为 MPVKit-GPL / libmpv / FFmpeg 相关组件。
+
+## 1.7 更新要点
+
+- macOS ARM 版新增 Lucky STUN 穿透媒体源，支持 OmniPlay Docker、WebDAV、Plex、Emby 和 Jellyfin，每个媒体源独立配置 Lucky 管理端、穿透规则和自动更新周期。
+- 新增局域网 OmniPlay Docker、WebDAV、Plex、Emby 和 Jellyfin 的发现、登录与媒体库挂载流程。
+- 播放页标题只显示刮削后的影视名称和季/集信息，不再附加原文件名片段。
+- 修复继续播放可能超过上次保存进度的问题。
+- 离线缓存改为按剧集顺序串行执行，首页和详情页会自动恢复显示进度。
+- 缓存进度环支持点击取消并二次确认；开始前会预检空间，完成后至少保留 1 GiB 可用空间。
+- 缓存文件直接写入用户选定的磁盘和目录，不再经过内置磁盘中转，也不再创建以媒体源 ID 命名的数字子目录。
 
 ## 软件截图
 ![览影首页](https://img2.pixhost.to/images/7534/720265527_2.jpg)
@@ -17,15 +27,24 @@
 
 ### 媒体源管理
 
-- 支持添加本地文件夹、omniplay docker、WebDAV、SMB、plex、emby、jellyfin。mac版因为开发一直有bug，不支持SMB直连，请在访达中挂载SMB，再在软件中添加本地文件夹，间接连接SMB。可以将访达挂载的SMB添加到开机自启
+- 支持添加本地文件夹、OmniPlay Docker、WebDAV、SMB、Plex、Emby 和 Jellyfin。macOS 版不支持 SMB 直连，请先在访达中挂载 SMB，再在软件中将其作为本地文件夹添加。
+- macOS ARM 版支持局域网预扫描和手动添加 OmniPlay Docker、WebDAV、Plex、Emby 与 Jellyfin。
+- macOS ARM 版支持 Lucky STUN 穿透媒体源，可登录 Lucky 管理端、选择穿透规则并自动刷新穿透地址。
 - 不需要将电影、剧集分不同文件夹进行挂载，软件自动识别。
 
 ### 自动扫描与刮削
-- 支持公共 TMDB 源，也支持自定义 TMDB API Key / v4 Token。公共源API做了限制，建议注册TMDB后获取API。如果TMDB api连通测试失败，请挂代理或改host。
+
+- 软件不内置、也不提供公共 TMDB 源或公共 API 凭据。
+- 使用 TMDB 自动刮削前，必须在 TMDB 官网注册并在设置中填写自己的 API Key 或 v4 Read Access Token。
+- macOS ARM 版无法直连 TMDB API 时，可在设置中填写自建的反向代理网关；可参考下文 Cloudflare Workers 部署说明。
 
 ### 离线缓存
 
-- 支持一键将SMB、WebDAV下的影视离线至电脑，方便外出观影。
+- 支持将本地目录、访达已挂载的 SMB 和 WebDAV 媒体缓存到选定目录。
+- 电影、整季和单集均有缓存入口，多集任务按剧集顺序依次执行。
+- 离开详情页后任务会继续，首页左上角会显示当前文件、任务顺序和总进度。
+- 点击缓存进度环可在确认后取消；任务开始前会进行存储空间预检，并在所需空间外预留 1 GiB。
+- 未完成内容以同盘 `.part` 文件直接写入目标磁盘，完成后再转为最终文件。
 
 ### 使用指南
 ####  docker版安装
@@ -39,7 +58,7 @@
  5. 点下一步，等安装完成。
  #### docker版设置
 1. 浏览器输入http://NAS IP:45722 打开docker容器页面，注册用户名和密码，注意后续mac和安卓TV端连接docker端也是这个用户密码。
-2. 点右上角设置，输入注册的TMDB api和代理地址，代理可以安装v2raya docker版。保存，检测TMDB和代理连通性。
+2. 点右上角设置，输入自己的 TMDB API Key 或 v4 Read Access Token。无法直连 TMDB API 时，Docker 版可配置标准出站 HTTP/SOCKS 代理（例如 v2rayA），然后保存并检测连通性。
 3. 也可以点运行自检检测下配置有没有问题，比如GPU硬解是否启用。
 4. 后面要注意的设置是HLS缓存和字幕缓存上限，避免硬盘存储空间被塞满。
 5. 右上角加号添加媒体目录，挂载后自动进行扫描、刮削、字幕缓存。
@@ -57,9 +76,100 @@
 #### mac、win  
 
 1. 安装：下载安装包，安装。
-2. 开启代理，填入TMDB api，检测TMDB连通性。
+2. 填入自己的 TMDB API Key 或 v4 Read Access Token 并检测连通性。macOS ARM 版无法直连时，可使用下文的 Cloudflare Workers 反向代理网关。
 3. 添加媒体源，如果有ARM mac和安卓TV播放进度同步功能需求，建议接入omniplay docker版媒体源。x64 mac和win版尚未更新，暂无接入docker版功能。
 4. ARM mac版加了豆瓣手动刮削功能。没有自动匹配是因为豆瓣没有公开的api，自动匹配会被阻断，体验不佳。所以如果没有代理，也可以用豆瓣手动一个个匹配。缺点是海报画质可能没有TMDB好，以及没有分集剧照。手动匹配做了限制，以避免阻断。其实docker版也加了这个功能，但经测试每次都被阻断。不过mac版手动匹配的豆瓣评分等信息，会自动同步到docker版，进而自动同步到安卓TV端。
+
+## 使用 Cloudflare Workers 反向代理 TMDB API
+
+当前网络无法直接访问 `https://api.themoviedb.org` 时，macOS ARM 版可部署一个 Cloudflare Worker 作为 API 反向代理。Worker 只负责转发请求；TMDB 凭据仍由用户在 OmniPlay 中填写，不要把 API Key 或 v4 Token 写入 Worker 源码。
+
+> 这是 TMDB API 反向代理网关，不是通用 HTTP/SOCKS 出站代理。请不要将 Worker 地址填入 Docker 或 Windows 的普通代理服务器字段。
+
+### 1. 创建 Worker
+
+**第一步：创建 Worker**
+
+1. 登录 [Cloudflare 控制台](https://dash.cloudflare.com/)，进入 **Compute (Workers & Pages)** -> **Workers**。
+2. 点击 **Create application** -> **Create Worker**，命名为 `tmdb-proxy` 并点击 **Deploy**。
+
+**第二步：配置反代代码**
+
+1. 点击 **Edit code**，将默认代码全部清空，替换为以下脚本：
+
+JavaScript
+
+```
+// 自定义你的访问密码/暗号（建议字母+数字）
+const SECRET_TOKEN = "mySecret888"; 
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    // 1. 验证路径是否以你的密钥开头
+    const secretPrefix = `/${SECRET_TOKEN}`;
+    if (!url.pathname.startsWith(secretPrefix)) {
+      return new Response("403 Forbidden: Invalid Secret Token", { status: 403 });
+    }
+
+    // 2. 剥离密钥前缀，还原真实请求路径
+    let realPath = url.pathname.replace(secretPrefix, "") || "/";
+
+    // 3. 分流转发到 TMDB API 或 图片服务器
+    let targetHost = "api.themoviedb.org";
+    if (realPath.startsWith("/image/")) {
+      targetHost = "image.tmdb.org";
+      realPath = realPath.replace(/^\/image/, "");
+    } else if (realPath.startsWith("/t/p/")) {
+      // 兼容直接请求 /t/p/ 的海报路径
+      targetHost = "image.tmdb.org";
+    }
+
+    const targetUrl = `https://${targetHost}${realPath}${url.search}`;
+
+    const modifiedRequest = new Request(targetUrl, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+      redirect: "follow",
+    });
+
+    // 伪装 Host
+    modifiedRequest.headers.set("Host", targetHost);
+    modifiedRequest.headers.set("Referer", `https://${targetHost}`);
+
+    return fetch(modifiedRequest);
+  },
+};
+```
+
+1. 点击右上角 **Deploy** 保存。
+
+**第三步：绑定自定义域名（关键）**
+
+- 由于 `*.workers.dev` 默认子域名在国内通常无法直连，进入该 Worker 的 **Settings** -> **Domains & Routes**。
+- 点击 **Add** -> **Custom Domain**，绑定你托管在 Cloudflare 上的二级域名（例如 `tmdb.yourdomain.com`）。
+### 2. 在 OmniPlay 中配置
+
+1. 前往 [TMDB 官网](https://www.themoviedb.org/) 注册并获取自己的 API Key 或 v4 Read Access Token。
+2. 打开 OmniPlay 设置中的 TMDB 配置。
+3. 在 `API Key / v4 令牌` 中填写自己的凭据。
+4. 在 `TMDB API 代理网关` 中填写 Worker 根地址：
+
+   ```text
+   https://tmdb.yourdomain.com/mySecret888
+   ```
+
+
+5. 点击“验证”或“检测”。验证成功后，TMDB API 请求会经 Worker 转发。
+
+### 3. 安全与限制
+
+- 不要在 Worker 代码、Git 仓库或公开截图中写入 TMDB API Key / v4 Token。
+- Worker 地址可能被他人访问。上述代码已将转发范围限制为 `/3` API，仍建议在 Cloudflare 中配置 Rate Limiting、WAF 或自定义域名访问策略。
+- 该 Worker 不会代理 `image.tmdb.org` 的海报和剧照请求，客户端仍需能访问 TMDB 图片域名。
+- 请遵守 Cloudflare 和 TMDB 的使用条款及频率限制。
 
 ## 自行编译教程
 
@@ -77,10 +187,10 @@
 ```text
 PRODUCT_BUNDLE_IDENTIFIER = nan.OmniPlay
 PRODUCT_NAME = 觅影
-MARKETING_VERSION = 1.0
+MARKETING_VERSION = 1.7
 CURRENT_PROJECT_VERSION = 1
 MACOSX_DEPLOYMENT_TARGET = 14.0
-DEVELOPMENT_TEAM = DT95MB3RG4
+DEVELOPMENT_TEAM =
 ENABLE_HARDENED_RUNTIME = YES
 ```
 

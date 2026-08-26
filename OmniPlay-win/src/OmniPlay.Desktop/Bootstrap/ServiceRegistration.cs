@@ -63,6 +63,9 @@ public static class ServiceRegistration
         services.AddSingleton<INetworkShareDiscoveryService, NetworkShareDiscoveryService>();
         services.AddSingleton<IMediaServerDiscoveryClient, MediaServerDiscoveryClient>();
         services.AddSingleton<IMediaServerPreflightService, MediaServerPreflightService>();
+        services.AddSingleton<IOmniPlayDockerClient, OmniPlayDockerClient>();
+        services.AddSingleton<ILuckyStunClient, LuckyStunClient>();
+        services.AddSingleton<IDoubanMetadataService, DoubanMetadataService>();
         services.AddSingleton<ITmdbMetadataClient, TmdbMetadataClient>();
         services.AddSingleton<ITmdbConnectionTester>(provider => (TmdbMetadataClient)provider.GetRequiredService<ITmdbMetadataClient>());
         services.AddSingleton<ILibraryMetadataEditor, LibraryMetadataEditor>();

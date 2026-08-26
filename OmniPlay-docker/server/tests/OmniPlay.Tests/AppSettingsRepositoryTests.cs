@@ -136,7 +136,7 @@ public sealed class AppSettingsRepositoryTests : IDisposable
         Assert.Equal(48, updated.Cache.WebDavRetentionHours);
         Assert.Equal(64, updated.Cache.WebDavMaxGb);
         Assert.Equal(8, updated.Cache.SubtitleMaxGb);
-        Assert.Equal("optimized", updated.Cache.SubtitleCacheStrategy);
+        Assert.Equal("disabled", updated.Cache.SubtitleCacheStrategy);
     }
 
     [Fact]
@@ -164,7 +164,7 @@ public sealed class AppSettingsRepositoryTests : IDisposable
         Assert.Equal(64, snapshot.Cache.WebDavMaxGb);
         Assert.Equal(string.Empty, snapshot.Cache.SubtitleCachePath);
         Assert.Equal(20, snapshot.Cache.SubtitleMaxGb);
-        Assert.Equal("optimized", snapshot.Cache.SubtitleCacheStrategy);
+        Assert.Equal("disabled", snapshot.Cache.SubtitleCacheStrategy);
     }
 
     [Fact]

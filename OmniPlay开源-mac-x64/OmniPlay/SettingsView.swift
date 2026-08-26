@@ -12,10 +12,9 @@ struct SettingsView: View {
     @AppStorage("autoCheckUpdatesOnStartup") var autoCheckUpdatesOnStartup = true
     @AppStorage("enableFastTooltip") var enableFastTooltip = true
     @AppStorage("showMediaSourceRealPath") var showMediaSourceRealPath = true
-    @AppStorage("removeWebDAVCredentialWhenRemovingSource") var removeWebDAVCredentialWhenRemovingSource = false
+    @AppStorage("removeWebDAVCredentialsOnDelete") var removeWebDAVCredentialsOnDelete = false
     @AppStorage("enableLocalMetadataImport") var enableLocalMetadataImport = false
     @AppStorage("enableLocalMetadataExport") var enableLocalMetadataExport = false
-    @AppStorage("tmdbUsePublicSource") var tmdbUsePublicSource = true
     @AppStorage("tmdbApiKey") var tmdbApiKey = ""
     
     @AppStorage("appLanguage") var appLanguage = "zh-Hans"
@@ -23,6 +22,12 @@ struct SettingsView: View {
     @AppStorage("defaultSub") var defaultSub = "chi"
     @AppStorage("playbackQualityMode") var playbackQualityMode = "balanced"
     @AppStorage("playBluRayExtras") var playBluRayExtras = false
+    @AppStorage("luckyStunManagementURL") var luckyStunManagementURL = ""
+    @AppStorage("luckyStunUsername") var luckyStunUsername = ""
+    @AppStorage("luckyStunPassword") var luckyStunPassword = ""
+    @AppStorage("luckyStunRuleID") var luckyStunRuleID = ""
+    @AppStorage("luckyStunAutoUpdate") var luckyStunAutoUpdate = false
+    @AppStorage("luckyStunUpdateIntervalMinutes") var luckyStunUpdateIntervalMinutes = 30
     
     @AppStorage("appTheme") var appTheme = ThemeType.appleLight.rawValue
     var theme: AppTheme { ThemeType(rawValue: appTheme)?.colors ?? ThemeType.crystal.colors }
@@ -32,9 +37,13 @@ struct SettingsView: View {
     @State private var isValidatingAPI = false
     @State private var apiValidationMessage = ""
     @State private var apiValidationColor: Color = .primary
+    @State private var isShowingOpenSourceInfo = false
     @State private var isCheckingForUpdate = false
     @State private var updateStatusMessage = ""
     @State private var updateStatusColor: Color = .secondary
+    @State private var luckyStunRules: [LuckyStunRule] = []
+    @State private var luckyStunStatusMessage = "尚未检测 Lucky STUN。"
+    @State private var isUpdatingLuckyStun = false
     @FocusState private var isTMDBApiFocused: Bool
 
     private let githubRepositoryURL = "https://github.com/nandieling/OmniPlay"
@@ -100,7 +109,71 @@ struct SettingsView: View {
                     Toggle("删除文件夹时保留本地缓存海报", isOn: $keepLocalPosters)
                     Toggle("启用快速悬停提示 (Tooltip)", isOn: $enableFastTooltip)
                     Toggle("媒体源显示真实路径", isOn: $showMediaSourceRealPath)
-                    Toggle("移除 WebDAV 源时同时删除保存的登录凭据", isOn: $removeWebDAVCredentialWhenRemovingSource)
+                    Toggle("移除 WebDAV 源时同时删除保存的登录凭据", isOn: $removeWebDAVCredentialsOnDelete)
+                        .help("若开启，删除 WebDAV 源会连同钥匙串里的账号密码一并清理。关闭则保留以便下次自动填充。")
+                }
+
+                Section(header: Text("Lucky STUN 穿透地址").font(.headline).padding(.top, 10)) {
+                    Text("登录 Lucky 管理端读取指定规则的最新穿透地址，并同步到 OmniPlay Docker 媒体源。")
+                        .font(.caption)
+                        .foregroundColor(theme.textSecondary)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("管理地址").font(.caption.weight(.semibold)).foregroundColor(theme.textSecondary)
+                        TextField("例如 http://192.168.1.1:16601", text: $luckyStunManagementURL)
+                    }
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("账号").font(.caption.weight(.semibold)).foregroundColor(theme.textSecondary)
+                        TextField("Lucky 管理账号", text: $luckyStunUsername)
+                    }
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("密码").font(.caption.weight(.semibold)).foregroundColor(theme.textSecondary)
+                        SecureField("Lucky 管理密码", text: $luckyStunPassword)
+                    }
+                    if !luckyStunRules.isEmpty {
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("已登录 Lucky STUN 规则").font(.caption.weight(.semibold)).foregroundColor(theme.textSecondary)
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    ForEach(luckyStunRules) { rule in
+                                        HStack(alignment: .top, spacing: 8) {
+                                            Image(systemName: rule.id == luckyStunRuleID ? "checkmark.circle.fill" : "circle")
+                                                .foregroundColor(rule.id == luckyStunRuleID ? theme.accent : theme.textSecondary)
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(rule.name).font(.subheadline.weight(.semibold))
+                                                Text(rule.address).font(.caption.monospacedDigit()).foregroundColor(theme.textSecondary)
+                                            }
+                                            Spacer()
+                                        }
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                            luckyStunRuleID = rule.id
+                                            UserDefaults.standard.set(rule.name, forKey: "luckyStunRuleName")
+                                        }
+                                    }
+                                }
+                            }
+                            .frame(maxHeight: 130)
+                            .padding(8)
+                            .background(theme.textSecondary.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        Picker("穿透地址指定规则", selection: $luckyStunRuleID) {
+                            ForEach(luckyStunRules) { rule in
+                                Text("\(rule.name) · \(rule.address)").tag(rule.id)
+                            }
+                        }
+                    }
+                    HStack(spacing: 10) {
+                        Button(action: refreshLuckyStun) {
+                            if isUpdatingLuckyStun { ProgressView().controlSize(.small) } else { Text("登录检测并更新") }
+                        }
+                        .disabled(isUpdatingLuckyStun || luckyStunManagementURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Toggle("定期自动更新", isOn: $luckyStunAutoUpdate)
+                    }
+                    Stepper("更新周期：\(luckyStunUpdateIntervalMinutes) 分钟", value: $luckyStunUpdateIntervalMinutes, in: 5...1440, step: 5)
+                    Text(luckyStunStatusMessage)
+                        .font(.caption)
+                        .foregroundColor(theme.textSecondary)
                 }
 
                 Section(header: Text("本地刮削文件").font(.headline).padding(.top, 10)) {
@@ -180,29 +253,58 @@ struct SettingsView: View {
                 }
                 
                 Section(header: Text("刮削服务 (TMDB)").font(.headline).padding(.top, 10)) {
-                    Toggle("启用公共源 TMDB", isOn: $tmdbUsePublicSource)
-                        .help("默认开启。关闭后只有填写自定义 TMDB API 时才能继续刮削和获取剧照。")
-
-                    Text("公开源码不内置个人 TMDB Key。请填写自己的 TMDB API Key / v4 令牌，以启用稳定的刮削。")
+                    Text("请填写自己的 TMDB API Key / v4 令牌，以启用刮削、海报和剧照获取。")
                         .font(.caption)
                         .foregroundColor(theme.textSecondary)
 
-                    HStack {
-                        TextField("API Key / v4 令牌", text: $tmdbApiKey)
-                            .textFieldStyle(.roundedBorder)
-                            .focused($isTMDBApiFocused)
+                    HStack(alignment: .center, spacing: 8) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color(nsColor: .textBackgroundColor))
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .stroke(Color(nsColor: .separatorColor), lineWidth: 0.8)
+                            SingleLineAPITextField(
+                                text: $tmdbApiKey,
+                                placeholder: "API Key / v4 令牌",
+                                isFocused: Binding(
+                                    get: { isTMDBApiFocused },
+                                    set: { isTMDBApiFocused = $0 }
+                                )
+                            )
+                            .padding(.horizontal, 8)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                        .frame(width: 410, height: 28)
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
                         
                         Button(action: validateTMDBApi) {
                             if isValidatingAPI {
-                                ProgressView().controlSize(.small).frame(width: 40)
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .frame(width: 44, height: 28)
                             } else {
                                 Text("验证")
+                                    .frame(width: 44, height: 28)
                             }
                         }
+                        .buttonStyle(.plain)
+                        .frame(width: 64, height: 28)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .stroke(Color(nsColor: .separatorColor), lineWidth: 0.8)
+                        )
+                        .foregroundColor(trimmedTMDBApiKey.isEmpty || isValidatingAPI ? theme.textSecondary.opacity(0.55) : theme.textPrimary)
+                        .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
                         .disabled(trimmedTMDBApiKey.isEmpty || isValidatingAPI)
+                        Spacer(minLength: 0)
                     }
+                    .frame(height: 28)
 
-                    Text("填写自定义 API 后会优先使用你的密钥；“验证”只检查这里填写的自定义密钥。")
+                    Text("“验证”会检查这里填写的 TMDB API Key / v4 令牌。")
                         .font(.caption)
                         .foregroundColor(theme.textSecondary)
 
@@ -210,11 +312,7 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(theme.accent)
 
-                    if trimmedTMDBApiKey.isEmpty, tmdbUsePublicSource {
-                        Text("当前未填写自定义 TMDB API；公开源码版本不会内置个人 Key。")
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                    } else if trimmedTMDBApiKey.isEmpty {
+                    if trimmedTMDBApiKey.isEmpty {
                         Text("当前未配置任何 TMDB 凭据。TMDB 刮削、海报与剧照获取将不可用。")
                             .font(.caption)
                             .foregroundColor(.red)
@@ -228,13 +326,34 @@ struct SettingsView: View {
                             .transition(.opacity)
                     }
                 }
+
+                Section(header: Text("播放器内核与开源组件").font(.headline).padding(.top, 10)) {
+                    ForEach(OpenSourceCatalog.summaryRows) { row in
+                        SettingsValueRow(title: row.title, value: row.value)
+                    }
+
+                    Text("此处显示当前构建实际采用的播放器栈和主要三方组件，便于用户确认采用的内核、解码链路和数据库栈。仅展示信息不替代开源协议要求的源码提供、许可证随附和再分发义务。")
+                        .font(.caption)
+                        .foregroundColor(theme.textSecondary)
+
+                    Button("查看开源组件详情与许可证线索") {
+                        isShowingOpenSourceInfo = true
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(theme.accent)
+                }
             }
             .padding().formStyle(.grouped)
         }
-        .frame(width: 550, height: 660)
+        .frame(width: 620, height: 760)
         .environment(\.locale, .init(identifier: appLanguage))
+        .sheet(isPresented: $isShowingOpenSourceInfo) {
+            OpenSourceInfoSheet(theme: theme)
+        }
         .onAppear {
             restoreAutomaticUpdateStatusIfAvailable()
+            luckyStunRules = LuckyStunCoordinator.shared.cachedRules
+            LuckyStunCoordinator.shared.startAutomaticUpdates()
             guard focusTMDBApi else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                 isTMDBApiFocused = true
@@ -244,8 +363,15 @@ struct SettingsView: View {
             UserDefaults.standard.set([newValue], forKey: "AppleLanguages")
             UserDefaults.standard.synchronize()
         }
+        .onChange(of: luckyStunAutoUpdate) { _, _ in LuckyStunCoordinator.shared.startAutomaticUpdates() }
+        .onChange(of: luckyStunUpdateIntervalMinutes) { _, _ in LuckyStunCoordinator.shared.startAutomaticUpdates() }
+        .onReceive(NotificationCenter.default.publisher(for: LuckyStunCoordinator.rulesUpdatedNotification)) { notification in
+            if let rules = notification.object as? [LuckyStunRule] {
+                luckyStunRules = rules
+            }
+        }
     }
-    
+
     private var trimmedTMDBApiKey: String {
         tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -267,14 +393,15 @@ struct SettingsView: View {
     }
     
     private func validateTMDBApi() {
-        let key = trimmedTMDBApiKey
-        guard !key.isEmpty else { return }
+        let customKey = trimmedTMDBApiKey
+        guard !customKey.isEmpty else { return }
+
         isValidatingAPI = true
         apiValidationMessage = "正在连接 TMDB 服务器..."
         apiValidationColor = .secondary
         
         Task {
-            let result = await TMDBService.shared.checkConnection(customAPIInput: key)
+            let result = await TMDBService.shared.checkConnection(customAPIInput: customKey)
             await MainActor.run {
                 if result.isConnected {
                     apiValidationMessage = "✅ 验证成功！API 状态正常。"
@@ -288,6 +415,21 @@ struct SettingsView: View {
         }
     }
 
+    private func refreshLuckyStun() {
+        isUpdatingLuckyStun = true
+        luckyStunStatusMessage = "正在登录并读取 Lucky STUN 规则..."
+        Task { @MainActor in
+            let result = await LuckyStunCoordinator.shared.refresh()
+            luckyStunRules = result.rules
+            if let selected = result.selectedRule {
+                luckyStunRuleID = selected.id
+            }
+            luckyStunStatusMessage = result.message
+            isUpdatingLuckyStun = false
+            LuckyStunCoordinator.shared.startAutomaticUpdates()
+        }
+    }
+
     private func checkForUpdates(install: Bool) {
         isCheckingForUpdate = true
         updateStatusMessage = install ? "正在获取最新版本..." : "正在检查 GitHub 最新版本..."
@@ -297,7 +439,9 @@ struct SettingsView: View {
             do {
                 let release = try await fetchLatestRelease()
                 guard !release.isEmpty else {
-                    await MainActor.run { isCheckingForUpdate = false }
+                    await MainActor.run {
+                        isCheckingForUpdate = false
+                    }
                     return
                 }
                 let tagName = (release["tag_name"] as? String) ?? ""
@@ -426,6 +570,103 @@ struct SettingsView: View {
     private func openExternalURL(_ value: String) {
         guard let url = URL(string: value) else { return }
         NSWorkspace.shared.open(url)
+    }
+}
+
+private struct SingleLineAPITextField: NSViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    @Binding var isFocused: Bool
+
+    func makeNSView(context: Context) -> NSTextField {
+        let textField = FocusableTextField()
+        textField.cell = VerticallyCenteredTextFieldCell(textCell: "")
+        textField.delegate = context.coordinator
+        textField.isEditable = true
+        textField.isSelectable = true
+        textField.isEnabled = true
+        textField.refusesFirstResponder = false
+        textField.isBordered = false
+        textField.isBezeled = false
+        textField.drawsBackground = false
+        textField.focusRingType = .none
+        textField.font = .systemFont(ofSize: 13)
+        textField.placeholderString = placeholder
+        textField.lineBreakMode = .byClipping
+        if let cell = textField.cell {
+            cell.wraps = false
+            cell.isScrollable = true
+            cell.usesSingleLineMode = true
+            cell.lineBreakMode = .byClipping
+        }
+        textField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return textField
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+        if nsView.placeholderString != placeholder {
+            nsView.placeholderString = placeholder
+        }
+        if isFocused, nsView.window?.firstResponder !== nsView.currentEditor() {
+            nsView.window?.makeFirstResponder(nsView)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, isFocused: $isFocused)
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        @Binding private var text: String
+        @Binding private var isFocused: Bool
+
+        init(text: Binding<String>, isFocused: Binding<Bool>) {
+            _text = text
+            _isFocused = isFocused
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let textField = notification.object as? NSTextField else { return }
+            text = textField.stringValue
+        }
+
+        func controlTextDidBeginEditing(_ notification: Notification) {
+            isFocused = true
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            isFocused = false
+        }
+    }
+}
+
+private final class FocusableTextField: NSTextField {
+    override var acceptsFirstResponder: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        super.mouseDown(with: event)
+    }
+}
+
+private final class VerticallyCenteredTextFieldCell: NSTextFieldCell {
+    override func titleRect(forBounds rect: NSRect) -> NSRect {
+        centeredRect(super.titleRect(forBounds: rect))
+    }
+
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        centeredRect(super.drawingRect(forBounds: rect))
+    }
+
+    private func centeredRect(_ rect: NSRect) -> NSRect {
+        guard let font else { return rect }
+        let textHeight = ceil(font.ascender - font.descender)
+        let y = rect.origin.y + max(0, (rect.height - textHeight) / 2) - 1
+        return NSRect(x: rect.origin.x, y: y, width: rect.width, height: textHeight)
     }
 }
 

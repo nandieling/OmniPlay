@@ -28,6 +28,8 @@ http://NAS_IP:45722
 
 默认 `compose.yml` 和 `compose.hwaccel.yml` 都使用 host 网络。这样容器内访问 `127.0.0.1/localhost` 就是宿主机，适合直接使用 NAS/宿主机本机代理，例如 `http://localhost:20171`。
 
+字幕预缓存默认关闭。需要后台预处理下一集或整个媒体库的字幕时，可在 Web UI 的“设置 -> 缓存”中选择“优化缓存方案”或“全量缓存”；关闭预缓存不影响播放时即时加载和转换字幕。
+
 ## 目录挂载
 
 两个 compose 默认都挂载：
@@ -46,6 +48,34 @@ volumes:
 ```
 
 然后在 OmniPlay Web UI 中添加容器内路径，例如 `/media/video`。
+
+### 多目录或多硬盘挂载
+
+每个宿主机目录增加一条 volume，并映射到 `/media` 下互不重复的容器路径。例如：
+
+```yaml
+volumes:
+  - ./data:/var/lib/omniplay
+  - ./cache:/var/cache/omniplay
+  - /volume1/movies:/media/disk1/movies:ro
+  - /volume1/tv:/media/disk1/tv:ro
+  - /volume2/video:/media/disk2/video:ro
+  - /mnt/usb4k:/media/usb/4k:ro
+```
+
+修改后重新创建容器：
+
+```sh
+docker compose up -d --build
+```
+
+使用硬解 compose 时改用：
+
+```sh
+docker compose -f compose.hwaccel.yml up -d --build
+```
+
+然后在 Web UI 的媒体源管理中分别添加 `/media/disk1/movies`、`/media/disk1/tv`、`/media/disk2/video` 和 `/media/usb/4k`。左侧必须是宿主机上的真实绝对路径，右侧是容器内路径；不同挂载不要映射到同一个右侧路径。默认的 `OMNIPLAY_LOCAL_SHARE_ROOTS=/media` 已允许浏览这些子目录，无需为每块硬盘修改环境变量。
 
 不要把自己的 TMDB API Key、代理地址、账号密码写进 `compose.yml` 后提交。需要固定运行配置时，建议在本机创建未纳入 Git 的 `.env` 文件，或只在 Docker 管理界面里填写。
 

@@ -37,6 +37,20 @@ private struct MediaServerSourceDraft {
     let userId: String
     let finalName: String
     let authConfig: String?
+    let localLabel: String
+    let externalAddresses: [MediaSourceExternalAddress]
+}
+
+private struct SourceConnectivityResult {
+    let isReachable: Bool
+    let address: String
+    let label: String
+    let message: String
+}
+
+private struct SourceAddressCandidate {
+    let address: String
+    let label: String
 }
 
 private struct PlexPINAuthSession {
@@ -217,6 +231,26 @@ struct PosterWallView: View {
     @State private var mediaServerPassword = ""
     @State private var mediaServerMessage: String? = nil
     @State private var mediaServerIsPreScanning = false
+    @State private var mediaServerLocalLabel = "局域网"
+    @State private var pendingExternalAddresses: [MediaSourceExternalAddress] = []
+    @State private var webDAVBrowserExternalAddresses: [MediaSourceExternalAddress] = []
+    @State private var webDAVLocalLabel = "局域网"
+    @State private var webDAVBrowserLocalLabel = "局域网"
+    @State private var luckyStunRules: [LuckyStunRule] = []
+    @State private var isShowingLuckyStunSourceSheet = false
+    @State private var luckySourceName = ""
+    @State private var luckySourceProtocol: MediaSourceProtocol = .omniplayDocker
+    @State private var luckyManagementURL = ""
+    @State private var luckyUsername = ""
+    @State private var luckyPassword = ""
+    @State private var luckyRuleID = ""
+    @State private var luckyAutoUpdate = true
+    @State private var luckyUpdateIntervalMinutes = 30
+    @State private var luckyDockerUsername = ""
+    @State private var luckyDockerPassword = ""
+    @State private var luckyStatusMessage: String? = nil
+    @State private var isTestingLuckySource = false
+    @State private var pendingLuckyConfiguration: LuckyStunSourceConfiguration? = nil
     @State private var isShowingWebDAVPreScanLoginSheet = false
     @State private var isShowingWebDAVFolderBrowserSheet = false
     @State private var webDAVBrowserName: String = ""
@@ -260,6 +294,8 @@ struct PosterWallView: View {
     @State private var recentWebDAVHistory: [RecentWebDAVHistoryItem] = PosterWallView.loadRecentWebDAVHistory()
     @State private var isShowingRemoveSourceSheet = false
     @State private var sourcePendingRemoval: MediaSource? = nil
+    @State private var sourceConnectivityStatus: [Int64: String] = [:]
+    @State private var checkingSourceIDs: Set<Int64> = []
     @State private var isLoadingLibraryData = false
     @State private var needsLibraryReloadAfterCurrentLoad = false
     @State private var isShowingTMDBConnectionAlert = false
@@ -386,6 +422,25 @@ struct PosterWallView: View {
                 }
 
                 HStack(alignment: .center, spacing: 16) {
+                    if cacheManager.isCaching {
+                        HStack(spacing: 8) {
+                            ProgressView(value: cacheManager.overallDownloadProgress)
+                                .progressViewStyle(.circular)
+                                .controlSize(.small)
+                                .tint(theme.accent)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(cacheManager.activeCacheTitle ?? "离线缓存")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundColor(topToolbarStatusTextColor)
+                                    .lineLimit(1)
+                                Text("\(cacheManager.currentCacheFileName ?? "等待缓存") · 第 \(min(cacheManager.completedDownloadCount + 1, cacheManager.totalDownloadCount))/\(cacheManager.totalDownloadCount) 集 · \(Int(cacheManager.overallDownloadProgress * 100))%")
+                                    .font(.caption2)
+                                    .foregroundColor(topToolbarStatusTextColor.opacity(0.8))
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: 260, alignment: .leading)
+                        }
+                    }
                     if isProcessing || !thumbManager.progressMessage.isEmpty {
                         let statusMessage = isProcessing
                             ? (processingMessage.isEmpty ? "正在扫描媒体源..." : processingMessage)
@@ -470,6 +525,9 @@ struct PosterWallView: View {
             .sheet(isPresented: $isShowingMediaServerSheet) {
                 mediaServerSourceSheet()
             }
+            .sheet(isPresented: $isShowingLuckyStunSourceSheet) {
+                luckyStunSourceSheet()
+            }
             .sheet(isPresented: $isShowingRemoveSourceSheet) {
                 removeSourceSheet()
             }
@@ -489,6 +547,8 @@ struct PosterWallView: View {
         .onAppear {
             loadData()
             startDockerAutoSyncIfNeeded()
+            luckyStunRules = LuckyStunCoordinator.shared.cachedRules
+            LuckyStunCoordinator.shared.startAutomaticUpdates()
             MacAppUpdateChecker.checkAtStartupIfNeeded()
             if ProcessInfo.processInfo.environment["UITEST_OPEN_WEBDAV_SHEET"] == "1" {
                 prepareManualWebDAVBrowserLogin()
@@ -498,8 +558,21 @@ struct PosterWallView: View {
                 triggerScanAndScrape()
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .libraryUpdated)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .libraryUpdated)) { notification in
+            if notification.userInfo?[LibraryUpdateUserInfoKey.metadataScrapeCompleted] as? Bool == true {
+                pendingLibraryReloadTask?.cancel()
+                loadData()
+            } else {
+                scheduleDebouncedLibraryReload()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: LuckyStunCoordinator.sourceUpdatedNotification)) { _ in
             scheduleDebouncedLibraryReload()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: LuckyStunCoordinator.rulesUpdatedNotification)) { notification in
+            if let rules = notification.object as? [LuckyStunRule] {
+                luckyStunRules = rules
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TriggerScanAndScrape"))) { _ in triggerScanAndScrape() }
         .onChange(of: enableFastTooltip) { _, isFast in
@@ -539,15 +612,22 @@ struct PosterWallView: View {
         panel.allowsMultipleSelection = false
         
         if panel.runModal() == .OK, let selectedURL = panel.url {
+            let absolutePath = MediaSourceProtocol.local.normalizedBaseURL(selectedURL.path)
+            let sourceName = selectedURL.lastPathComponent
+            let addressConfig = addressConfigurationString(
+                protocolKind: .local,
+                localAddress: absolutePath,
+                localLabel: "本地",
+                externalAddresses: []
+            )
             Task {
                 do {
-                    let absolutePath = MediaSourceProtocol.local.normalizedBaseURL(selectedURL.path)
                     // 直接存入数据库，丢弃了所有的 authConfig 和协议判断
                     try await AppDatabase.shared.dbQueue.write { db in
                         let count = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM mediaSource WHERE baseUrl = ?", arguments: [absolutePath]) ?? 0
                         if count == 0 {
-                            try db.execute(sql: "INSERT INTO mediaSource (name, baseUrl, protocolType) VALUES (?, ?, ?)",
-                                           arguments: [selectedURL.lastPathComponent, MediaSourceProtocol.local.normalizedBaseURL(absolutePath), MediaSourceProtocol.local.rawValue])
+                            try db.execute(sql: "INSERT INTO mediaSource (name, baseUrl, protocolType, addressConfig) VALUES (?, ?, ?, ?)",
+                                           arguments: [sourceName, absolutePath, MediaSourceProtocol.local.rawValue, addressConfig])
                         }
                     }
                     await MainActor.run {
@@ -572,7 +652,7 @@ struct PosterWallView: View {
                 HStack(spacing: 10) {
                     Image(systemName: sourceIconName(source)).foregroundColor(.blue)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(source.name)
+                        Text(source.displayNameWithActiveLabel)
                             .font(.body)
                             .fontWeight(.semibold)
                             .foregroundColor(.primary)
@@ -593,9 +673,21 @@ struct PosterWallView: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
+                        if let sourceID = source.id, let status = sourceConnectivityStatus[sourceID] {
+                            Text(status)
+                                .font(.caption2)
+                                .foregroundColor(status.hasPrefix("连接成功") ? .green : (status == "检测中..." ? .secondary : .red))
+                                .lineLimit(2)
+                        }
                     }
                     .frame(maxWidth: 300, alignment: .leading)
                     Spacer()
+                    Button(checkingSourceIDs.contains(source.id ?? -1) ? "检测中..." : "检测连通性") {
+                        checkMediaSourceConnectivity(source)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .disabled(source.id == nil || checkingSourceIDs.contains(source.id ?? -1))
+                    .help("优先检测局域网地址，失败后依次检测外网地址")
                     Button(action: { toggleMediaSourceEnabled(source) }) {
                         Text(source.isEnabled ? "关闭" : "开启")
                             .font(.caption.weight(.semibold))
@@ -646,6 +738,12 @@ struct PosterWallView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("menu.addRemoteSource")
+
+                Button(action: openLuckyStunSourceSheet) {
+                    Label("Lucky STUN 穿透媒体源", systemImage: "point.3.connected.trianglepath.dotted")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
             }
 
             Divider()
@@ -734,6 +832,42 @@ struct PosterWallView: View {
         case .plex, .emby, .jellyfin, .omniplayDocker: return "server.rack"
         default: return "folder.fill"
         }
+    }
+
+    private nonisolated func normalizedExternalAddresses(
+        _ addresses: [MediaSourceExternalAddress],
+        protocolKind: MediaSourceProtocol
+    ) -> [MediaSourceExternalAddress] {
+        addresses.compactMap { item in
+            var normalized = item
+            let raw = item.address.trimmingCharacters(in: .whitespacesAndNewlines)
+            if raw.isEmpty {
+                return item.useLuckyStun ? normalized : nil
+            }
+            let value = protocolKind.normalizedBaseURL(raw)
+            guard protocolKind.isValidBaseURL(value) else { return nil }
+            normalized.address = value
+            return normalized
+        }
+    }
+
+    private nonisolated func addressConfigurationString(
+        protocolKind: MediaSourceProtocol,
+        localAddress: String,
+        localLabel: String,
+        externalAddresses: [MediaSourceExternalAddress]
+    ) -> String? {
+        let normalizedLocalAddress = protocolKind.normalizedBaseURL(localAddress)
+        let normalizedLabel = localLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "局域网" : localLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let configuration = MediaSourceAddressConfiguration(
+            localAddress: normalizedLocalAddress,
+            localLabel: normalizedLabel,
+            externalAddresses: normalizedExternalAddresses(externalAddresses, protocolKind: protocolKind),
+            activeAddress: normalizedLocalAddress,
+            activeLabel: normalizedLabel
+        )
+        guard let data = try? JSONEncoder().encode(configuration) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     private func mediaServerProtocolLabel(_ value: MediaSourceProtocol) -> String {
@@ -889,6 +1023,8 @@ struct PosterWallView: View {
         let draftBaseURL = mediaServerBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let draftUsername = mediaServerUserId.trimmingCharacters(in: .whitespacesAndNewlines)
         let draftPassword = mediaServerPassword
+        let draftLocalLabel = mediaServerLocalLabel
+        let draftExternalAddresses = pendingExternalAddresses
 
         dismissRemoteSourceForm()
         prepareManualWebDAVBrowserLogin()
@@ -904,6 +1040,8 @@ struct PosterWallView: View {
         if !draftPassword.isEmpty {
             webDAVBrowserPassword = draftPassword
         }
+        webDAVBrowserLocalLabel = draftLocalLabel
+        webDAVBrowserExternalAddresses = draftExternalAddresses
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
             isShowingWebDAVPreScanLoginSheet = true
         }
@@ -912,6 +1050,7 @@ struct PosterWallView: View {
     private func closeRemoteSourceSheets() {
         isShowingManualRemoteSourceSheet = false
         isShowingMediaServerSheet = false
+        isShowingLuckyStunSourceSheet = false
         isShowingWebDAVPreScanLoginSheet = false
         isShowingWebDAVFolderBrowserSheet = false
     }
@@ -922,6 +1061,145 @@ struct PosterWallView: View {
         resetOmniPlayDockerForm()
         DispatchQueue.main.async {
             isShowingManualRemoteSourceSheet = true
+        }
+    }
+
+    private func openLuckyStunSourceSheet() {
+        isShowingManageSources = false
+        closeRemoteSourceSheets()
+        luckySourceName = ""
+        luckySourceProtocol = .omniplayDocker
+        luckyManagementURL = ""
+        luckyUsername = ""
+        luckyPassword = ""
+        luckyRuleID = ""
+        luckyStunRules = []
+        luckyAutoUpdate = true
+        luckyUpdateIntervalMinutes = 30
+        luckyDockerUsername = ""
+        luckyDockerPassword = ""
+        luckyStatusMessage = nil
+        isTestingLuckySource = false
+        pendingLuckyConfiguration = nil
+        isShowingLuckyStunSourceSheet = true
+    }
+
+    private func testLuckyStunLogin() {
+        let managementURL = luckyManagementURL
+        let username = luckyUsername
+        let password = luckyPassword
+        isTestingLuckySource = true
+        luckyStatusMessage = "正在登录并读取穿透规则..."
+        Task { @MainActor in
+            do {
+                let rules = try await LuckyStunClient.shared.fetch(
+                    managementURL: managementURL,
+                    username: username,
+                    password: password,
+                    selectedRuleID: luckyRuleID,
+                    selectedRuleName: ""
+                )
+                luckyStunRules = rules
+                if !rules.contains(where: { $0.id == luckyRuleID }) {
+                    luckyRuleID = rules.first?.id ?? ""
+                }
+                luckyStatusMessage = rules.isEmpty ? "登录成功，但没有读取到穿透规则。" : "登录成功，已读取 \(rules.count) 条穿透规则。"
+            } catch {
+                luckyStunRules = []
+                luckyStatusMessage = error.localizedDescription
+            }
+            isTestingLuckySource = false
+        }
+    }
+
+    private func luckyStunSourceSheet() -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("添加 Lucky STUN 穿透媒体源")
+                .font(.title3.bold())
+            Picker("类型", selection: $luckySourceProtocol) {
+                Text("OmniPlay Docker").tag(MediaSourceProtocol.omniplayDocker)
+                Text("WebDAV").tag(MediaSourceProtocol.webdav)
+                Text("Plex").tag(MediaSourceProtocol.plex)
+                Text("Emby").tag(MediaSourceProtocol.emby)
+                Text("Jellyfin").tag(MediaSourceProtocol.jellyfin)
+            }
+            .pickerStyle(.segmented)
+            TextField("显示名称（可选）", text: $luckySourceName)
+                .textFieldStyle(.roundedBorder)
+            TextField("Lucky 管理地址", text: $luckyManagementURL)
+                .textFieldStyle(.roundedBorder)
+            TextField("Lucky 管理账号", text: $luckyUsername)
+                .textFieldStyle(.roundedBorder)
+            SecureField("Lucky 管理密码", text: $luckyPassword)
+                .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Button(isTestingLuckySource ? "检测中..." : "登录检测") { testLuckyStunLogin() }
+                    .disabled(isTestingLuckySource || luckyManagementURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if isTestingLuckySource { ProgressView().controlSize(.small) }
+            }
+
+            Picker("穿透规则", selection: $luckyRuleID) {
+                Text("请选择穿透规则").tag("")
+                ForEach(luckyStunRules) { rule in
+                    Text("\(rule.name) · \(rule.address)").tag(rule.id)
+                }
+            }
+            .disabled(luckyStunRules.isEmpty)
+
+            Toggle("自动更新穿透地址", isOn: $luckyAutoUpdate)
+                .toggleStyle(.checkbox)
+            if luckyAutoUpdate {
+                Stepper("更新周期：\(luckyUpdateIntervalMinutes) 分钟", value: $luckyUpdateIntervalMinutes, in: 5...1440, step: 5)
+            }
+
+            Divider()
+            Text("\(mediaServerProtocolLabel(luckySourceProtocol)) 登录")
+                .font(.subheadline.weight(.semibold))
+            if luckySourceProtocol == .plex {
+                SecureField("Plex 访问令牌", text: $luckyDockerPassword)
+                    .textFieldStyle(.roundedBorder)
+            } else {
+                TextField(luckySourceProtocol == .webdav ? "用户名（可选）" : "用户名 / 用户 ID", text: $luckyDockerUsername)
+                    .textFieldStyle(.roundedBorder)
+                SecureField(
+                    luckySourceProtocol == .omniplayDocker
+                        ? "密码"
+                        : (luckySourceProtocol == .webdav ? "密码（可选）" : "密码 / API Key / 访问令牌"),
+                    text: $luckyDockerPassword
+                )
+                .textFieldStyle(.roundedBorder)
+            }
+
+            if let luckyStatusMessage {
+                Text(luckyStatusMessage)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Spacer()
+                Button("取消") { isShowingLuckyStunSourceSheet = false }
+                Button("保存并同步") { saveLuckyStunSource() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(isTestingLuckySource || luckyRuleID.isEmpty || !isLuckySourceCredentialComplete)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+    }
+
+    private var isLuckySourceCredentialComplete: Bool {
+        switch luckySourceProtocol {
+        case .omniplayDocker:
+            return !luckyDockerUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !luckyDockerPassword.isEmpty
+        case .plex, .emby, .jellyfin:
+            return !luckyDockerPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .webdav:
+            return true
+        default:
+            return false
         }
     }
 
@@ -1127,6 +1405,8 @@ struct PosterWallView: View {
 
     private func resetWebDAVDraft(useRecentHistory: Bool = true) {
         recentWebDAVHistory = PosterWallView.loadRecentWebDAVHistory()
+        webDAVLocalLabel = "局域网"
+        pendingExternalAddresses = []
         if useRecentHistory, let latest = recentWebDAVHistory.sorted(by: { $0.lastUsed > $1.lastUsed }).first {
             applyRecentWebDAVHistory(latest, shouldBumpUsage: false)
         } else if useRecentHistory, let snapshot = fetchLatestWebDAVSourceSnapshot() {
@@ -1446,6 +1726,8 @@ struct PosterWallView: View {
         webDAVBrowserPassword = ""
         webDAVBrowserCredentialID = nil
         webDAVBrowserProtocol = .webdav
+        webDAVBrowserLocalLabel = "局域网"
+        webDAVBrowserExternalAddresses = []
         webDAVBrowserCurrentURL = ""
         webDAVBrowserPathStack = []
         webDAVBrowserItems = []
@@ -1471,6 +1753,8 @@ struct PosterWallView: View {
         webDAVBrowserPassword = ""
         webDAVBrowserCredentialID = nil
         webDAVBrowserProtocol = .webdav
+        webDAVBrowserLocalLabel = "局域网"
+        webDAVBrowserExternalAddresses = []
         webDAVBrowserCurrentURL = ""
         webDAVBrowserPathStack = []
         webDAVBrowserItems = []
@@ -1825,6 +2109,10 @@ struct PosterWallView: View {
         let authConfig = webDAVBrowserCredentialID.map { WebDAVCredentialStore.shared.authReference(for: $0) }
         let username = webDAVBrowserUsername
         let credentialID = webDAVBrowserCredentialID
+        let configuredExternalAddresses = webDAVBrowserExternalAddresses
+        let browserLocalLabel = webDAVBrowserLocalLabel
+        let luckyConfiguration = pendingLuckyConfiguration
+        let luckyRootAddress = webDAVBrowserBaseURL
 
         webDAVBrowserIsBatchMounting = true
         webDAVBrowserMessage = nil
@@ -1839,47 +2127,54 @@ struct PosterWallView: View {
                         let protocolValue = folder.protocolKind.rawValue
                         let folderAuthConfig = folder.protocolKind == .webdav ? authConfig : folder.authConfig
                         let sourceName = folder.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "\(remoteBrowserProtocolLabel(folder.protocolKind)) 媒体源" : folder.name
-                        let existing: MediaSource?
-                        if folder.protocolKind == .webdav {
-                            existing = try MediaSource.fetchOne(
-                                db,
-                                sql: "SELECT * FROM mediaSource WHERE protocolType = ? AND baseUrl = ? LIMIT 1",
-                                arguments: [protocolValue, baseURL]
-                            )
-                        } else {
-                            existing = try MediaSource.fetchAll(
-                                db,
-                                sql: "SELECT * FROM mediaSource WHERE protocolType = ? AND baseUrl = ?",
-                                arguments: [protocolValue, baseURL]
-                            ).first { source in
-                                remoteBrowserKey(protocolKind: folder.protocolKind, baseURL: source.baseUrl, authConfig: source.authConfig) == folder.key
-                            }
+                        let existing = try MediaSource.fetchAll(
+                            db,
+                            sql: "SELECT * FROM mediaSource WHERE protocolType = ?",
+                            arguments: [protocolValue]
+                        ).first { source in
+                            let configuration = source.addressConfiguration()
+                            return folder.protocolKind.normalizedBaseURL(source.baseUrl).caseInsensitiveCompare(baseURL) == .orderedSame
+                                || folder.protocolKind.normalizedBaseURL(configuration.localAddress).caseInsensitiveCompare(baseURL) == .orderedSame
+                                || remoteBrowserKey(protocolKind: folder.protocolKind, baseURL: source.baseUrl, authConfig: source.authConfig) == folder.key
                         }
-                        if let existing, let existingID = existing.id {
-                            try db.execute(
-                                sql: """
-                                UPDATE mediaSource
-                                SET name = ?,
-                                    authConfig = COALESCE(?, authConfig),
-                                    isEnabled = 1,
-                                    disabledAt = NULL
-                                WHERE id = ?
-                                """,
-                                arguments: [sourceName, folderAuthConfig, existingID]
-                            )
-                            mountedIDs.append(existingID)
-                            continue
-                        }
-
-                        let source = MediaSource(
+                        let existingID = existing?.id
+                        var source = existing ?? MediaSource(
                             id: nil,
                             name: sourceName,
                             protocolType: protocolValue,
                             baseUrl: baseURL,
                             authConfig: folderAuthConfig
                         )
-                        try source.insert(db)
-                        mountedIDs.append(db.lastInsertedRowID)
+                        source.name = sourceName
+                        source.baseUrl = source.baseUrl.isEmpty ? baseURL : source.baseUrl
+                        if existingID == nil { source.baseUrl = baseURL }
+                        if let folderAuthConfig { source.authConfig = folderAuthConfig }
+                        source.isEnabled = true
+                        source.disabledAt = nil
+                        var configuration = existing?.addressConfiguration() ?? MediaSourceAddressConfiguration()
+                        configuration.localAddress = baseURL
+                        configuration.localLabel = browserLocalLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "局域网" : browserLocalLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let normalizedExternal = normalizedExternalAddresses(configuredExternalAddresses, protocolKind: folder.protocolKind)
+                        configuration.externalAddresses = normalizedExternal
+                        if var mountedLuckyConfiguration = luckyConfiguration {
+                            mountedLuckyConfiguration.pathSuffix = relativePathSuffix(
+                                from: luckyRootAddress,
+                                to: baseURL
+                            )
+                            configuration.luckyStun = mountedLuckyConfiguration
+                        }
+                        if existingID == nil || configuration.activeAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            configuration.activeAddress = baseURL
+                            configuration.activeLabel = configuration.localLabel
+                        }
+                        source.setAddressConfiguration(configuration)
+                        if existingID != nil {
+                            try source.update(db)
+                            mountedIDs.append(source.id ?? 0)
+                        } else {
+                            try source.insert(db)
+                            mountedIDs.append(db.lastInsertedRowID)
+                        }
                     }
                     return mountedIDs
                 }
@@ -1924,6 +2219,9 @@ struct PosterWallView: View {
             webDAVBrowserPassword = ""
             webDAVBrowserCredentialID = nil
             webDAVBrowserProtocol = .webdav
+            webDAVBrowserLocalLabel = "局域网"
+            webDAVBrowserExternalAddresses = []
+            pendingLuckyConfiguration = nil
         }
         webDAVBrowserCurrentURL = ""
         webDAVBrowserPathStack = []
@@ -1933,6 +2231,18 @@ struct PosterWallView: View {
         webDAVBrowserIsLoading = false
         webDAVBrowserIsBatchMounting = false
         webDAVBrowserStarredFolders = []
+    }
+
+    nonisolated private func relativePathSuffix(from rootAddress: String, to mountedAddress: String) -> String {
+        guard let root = URLComponents(string: rootAddress),
+              let mounted = URLComponents(string: mountedAddress) else { return "" }
+        let rootPath = root.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let mountedPath = mounted.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !mountedPath.isEmpty else { return "" }
+        if rootPath.isEmpty { return mountedPath }
+        if mountedPath == rootPath { return "" }
+        let prefix = rootPath + "/"
+        return mountedPath.hasPrefix(prefix) ? String(mountedPath.dropFirst(prefix.count)) : mountedPath
     }
 
     nonisolated private func sanitizedWebDAVBrowserURL(_ raw: String) -> String {
@@ -2041,6 +2351,8 @@ struct PosterWallView: View {
         mediaServerUserId = ""
         mediaServerPassword = ""
         mediaServerIsPreScanning = false
+        mediaServerLocalLabel = "局域网"
+        pendingExternalAddresses = []
         mediaServerMessage = mediaServerConnectionHint(for: mediaServerProtocol)
     }
 
@@ -2064,6 +2376,8 @@ struct PosterWallView: View {
         mediaServerUserId = ""
         mediaServerPassword = ""
         mediaServerIsPreScanning = false
+        mediaServerLocalLabel = "局域网"
+        pendingExternalAddresses = []
         mediaServerMessage = mediaServerConnectionHint(for: .plex)
     }
 
@@ -2075,6 +2389,8 @@ struct PosterWallView: View {
         mediaServerUserId = ""
         mediaServerPassword = ""
         mediaServerIsPreScanning = false
+        mediaServerLocalLabel = "局域网"
+        pendingExternalAddresses = []
         mediaServerMessage = mediaServerConnectionHint(for: .omniplayDocker)
     }
 
@@ -2139,7 +2455,9 @@ struct PosterWallView: View {
                 token: password,
                 userId: username,
                 finalName: finalName,
-                authConfig: nil
+                authConfig: nil,
+                localLabel: mediaServerLocalLabel,
+                externalAddresses: normalizedExternalAddresses(pendingExternalAddresses, protocolKind: mediaServerProtocol)
             )
         }
 
@@ -2156,7 +2474,9 @@ struct PosterWallView: View {
             token: token,
             userId: userId,
             finalName: finalName,
-            authConfig: authConfig
+            authConfig: authConfig,
+            localLabel: mediaServerLocalLabel,
+            externalAddresses: normalizedExternalAddresses(pendingExternalAddresses, protocolKind: mediaServerProtocol)
         )
     }
 
@@ -2212,6 +2532,8 @@ struct PosterWallView: View {
                     webDAVBrowserProtocol = draft.protocolKind
                     webDAVBrowserName = draft.finalName
                     webDAVBrowserBaseURL = draft.normalizedURL
+                    webDAVBrowserLocalLabel = draft.localLabel
+                    webDAVBrowserExternalAddresses = draft.externalAddresses
                     webDAVBrowserUsername = ""
                     webDAVBrowserPassword = ""
                     webDAVBrowserCredentialID = nil
@@ -2246,19 +2568,34 @@ struct PosterWallView: View {
                 try await client.login(username: draft.userId, password: draft.token)
                 let authConfig = OmniPlayDockerAuthConfig.encode(username: draft.userId, sessionCookie: client.sessionCookie)
                 let sourceId = try await AppDatabase.shared.dbQueue.write { db -> Int64 in
-                    if var existing = try MediaSource
-                        .filter(Column("protocolType") == MediaSourceProtocol.omniplayDocker.rawValue)
-                        .filter(Column("baseUrl") == draft.normalizedURL)
-                        .fetchOne(db) {
+                    let existing = try MediaSource.fetchAll(
+                        db,
+                        sql: "SELECT * FROM mediaSource WHERE protocolType = ?",
+                        arguments: [MediaSourceProtocol.omniplayDocker.rawValue]
+                    ).first { source in
+                        let configuration = source.addressConfiguration()
+                        return MediaSourceProtocol.omniplayDocker.normalizedBaseURL(source.baseUrl).caseInsensitiveCompare(draft.normalizedURL) == .orderedSame
+                            || MediaSourceProtocol.omniplayDocker.normalizedBaseURL(configuration.localAddress).caseInsensitiveCompare(draft.normalizedURL) == .orderedSame
+                    }
+                    if var existing {
                         existing.name = draft.finalName
                         existing.authConfig = authConfig
                         existing.isEnabled = true
                         existing.disabledAt = nil
+                        var configuration = existing.addressConfiguration()
+                        configuration.localAddress = draft.normalizedURL
+                        configuration.localLabel = draft.localLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "局域网" : draft.localLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+                        configuration.externalAddresses = draft.externalAddresses
+                        if configuration.activeAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            configuration.activeAddress = draft.normalizedURL
+                            configuration.activeLabel = configuration.localLabel
+                        }
+                        existing.setAddressConfiguration(configuration)
                         try existing.update(db)
                         return existing.id ?? 0
                     }
 
-                    let source = MediaSource(
+                    var source = MediaSource(
                         id: nil,
                         name: draft.finalName,
                         protocolType: MediaSourceProtocol.omniplayDocker.rawValue,
@@ -2267,6 +2604,14 @@ struct PosterWallView: View {
                         isEnabled: true,
                         disabledAt: nil
                     )
+                    let localLabel = draft.localLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "局域网" : draft.localLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+                    source.setAddressConfiguration(MediaSourceAddressConfiguration(
+                        localAddress: draft.normalizedURL,
+                        localLabel: localLabel,
+                        externalAddresses: draft.externalAddresses,
+                        activeAddress: draft.normalizedURL,
+                        activeLabel: localLabel
+                    ))
                     try source.insert(db)
                     return db.lastInsertedRowID
                 }
@@ -2288,6 +2633,151 @@ struct PosterWallView: View {
                 await MainActor.run {
                     mediaServerIsPreScanning = false
                     mediaServerMessage = "Docker 连接失败：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func saveLuckyStunSource() {
+        guard let rule = luckyStunRules.first(where: { $0.id == luckyRuleID }),
+              let address = LuckyStunClient.normalizeAddress(rule.address) else {
+            luckyStatusMessage = "请先登录检测并选择有效的穿透规则。"
+            return
+        }
+        let managementURL = luckyManagementURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let luckyAccount = luckyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let mediaAccount = luckyDockerUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = luckySourceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Lucky STUN · \(rule.name)"
+            : luckySourceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !managementURL.isEmpty, isLuckySourceCredentialComplete else {
+            luckyStatusMessage = "请填写 Lucky 管理地址和媒体源登录信息。"
+            return
+        }
+
+        let luckyConfiguration = LuckyStunSourceConfiguration(
+            managementURL: managementURL,
+            username: luckyAccount,
+            password: luckyPassword,
+            ruleID: rule.id,
+            ruleName: rule.name,
+            autoUpdate: luckyAutoUpdate,
+            updateIntervalMinutes: luckyUpdateIntervalMinutes,
+            lastUpdatedAt: Date().timeIntervalSince1970
+        )
+
+        if luckySourceProtocol == .webdav {
+            pendingLuckyConfiguration = luckyConfiguration
+            webDAVBrowserName = finalName
+            webDAVBrowserBaseURL = address
+            webDAVBrowserUsername = mediaAccount
+            webDAVBrowserPassword = luckyDockerPassword
+            webDAVBrowserProtocol = .webdav
+            webDAVBrowserLocalLabel = ""
+            webDAVBrowserExternalAddresses = []
+            isShowingLuckyStunSourceSheet = false
+            saveWebDAVBrowserLoginAndBrowse()
+            return
+        }
+
+        if luckySourceProtocol == .plex || luckySourceProtocol == .emby || luckySourceProtocol == .jellyfin {
+            isTestingLuckySource = true
+            luckyStatusMessage = "正在读取 \(mediaServerProtocolLabel(luckySourceProtocol)) 媒体库..."
+            Task {
+                do {
+                    let items = try await MediaServerLibraryBrowser().listLibraries(
+                        protocolKind: luckySourceProtocol,
+                        baseURL: address,
+                        token: luckyDockerPassword,
+                        userId: mediaAccount
+                    )
+                    await MainActor.run {
+                        pendingLuckyConfiguration = luckyConfiguration
+                        webDAVBrowserProtocol = luckySourceProtocol
+                        webDAVBrowserName = finalName
+                        webDAVBrowserBaseURL = address
+                        webDAVBrowserLocalLabel = ""
+                        webDAVBrowserExternalAddresses = []
+                        webDAVBrowserUsername = ""
+                        webDAVBrowserPassword = ""
+                        webDAVBrowserCredentialID = nil
+                        webDAVBrowserCurrentURL = address
+                        webDAVBrowserPathStack = []
+                        webDAVBrowserItems = items
+                        webDAVBrowserMountedURLs = mountedRemoteBrowserKeys(from: mediaSources)
+                        webDAVBrowserStarredFolders = []
+                        webDAVBrowserMessage = items.isEmpty ? "连接成功，但当前服务器没有可挂载的媒体库。" : "请选择要挂载的媒体库。"
+                        webDAVBrowserMessageIsError = false
+                        isTestingLuckySource = false
+                        isShowingLuckyStunSourceSheet = false
+                        isShowingWebDAVFolderBrowserSheet = true
+                    }
+                } catch {
+                    await MainActor.run {
+                        isTestingLuckySource = false
+                        luckyStatusMessage = "媒体库读取失败：\(error.localizedDescription)"
+                    }
+                }
+            }
+            return
+        }
+
+        isTestingLuckySource = true
+        luckyStatusMessage = "正在连接穿透地址并同步媒体库..."
+        Task {
+            do {
+                let client = try OmniPlayDockerClient(baseURLString: address)
+                try await client.login(username: mediaAccount, password: luckyDockerPassword)
+                let authConfig = OmniPlayDockerAuthConfig.encode(username: mediaAccount, sessionCookie: client.sessionCookie)
+                let sourceID = try await AppDatabase.shared.dbQueue.write { db -> Int64 in
+                    let sources = try MediaSource.fetchAll(db, sql: "SELECT * FROM mediaSource WHERE protocolType = ?", arguments: [MediaSourceProtocol.omniplayDocker.rawValue])
+                    let existing = sources.first { source in
+                        guard let configured = source.addressConfiguration().luckyStun else { return false }
+                        return configured.managementURL.caseInsensitiveCompare(managementURL) == .orderedSame
+                            && configured.ruleID.caseInsensitiveCompare(rule.id) == .orderedSame
+                    }
+                    var source = existing ?? MediaSource(
+                        id: nil,
+                        name: finalName,
+                        protocolType: MediaSourceProtocol.omniplayDocker.rawValue,
+                        baseUrl: address,
+                        authConfig: authConfig,
+                        isEnabled: true,
+                        disabledAt: nil
+                    )
+                    source.name = finalName
+                    source.baseUrl = address
+                    source.authConfig = authConfig
+                    source.isEnabled = true
+                    source.disabledAt = nil
+                    source.setAddressConfiguration(MediaSourceAddressConfiguration(
+                        localAddress: address,
+                        localLabel: "",
+                        externalAddresses: [],
+                        activeAddress: address,
+                        activeLabel: "",
+                        luckyStun: luckyConfiguration
+                    ))
+                    if source.id == nil {
+                        try source.insert(db)
+                        return db.lastInsertedRowID
+                    }
+                    try source.update(db)
+                    return source.id ?? 0
+                }
+                if let source = try await AppDatabase.shared.dbQueue.read({ db in try MediaSource.fetchOne(db, key: sourceID) }) {
+                    _ = await libraryManager.syncOmniPlayDockerSourceWithResult(source)
+                }
+                await MainActor.run {
+                    isTestingLuckySource = false
+                    isShowingLuckyStunSourceSheet = false
+                    LuckyStunCoordinator.shared.startAutomaticUpdates()
+                    loadData()
+                }
+            } catch {
+                await MainActor.run {
+                    isTestingLuckySource = false
+                    luckyStatusMessage = "穿透媒体源连接失败：\(error.localizedDescription)"
                 }
             }
         }
@@ -2315,6 +2805,8 @@ struct PosterWallView: View {
         let username = webDAVUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         let password = webDAVPassword
         var credentialIDForHistory: String? = nil
+        let configuredExternalAddresses = normalizedExternalAddresses(pendingExternalAddresses, protocolKind: .webdav)
+        let configuredLocalLabel = webDAVLocalLabel
 
         Task {
             let preflightPassed = await performWebDAVPreflight(showSuccessMessage: false)
@@ -2331,27 +2823,40 @@ struct PosterWallView: View {
                 }
 
                 try await AppDatabase.shared.dbQueue.write { db in
-                    let count = try Int.fetchOne(
+                    let existing = try MediaSource.fetchAll(
                         db,
-                        sql: "SELECT COUNT(*) FROM mediaSource WHERE protocolType = ? AND baseUrl = ?",
-                        arguments: [MediaSourceProtocol.webdav.rawValue, normalizedURL]
-                    ) ?? 0
-                    guard count == 0 else {
-                        throw NSError(
-                            domain: "PosterWallView",
-                            code: 1001,
-                            userInfo: [NSLocalizedDescriptionKey: "该 WebDAV 地址已存在。"]
-                        )
+                        sql: "SELECT * FROM mediaSource WHERE protocolType = ?",
+                        arguments: [MediaSourceProtocol.webdav.rawValue]
+                    ).first { source in
+                        let configuration = source.addressConfiguration()
+                        return MediaSourceProtocol.webdav.normalizedBaseURL(source.baseUrl).caseInsensitiveCompare(normalizedURL) == .orderedSame
+                            || MediaSourceProtocol.webdav.normalizedBaseURL(configuration.localAddress).caseInsensitiveCompare(normalizedURL) == .orderedSame
                     }
-
-                    let source = MediaSource(
+                    let existingID = existing?.id
+                    var source = existing ?? MediaSource(
                         id: nil,
                         name: finalName,
                         protocolType: MediaSourceProtocol.webdav.rawValue,
                         baseUrl: normalizedURL,
                         authConfig: authConfig
                     )
-                    try source.insert(db)
+                    source.name = finalName
+                    if existingID == nil { source.baseUrl = normalizedURL }
+                    if let authConfig { source.authConfig = authConfig }
+                    var configuration = existing?.addressConfiguration() ?? MediaSourceAddressConfiguration()
+                    configuration.localAddress = normalizedURL
+                    configuration.localLabel = configuredLocalLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "局域网" : configuredLocalLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+                    configuration.externalAddresses = configuredExternalAddresses
+                    if existingID == nil || configuration.activeAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        configuration.activeAddress = normalizedURL
+                        configuration.activeLabel = configuration.localLabel
+                    }
+                    source.setAddressConfiguration(configuration)
+                    if existingID == nil {
+                        try source.insert(db)
+                    } else {
+                        try source.update(db)
+                    }
                 }
 
                 await MainActor.run {
@@ -2428,6 +2933,118 @@ struct PosterWallView: View {
         }
 
         return result.isReachable
+    }
+
+    private func checkMediaSourceConnectivity(_ source: MediaSource) {
+        guard let sourceID = source.id else { return }
+        checkingSourceIDs.insert(sourceID)
+        sourceConnectivityStatus[sourceID] = "检测中..."
+        let candidates = sourceAddressCandidates(for: source)
+        Task {
+            let result = await checkSourceCandidates(source: source, candidates: candidates)
+            var persisted = false
+            if result.isReachable {
+                persisted = await MainActor.run {
+                    (try? AppDatabase.shared.dbQueue.write { db -> Bool in
+                        guard var latest = try MediaSource.fetchOne(db, key: sourceID) else { return false }
+                        var configuration = latest.addressConfiguration()
+                        latest.baseUrl = result.address
+                        configuration.activeAddress = result.address
+                        configuration.activeLabel = result.label
+                        latest.setAddressConfiguration(configuration)
+                        try latest.update(db)
+                        return true
+                    }) ?? false
+                }
+            }
+            await MainActor.run {
+                checkingSourceIDs.remove(sourceID)
+                if result.isReachable && persisted {
+                    sourceConnectivityStatus[sourceID] = "连接成功：\(result.label) · \(result.address)"
+                    loadData()
+                } else if result.isReachable {
+                    sourceConnectivityStatus[sourceID] = "连接成功：\(result.label) · \(result.address)"
+                } else {
+                    sourceConnectivityStatus[sourceID] = result.message
+                }
+            }
+        }
+    }
+
+    private func sourceAddressCandidates(for source: MediaSource) -> [SourceAddressCandidate] {
+        let configuration = source.addressConfiguration()
+        let localAddress = configuration.localAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? source.baseUrl : configuration.localAddress
+        var result = [SourceAddressCandidate(address: localAddress, label: configuration.localLabel.isEmpty ? "局域网" : configuration.localLabel)]
+        for external in configuration.externalAddresses {
+            let address = external.address.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !address.isEmpty else { continue }
+            if !result.contains(where: { $0.address.caseInsensitiveCompare(address) == .orderedSame }) {
+                result.append(SourceAddressCandidate(address: address, label: external.displayLabel))
+            }
+        }
+        return result
+    }
+
+    private func checkSourceCandidates(
+        source: MediaSource,
+        candidates: [SourceAddressCandidate]
+    ) async -> SourceConnectivityResult {
+        guard let protocolKind = source.protocolKind else {
+            return SourceConnectivityResult(isReachable: false, address: source.baseUrl, label: "", message: "媒体源协议无效。")
+        }
+        var failures: [String] = []
+        for candidate in candidates {
+            do {
+                switch protocolKind {
+                case .local:
+                    var isDirectory: ObjCBool = false
+                    guard FileManager.default.fileExists(atPath: candidate.address, isDirectory: &isDirectory), isDirectory.boolValue else {
+                        throw NSError(domain: "OmniPlayConnectivity", code: 1, userInfo: [NSLocalizedDescriptionKey: "目录不存在或不可访问"])
+                    }
+                case .webdav:
+                    let credential = WebDAVCredentialStore.shared.credentialID(from: source.authConfig).flatMap { WebDAVCredentialStore.shared.loadCredential(id: $0) }
+                        ?? WebDAVCredentialStore.shared.decodeLegacyCredential(from: source.authConfig)
+                    let result = await WebDAVPreflightChecker().check(
+                        baseURL: candidate.address,
+                        username: credential?.username ?? "",
+                        password: credential?.password ?? ""
+                    )
+                    guard result.isReachable else { throw NSError(domain: "OmniPlayConnectivity", code: 2, userInfo: [NSLocalizedDescriptionKey: result.message]) }
+                case .plex, .emby, .jellyfin:
+                    let auth = MediaServerAuthConfig.decode(source.authConfig)
+                    let result = await MediaServerPreflightChecker().check(
+                        protocolKind: protocolKind,
+                        baseURL: candidate.address,
+                        token: auth?.token ?? "",
+                        userId: auth?.userId ?? ""
+                    )
+                    guard result.isReachable else { throw NSError(domain: "OmniPlayConnectivity", code: 3, userInfo: [NSLocalizedDescriptionKey: result.message]) }
+                case .omniplayDocker:
+                    let auth = OmniPlayDockerAuthConfig.decode(source.authConfig)
+                    guard let cookie = auth?.sessionCookie, !cookie.isEmpty else {
+                        throw OmniPlayDockerClientError.authenticationRequired
+                    }
+                    let client = try OmniPlayDockerClient(baseURLString: candidate.address, sessionCookie: cookie)
+                    _ = try await client.libraryItems()
+                case .direct:
+                    break
+                }
+                return SourceConnectivityResult(
+                    isReachable: true,
+                    address: protocolKind.normalizedBaseURL(candidate.address),
+                    label: candidate.label,
+                    message: "连接成功"
+                )
+            } catch {
+                failures.append("\(candidate.label)：\(error.localizedDescription)")
+            }
+        }
+        return SourceConnectivityResult(
+            isReachable: false,
+            address: source.baseUrl,
+            label: "",
+            message: failures.isEmpty ? "没有可检测的媒体源地址。" : failures.joined(separator: "；")
+        )
     }
 
     private func loadData() {

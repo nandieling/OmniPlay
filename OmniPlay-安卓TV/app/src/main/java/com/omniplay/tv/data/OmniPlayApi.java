@@ -19,6 +19,10 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 public final class OmniPlayApi {
     private static final String PREFS = "omniplay_tv";
@@ -27,15 +31,25 @@ public final class OmniPlayApi {
     private static final String KEY_LIBRARY_ITEMS_CACHE = "library_items_cache";
     private static final String KEY_LOGIN_USERNAME = "login_username";
     private static final String KEY_LOGIN_PASSWORD = "login_password";
+    private static final String KEY_LUCKY_URL = "lucky_stun_url";
+    private static final String KEY_LUCKY_USERNAME = "lucky_stun_username";
+    private static final String KEY_LUCKY_PASSWORD = "lucky_stun_password";
+    private static final String KEY_LUCKY_RULE_ID = "lucky_stun_rule_id";
+    private static final String KEY_LUCKY_RULE_NAME = "lucky_stun_rule_name";
+    private static final String KEY_LUCKY_AUTO_UPDATE = "lucky_stun_auto_update";
+    private static final String KEY_LUCKY_INTERVAL_MINUTES = "lucky_stun_interval_minutes";
 
     private final SharedPreferences preferences;
     private String serverUrl;
     private String sessionCookie;
+    private final ScheduledExecutorService luckyScheduler = Executors.newSingleThreadScheduledExecutor();
+    private ScheduledFuture<?> luckyScheduledTask;
 
     public OmniPlayApi(Context context) {
         preferences = context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         serverUrl = normalizeServerUrl(preferences.getString(KEY_SERVER_URL, ""));
         sessionCookie = preferences.getString(KEY_COOKIE, "");
+        startLuckyStunAutoUpdate();
     }
 
     public boolean hasServerUrl() {
@@ -63,6 +77,96 @@ public final class OmniPlayApi {
         preferences.edit().putString(KEY_SERVER_URL, serverUrl).apply();
     }
 
+    public String luckyStunManagementUrl() {
+        return preferences.getString(KEY_LUCKY_URL, "");
+    }
+
+    public String luckyStunUsername() {
+        return preferences.getString(KEY_LUCKY_USERNAME, "");
+    }
+
+    public String luckyStunPassword() {
+        return preferences.getString(KEY_LUCKY_PASSWORD, "");
+    }
+
+    public String luckyStunRuleId() {
+        return preferences.getString(KEY_LUCKY_RULE_ID, "");
+    }
+
+    public boolean luckyStunAutoUpdate() {
+        return preferences.getBoolean(KEY_LUCKY_AUTO_UPDATE, false);
+    }
+
+    public int luckyStunUpdateIntervalMinutes() {
+        return Math.max(5, Math.min(1440, preferences.getInt(KEY_LUCKY_INTERVAL_MINUTES, 30)));
+    }
+
+    public void saveLuckyStunSettings(String managementUrl, String username, String password, String ruleId, String ruleName, boolean autoUpdate, int intervalMinutes) {
+        preferences.edit()
+                .putString(KEY_LUCKY_URL, trimOuterWhitespace(managementUrl))
+                .putString(KEY_LUCKY_USERNAME, trimOuterWhitespace(username))
+                .putString(KEY_LUCKY_PASSWORD, password == null ? "" : password)
+                .putString(KEY_LUCKY_RULE_ID, trimOuterWhitespace(ruleId))
+                .putString(KEY_LUCKY_RULE_NAME, trimOuterWhitespace(ruleName))
+                .putBoolean(KEY_LUCKY_AUTO_UPDATE, autoUpdate)
+                .putInt(KEY_LUCKY_INTERVAL_MINUTES, Math.max(5, Math.min(1440, intervalMinutes)))
+                .apply();
+        startLuckyStunAutoUpdate();
+    }
+
+    public LuckyStunClient.Result refreshLuckyStun(String managementUrl, String username, String password, String ruleId, String ruleName) throws IOException, JSONException {
+        saveLuckyStunSettings(managementUrl, username, password, ruleId, ruleName, luckyStunAutoUpdate(), luckyStunUpdateIntervalMinutes());
+        LuckyStunClient.Result result = LuckyStunClient.fetch(
+                luckyStunManagementUrl(),
+                luckyStunUsername(),
+                luckyStunPassword(),
+                luckyStunRuleId(),
+                preferences.getString(KEY_LUCKY_RULE_NAME, ""));
+        if (result.selectedRule != null) {
+            preferences.edit()
+                    .putString(KEY_LUCKY_RULE_ID, result.selectedRule.id)
+                    .putString(KEY_LUCKY_RULE_NAME, result.selectedRule.name)
+                    .apply();
+            String address = LuckyStunClient.normalizeAddress(result.selectedRule.address);
+            if (address != null && !address.isEmpty()) {
+                setServerUrl(address);
+            }
+        }
+        return result;
+    }
+
+    public void startLuckyStunAutoUpdate() {
+        if (luckyScheduledTask != null) {
+            luckyScheduledTask.cancel(false);
+            luckyScheduledTask = null;
+        }
+        if (!luckyStunAutoUpdate() || luckyStunManagementUrl().trim().isEmpty()) {
+            return;
+        }
+        long interval = luckyStunUpdateIntervalMinutes();
+        luckyScheduledTask = luckyScheduler.scheduleWithFixedDelay(() -> {
+            try {
+                LuckyStunClient.Result result = LuckyStunClient.fetch(
+                        luckyStunManagementUrl(),
+                        luckyStunUsername(),
+                        luckyStunPassword(),
+                        luckyStunRuleId(),
+                        preferences.getString(KEY_LUCKY_RULE_NAME, ""));
+                if (result.selectedRule != null) {
+                    preferences.edit()
+                            .putString(KEY_LUCKY_RULE_ID, result.selectedRule.id)
+                            .putString(KEY_LUCKY_RULE_NAME, result.selectedRule.name)
+                            .apply();
+                    String address = LuckyStunClient.normalizeAddress(result.selectedRule.address);
+                    if (address != null && !address.isEmpty()) {
+                        setServerUrl(address);
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }, interval, interval, TimeUnit.MINUTES);
+    }
+
     public Models.AuthStatus authStatus() throws IOException, JSONException {
         return Models.AuthStatus.fromJson(new JSONObject(request("GET", "/api/auth/status", null)));
     }
@@ -84,6 +188,10 @@ public final class OmniPlayApi {
     }
 
     public void disconnect() {
+        if (luckyScheduledTask != null) {
+            luckyScheduledTask.cancel(false);
+            luckyScheduledTask = null;
+        }
         if (hasServerUrl()) {
             try {
                 request("POST", "/api/auth/logout", "{}");

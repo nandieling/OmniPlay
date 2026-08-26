@@ -12,6 +12,30 @@ class MPVPlayerManager: ObservableObject {
         let filename: String?
     }
 
+    private struct TrackDescriptor: Equatable {
+        let kind: String
+        let language: String
+        let title: String
+        let codec: String
+        let channels: String
+
+        var signature: String {
+            [kind, language, title, codec, channels]
+                .map(Self.normalized)
+                .joined(separator: "\u{1F}")
+        }
+
+        private nonisolated static func normalized(_ value: String) -> String {
+            value
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: .current)
+                .lowercased()
+        }
+    }
+
+    private static let trackPreferenceDefaultsKey = "omniplay.trackPreferences.v1"
+    private static let disabledSubtitlePreference = "__off__"
+
     var mpv: OpaquePointer?
     private let mpvControlQueue = DispatchQueue(label: "nan.omniplay.mpv.control")
     private let controlQueueKey = DispatchSpecificKey<Bool>()
@@ -46,6 +70,9 @@ class MPVPlayerManager: ObservableObject {
     
     var audioTrackIds: [Int64] = []
     var subtitleIds: [Int64] = []
+    private var audioTrackDescriptors: [TrackDescriptor] = []
+    private var subtitleTrackDescriptors: [TrackDescriptor] = []
+    private var currentTrackPreferenceKey: String?
     private var lastTrackCount: Int64 = 0
     private var hasAppliedDefaultSubtitleForCurrentLoad = false
     private var hasUserSelectedSubtitleTrack = false
@@ -54,6 +81,8 @@ class MPVPlayerManager: ObservableObject {
     private var pendingInitialSeekPosition: Double?
     private var pendingInitialSeekFilename: String?
     private var pendingInitialSeekAttempts = 0
+    private var pendingInitialSeekDeadline: Date?
+    private let initialSeekTimeout: TimeInterval = 8.0
     var duration: Double = 0.0
     
     private func log(_ message: String) {
@@ -407,7 +436,13 @@ class MPVPlayerManager: ObservableObject {
         }
     }
     
-    func loadFiles(urls: [URL], startPosition: Double = 0.0, isBluRay: Bool = false, blurayRootPath: String? = nil) {
+    func loadFiles(
+        urls: [URL],
+        startPosition: Double = 0.0,
+        isBluRay: Bool = false,
+        blurayRootPath: String? = nil,
+        trackPreferenceKey: String? = nil
+    ) {
         guard !urls.isEmpty else { return }
         isStopping = false
         if timer == nil {
@@ -418,6 +453,9 @@ class MPVPlayerManager: ObservableObject {
         log("loadFiles urls=\(urls.count) first=\(mpvLogArgument(for: urls[0])) start=\(startPosition) isBluRay=\(isBluRay) blurayRoot=\(blurayRootPath.map { mpvLogArgument(for: $0) } ?? "nil")")
         hasAppliedDefaultSubtitleForCurrentLoad = false
         hasUserSelectedSubtitleTrack = false
+        currentTrackPreferenceKey = trackPreferenceKey
+        audioTrackDescriptors = []
+        subtitleTrackDescriptors = []
         let firstName = urls[0].lastPathComponent.lowercased()
         let isDolbyVisionLike = firstName.contains("dvhe.05")
             || firstName.contains("dovi")
@@ -438,6 +476,9 @@ class MPVPlayerManager: ObservableObject {
             self.pendingInitialSeekPosition = startPosition > 5.0 ? startPosition : nil
             self.pendingInitialSeekFilename = (startPosition > 5.0 && urls[0].isFileURL) ? urls[0].lastPathComponent : nil
             self.pendingInitialSeekAttempts = 0
+            self.pendingInitialSeekDeadline = startPosition > 5.0
+                ? Date().addingTimeInterval(self.initialSeekTimeout)
+                : nil
             mpv_set_property_string(self.mpv, "start", "0")
             
             if isBluRay, let rootPath = blurayRootPath {
@@ -560,6 +601,7 @@ class MPVPlayerManager: ObservableObject {
         let targetTime = Double(newPosition) * duration
         runOnControlQueue { [weak self] in
             guard let self else { return }
+            self.clearPendingInitialSeek()
             mpv_command_string(self.mpv, String(format: "seek %.2f absolute", targetTime))
         }
     }
@@ -567,6 +609,7 @@ class MPVPlayerManager: ObservableObject {
     func seekAbsolute(seconds: Double) {
         runOnControlQueue { [weak self] in
             guard let self else { return }
+            self.clearPendingInitialSeek()
             mpv_command_string(self.mpv, String(format: "seek %.2f absolute", max(0, seconds)))
         }
     }
@@ -574,6 +617,7 @@ class MPVPlayerManager: ObservableObject {
     func playPlaylistIndex(_ index: Int, startPosition: Double = 0) {
         runOnControlQueue { [weak self] in
             guard let self else { return }
+            self.clearPendingInitialSeek()
             mpv_command_string(self.mpv, "playlist-play-index \(max(0, index))")
             if startPosition > 0 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
@@ -586,6 +630,7 @@ class MPVPlayerManager: ObservableObject {
     func seekRelative(seconds: Double) {
         runOnControlQueue { [weak self] in
             guard let self else { return }
+            self.clearPendingInitialSeek()
             mpv_command_string(self.mpv, String(format: "seek %.2f relative", seconds))
         }
     }
@@ -594,10 +639,16 @@ class MPVPlayerManager: ObservableObject {
         pendingInitialSeekPosition = nil
         pendingInitialSeekFilename = nil
         pendingInitialSeekAttempts = 0
+        pendingInitialSeekDeadline = nil
     }
 
     private func applyPendingInitialSeekIfNeeded(timePos: Double, duration: Double, playlistPos: Int64, filename: String?) {
         guard let target = pendingInitialSeekPosition else { return }
+        if let deadline = pendingInitialSeekDeadline, Date() >= deadline {
+            log("initial resume seek expired before media became ready")
+            clearPendingInitialSeek()
+            return
+        }
         guard playlistPos <= 0 else {
             clearPendingInitialSeek()
             return
@@ -624,24 +675,31 @@ class MPVPlayerManager: ObservableObject {
             return
         }
 
+        guard duration.isFinite && duration > 0 else {
+            pendingInitialSeekAttempts += 1
+            if pendingInitialSeekAttempts > 40 {
+                clearPendingInitialSeek()
+            }
+            return
+        }
+
         pendingInitialSeekAttempts += 1
         guard pendingInitialSeekAttempts <= 40 else {
             clearPendingInitialSeek()
             return
         }
 
-        let targetForSeek: Double
-        if duration.isFinite && duration > 0 {
-            targetForSeek = min(requestedTarget, max(duration - 2.0, 0))
-        } else {
-            targetForSeek = requestedTarget
-        }
+        let targetForSeek = min(requestedTarget, max(duration - 2.0, 0))
         guard targetForSeek > 0 else {
             clearPendingInitialSeek()
             return
         }
-        log(String(format: "apply initial resume seek %.2f / %.2f attempt=%d", targetForSeek, duration, pendingInitialSeekAttempts))
+        log(String(format: "apply initial resume seek once %.2f / %.2f attempt=%d", targetForSeek, duration, pendingInitialSeekAttempts))
         mpv_command_string(mpv, String(format: "seek %.2f absolute", targetForSeek))
+        // mpv accepts seek asynchronously. Do not issue the same seek from every
+        // state-poll tick: remote HTTP/ISO streams can report time-pos=0 for a
+        // while after the request, and repeating it makes playback jump back.
+        clearPendingInitialSeek()
     }
 
     func setSubtitleSize(_ size: Int) {
@@ -718,8 +776,10 @@ class MPVPlayerManager: ObservableObject {
             guard let self else { return }
             var newAudioNames: [String] = []
             var newAudioIds: [Int64] = []
+            var newAudioDescriptors: [TrackDescriptor] = []
             var newSubNames: [String] = ["关闭字幕"]
             var newSubIds: [Int64] = [-1]
+            var newSubtitleDescriptors: [TrackDescriptor] = []
             var subtitleTracks: [(id: Int64, lang: String, title: String)] = []
 
             for i in 0..<trackCount {
@@ -749,22 +809,57 @@ class MPVPlayerManager: ObservableObject {
                     if !niceCodec.isEmpty { baseName += " (\(niceCodec))" }
                     newAudioNames.append(baseName)
                     newAudioIds.append(id)
+                    newAudioDescriptors.append(TrackDescriptor(
+                        kind: "audio",
+                        language: rawLang,
+                        title: rawTitle,
+                        codec: rawCodec,
+                        channels: channels
+                    ))
                 } else if type == "sub" {
                     if baseName.isEmpty { baseName = "字幕 \(id)" }
                     if !niceCodec.isEmpty { baseName += " (\(niceCodec))" }
                     subtitleTracks.append((id: id, lang: rawLang, title: rawTitle))
                     newSubNames.append(baseName)
                     newSubIds.append(id)
+                    newSubtitleDescriptors.append(TrackDescriptor(
+                        kind: "sub",
+                        language: rawLang,
+                        title: rawTitle,
+                        codec: rawCodec,
+                        channels: ""
+                    ))
                 }
             }
 
             let defaultSub = UserDefaults.standard.string(forKey: "defaultSub") ?? "chi"
-            let preferredSubtitleId = (!self.hasAppliedDefaultSubtitleForCurrentLoad && !self.hasUserSelectedSubtitleTrack)
-                ? Self.preferredSubtitleId(defaultSub: defaultSub, subtitleTracks: subtitleTracks)
-                : nil
-            if let preferredSubtitleId {
-                mpv_set_property_string(self.mpv, "sid", "\(preferredSubtitleId)")
-                self.log("auto selected subtitle id=\(preferredSubtitleId) defaultSub=\(defaultSub)")
+            let savedAudioSignature = self.savedTrackPreference(kind: "audio")
+            let savedSubtitleSignature = self.savedTrackPreference(kind: "sub")
+            if let savedAudioSignature,
+               let savedAudioIndex = newAudioDescriptors.firstIndex(where: { $0.signature == savedAudioSignature }) {
+                let savedAudioId = newAudioIds[savedAudioIndex]
+                mpv_set_property_string(self.mpv, "aid", "\(savedAudioId)")
+                self.log("restored audio track id=\(savedAudioId)")
+            }
+
+            var preferredSubtitleId: Int64?
+            var restoredSubtitlePreference = false
+            if savedSubtitleSignature == Self.disabledSubtitlePreference {
+                mpv_set_property_string(self.mpv, "sid", "no")
+                restoredSubtitlePreference = true
+                self.log("restored subtitles disabled")
+            } else if let savedSubtitleSignature,
+                      let savedSubtitleIndex = newSubtitleDescriptors.firstIndex(where: { $0.signature == savedSubtitleSignature }) {
+                preferredSubtitleId = newSubIds[savedSubtitleIndex + 1]
+                mpv_set_property_string(self.mpv, "sid", "\(preferredSubtitleId!)")
+                restoredSubtitlePreference = true
+                self.log("restored subtitle id=\(preferredSubtitleId!)")
+            } else if !self.hasAppliedDefaultSubtitleForCurrentLoad && !self.hasUserSelectedSubtitleTrack {
+                preferredSubtitleId = Self.preferredSubtitleId(defaultSub: defaultSub, subtitleTracks: subtitleTracks)
+                if let preferredSubtitleId {
+                    mpv_set_property_string(self.mpv, "sid", "\(preferredSubtitleId)")
+                    self.log("auto selected subtitle id=\(preferredSubtitleId) defaultSub=\(defaultSub)")
+                }
             }
 
             DispatchQueue.main.async {
@@ -772,6 +867,11 @@ class MPVPlayerManager: ObservableObject {
                 self.audioTrackIds = newAudioIds
                 self.subtitleNames = newSubNames
                 self.subtitleIds = newSubIds
+                self.audioTrackDescriptors = newAudioDescriptors
+                self.subtitleTrackDescriptors = newSubtitleDescriptors
+                if restoredSubtitlePreference {
+                    self.hasAppliedDefaultSubtitleForCurrentLoad = true
+                }
                 if let preferredSubtitleId {
                     self.activeSubtitleId = preferredSubtitleId
                     self.hasAppliedDefaultSubtitleForCurrentLoad = true
@@ -944,6 +1044,9 @@ class MPVPlayerManager: ObservableObject {
     func setAudioTrack(at index: Int) {
         guard index >= 0 && index < audioTrackIds.count else { return }
         let targetId = audioTrackIds[index]
+        if audioTrackDescriptors.indices.contains(index) {
+            saveTrackPreference(kind: "audio", signature: audioTrackDescriptors[index].signature)
+        }
         runOnControlQueue { [weak self] in
             guard let self else { return }
             mpv_set_property_string(self.mpv, "aid", "\(targetId)")
@@ -954,6 +1057,11 @@ class MPVPlayerManager: ObservableObject {
         guard index >= 0 && index < subtitleIds.count else { return }
         let id = subtitleIds[index]
         hasUserSelectedSubtitleTrack = true
+        if id == -1 {
+            saveTrackPreference(kind: "sub", signature: Self.disabledSubtitlePreference)
+        } else if subtitleTrackDescriptors.indices.contains(index - 1) {
+            saveTrackPreference(kind: "sub", signature: subtitleTrackDescriptors[index - 1].signature)
+        }
         runOnControlQueue { [weak self] in
             guard let self else { return }
             if id == -1 {
@@ -967,6 +1075,25 @@ class MPVPlayerManager: ObservableObject {
     func addExternalSubtitle(url: URL, title: String, language: String = "chi") {
         hasUserSelectedSubtitleTrack = true
         executeMpvCommand(["sub-add", url.path, "select", title, language])
+    }
+
+    private func savedTrackPreference(kind: String) -> String? {
+        guard let currentTrackPreferenceKey,
+              !currentTrackPreferenceKey.isEmpty,
+              let values = UserDefaults.standard.dictionary(forKey: Self.trackPreferenceDefaultsKey) as? [String: String] else {
+            return nil
+        }
+        return values["\(currentTrackPreferenceKey)|\(kind)"]
+    }
+
+    private func saveTrackPreference(kind: String, signature: String) {
+        guard let currentTrackPreferenceKey,
+              !currentTrackPreferenceKey.isEmpty else {
+            return
+        }
+        var values = UserDefaults.standard.dictionary(forKey: Self.trackPreferenceDefaultsKey) as? [String: String] ?? [:]
+        values["\(currentTrackPreferenceKey)|\(kind)"] = signature
+        UserDefaults.standard.set(values, forKey: Self.trackPreferenceDefaultsKey)
     }
     private func formatTime(_ time: Double) -> String { if time.isNaN || time < 0 { return "00:00" }; let t = Int(time); return t / 3600 > 0 ? String(format: "%02d:%02d:%02d", t/3600, (t%3600)/60, t%60) : String(format: "%02d:%02d", (t%3600)/60, t%60) }
     

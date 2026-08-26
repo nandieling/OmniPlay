@@ -14,6 +14,27 @@ public sealed class LibraryPosterItem
 
     public double? VoteAverage { get; init; }
 
+    public double? DoubanRating { get; init; }
+
+    public string RatingDisplayText
+    {
+        get
+        {
+            var parts = new List<string>();
+            if (VoteAverage.HasValue)
+            {
+                parts.Add($"TMDB {VoteAverage.Value:F1}");
+            }
+
+            if (DoubanRating.HasValue)
+            {
+                parts.Add($"豆瓣 {DoubanRating.Value:F1}");
+            }
+
+            return parts.Count == 0 ? "暂无评分" : string.Join("  ", parts);
+        }
+    }
+
     public required string MediaKind { get; init; }
 
     public double ContinueWatchingProgress { get; init; }

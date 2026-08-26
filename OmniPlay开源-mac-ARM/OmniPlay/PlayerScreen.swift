@@ -1056,6 +1056,9 @@ struct PlayerScreen: View {
     
     @State private var currentVideoFileId: String?
     @State private var startPosition: Double = 0.0
+    @State private var playbackSourceBaseURL: String?
+    @State private var playbackSourceProtocolType: String?
+    @State private var playbackSourceAuthConfig: String?
     
     @State private var isBluRayFolder: Bool = false
     @State private var blurayRootPath: String? = nil
@@ -1129,7 +1132,11 @@ struct PlayerScreen: View {
             fileName: file.fileName,
             fallbackIndex: 0
         )
-        return resolvedInfo.isTVShow ? "\(movie.title) \(resolvedInfo.displayName)" : movie.title
+        guard resolvedInfo.isTVShow else { return movie.title }
+        let episode = resolvedInfo.season == 0
+            ? "特别篇 第 \(resolvedInfo.episode) 集"
+            : "第 \(resolvedInfo.season) 季 第 \(resolvedInfo.episode) 集"
+        return "\(movie.title) \(episode)"
     }
     
     private var playbackProgressRatio: Double {
@@ -1593,6 +1600,17 @@ struct PlayerScreen: View {
             prepareVideoWithPermission()
             resetHideTimer()
         }
+        .task(id: videoURLs.count) {
+            guard !videoURLs.isEmpty else { return }
+            // Let the initial MPV load/seek settle before publishing progress;
+            // otherwise a remote client could briefly overwrite a saved resume
+            // position with the initial 0-second state.
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            while !Task.isCancelled {
+                await syncCurrentPlaybackProgressToDocker()
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+            }
+        }
         .onDisappear {
             traceClose("onDisappear triggered")
             hideUITask?.cancel()
@@ -1707,7 +1725,7 @@ struct PlayerScreen: View {
                 self.embyRemotePlaybackContext = context
                 self.startPosition = resumePosition
                 self.videoURLs = [resolvedURL]
-                self.playerManager.loadFiles(urls: [resolvedURL], startPosition: resumePosition, isBluRay: false, blurayRootPath: nil)
+                self.playerManager.loadFiles(urls: [resolvedURL], startPosition: resumePosition, isBluRay: false, blurayRootPath: nil, trackPreferenceKey: self.currentVideoFileId)
                 self.resetHideTimer()
             }
         }
@@ -1925,7 +1943,7 @@ struct PlayerScreen: View {
         observedDuration: Double = 0,
         observedProgress: Double = 0
     ) {
-        let resolvedDuration = max(file.duration, max(observedDuration, max(observedProgress, 100.0)))
+        let resolvedDuration = max(file.duration, max(observedDuration, observedProgress))
         file.duration = resolvedDuration
         file.playProgress = resolvedDuration
         file.lastPlayedAt = nil
@@ -1974,6 +1992,49 @@ struct PlayerScreen: View {
             )
         } catch {
             print("Docker 进度同步失败：\(error.localizedDescription)")
+        }
+    }
+
+    private func syncCurrentPlaybackProgressToDocker() async {
+        guard playbackSourceProtocolType == MediaSourceProtocol.omniplayDocker.rawValue,
+              let baseURL = playbackSourceBaseURL,
+              !isClosingPlayback else {
+            return
+        }
+
+        let snapshot = playerManager.playbackEngineSnapshot
+        guard snapshot.timePos.isFinite, snapshot.timePos > 0.5 else { return }
+        guard let fileIndex = resolvedPlaybackFileIndex(from: snapshot),
+              allPlaylistFiles.indices.contains(fileIndex) else {
+            return
+        }
+
+        let file = allPlaylistFiles[fileIndex]
+        guard let remoteFileId = Self.omniPlayDockerRemoteFileId(from: file) else { return }
+        let duration = max(
+            snapshot.duration.isFinite ? snapshot.duration : 0,
+            file.duration,
+            playerManager.duration
+        )
+        guard duration > 0 else { return }
+
+        let config = OmniPlayDockerAuthConfig.decode(playbackSourceAuthConfig)
+        do {
+            let client = try OmniPlayDockerClient(
+                baseURLString: baseURL,
+                sessionCookie: config?.sessionCookie
+            )
+            try await client.updateProgress(
+                videoFileId: remoteFileId,
+                positionSeconds: snapshot.timePos,
+                durationSeconds: duration
+            )
+            if allPlaylistFiles.indices.contains(fileIndex) {
+                allPlaylistFiles[fileIndex].playProgress = snapshot.timePos
+                allPlaylistFiles[fileIndex].duration = max(allPlaylistFiles[fileIndex].duration, duration)
+            }
+        } catch {
+            print("Docker 播放中进度同步失败：\(error.localizedDescription)")
         }
     }
 
@@ -2270,7 +2331,7 @@ struct PlayerScreen: View {
         func webDAVMountedISOPlaybackURL(for file: VideoFile, remoteURL: URL) async -> URL? {
             guard sourceKind == .webdav,
                   !remoteURL.isFileURL,
-                  remoteURL.pathExtension.lowercased() == "iso" else {
+                  isISOFile(file) else {
                 return nil
             }
 
@@ -2395,13 +2456,14 @@ struct PlayerScreen: View {
         }
 
         func remoteISOProxyPlaybackRegistration(for file: VideoFile, remoteURL: URL) async -> RemoteISOProxyRegistration? {
-            guard sourceKind == .webdav,
+            guard sourceKind == .webdav || sourceKind == .omniplayDocker,
                   !remoteURL.isFileURL,
-                  remoteURL.pathExtension.lowercased() == "iso" else {
+                  isISOFile(file) else {
                 return nil
             }
 
-            let reader = RemoteISOHTTPByteReader(url: remoteURL, credential: webDAVCredential)
+            let readerCredential = sourceKind == .webdav ? webDAVCredential : nil
+            let reader = RemoteISOHTTPByteReader(url: remoteURL, credential: readerCredential)
             do {
                 let isoSize = try await reader.contentLength(hint: file.fileSize)
                 let streamFiles = try await RemoteISOImageParser(reader: reader, isoSize: isoSize).bluRayStreamFiles()
@@ -2428,10 +2490,10 @@ struct PlayerScreen: View {
                 let registration = try RemoteISOStreamProxy.shared.register(files: selectedFiles, reader: reader)
                 remoteISOProxyRouteIDs.append(contentsOf: registration.routeIDs)
                 let names = selectedFiles.map { "\($0.fileName):\($0.size)" }.joined(separator: ",")
-                log("WebDAV ISO proxy ready isoSize=\(isoSize) streams=\(streamFiles.count) selected=\(selectedFiles.count) includeExtras=\(includeExtras) files=\(names)")
+                log("Remote ISO proxy ready source=\(sourceKind.rawValue) isoSize=\(isoSize) streams=\(streamFiles.count) selected=\(selectedFiles.count) includeExtras=\(includeExtras) files=\(names)")
                 return registration
             } catch {
-                log("WebDAV ISO proxy failed error=\(error)")
+                log("Remote ISO proxy failed source=\(sourceKind.rawValue) error=\(error)")
                 return nil
             }
         }
@@ -2708,6 +2770,15 @@ struct PlayerScreen: View {
                 || lower.contains("uhd")
         }
 
+        func isISOFile(_ file: VideoFile) -> Bool {
+            [file.fileName, file.relativePath].contains { value in
+                let path = value.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? value
+                return path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    .lowercased()
+                    .hasSuffix(".iso")
+            }
+        }
+
         func splitRelativePathAndQuery(_ value: String) -> (path: String, queryItems: [URLQueryItem]) {
             guard let separator = value.firstIndex(of: "?") else {
                 return (value.trimmingCharacters(in: CharacterSet(charactersIn: "/")), [])
@@ -2773,18 +2844,24 @@ struct PlayerScreen: View {
 
         guard let originalTargetSourceURL = await sourcePlaybackURL(for: targetFile) else { return false }
         let targetLocalURL = localPlaybackURL(for: targetFile)
-        let requiresRemoteWebDAVISO = targetLocalURL == nil
-            && sourceKind == .webdav
+        let requiresRemoteISO = targetLocalURL == nil
+            && (sourceKind == .webdav || sourceKind == .omniplayDocker)
             && !originalTargetSourceURL.isFileURL
-            && originalTargetSourceURL.pathExtension.lowercased() == "iso"
-        let remoteISOProxyRegistration = requiresRemoteWebDAVISO
+            && isISOFile(targetFile)
+        let remoteISOProxyRegistration = requiresRemoteISO
             ? await remoteISOProxyPlaybackRegistration(for: targetFile, remoteURL: originalTargetSourceURL)
             : nil
-        let mountedISOPlaybackURL = requiresRemoteWebDAVISO && remoteISOProxyRegistration == nil
+        let mountedISOPlaybackURL = sourceKind == .webdav
+            && requiresRemoteISO
+            && remoteISOProxyRegistration == nil
             ? await webDAVMountedISOPlaybackURL(for: targetFile, remoteURL: originalTargetSourceURL)
             : nil
-        if requiresRemoteWebDAVISO && remoteISOProxyRegistration == nil && mountedISOPlaybackURL == nil {
-            errorMessage = "无法播放 WebDAV ISO：远程 Range 解析失败，系统挂载也失败。请确认服务器支持 Range 请求，或使用 SMB/NFS 源播放 ISO。"
+        if requiresRemoteISO && remoteISOProxyRegistration == nil && mountedISOPlaybackURL == nil {
+            if sourceKind == .omniplayDocker {
+                errorMessage = "无法播放 OmniPlay Docker ISO：客户端 Range 代理失败，请确认服务端支持 Range 请求。"
+            } else {
+                errorMessage = "无法播放 WebDAV ISO：远程 Range 解析失败，系统挂载也失败。请确认服务器支持 Range 请求，或使用 SMB/NFS 源播放 ISO。"
+            }
             return false
         }
         let targetSourceURL = remoteISOProxyRegistration?.urls.first ?? mountedISOPlaybackURL ?? originalTargetSourceURL
@@ -2859,6 +2936,9 @@ struct PlayerScreen: View {
             self.allPlaylistFiles = remainingFiles
             self.currentVideoFileId = targetFile.id
             self.startPosition = Self.playbackResumeStartPosition(for: targetFile)
+            self.playbackSourceBaseURL = sourceBasePath
+            self.playbackSourceProtocolType = sourceProtocolType
+            self.playbackSourceAuthConfig = sourceAuthConfig
             self.rootFolderURL = sourceBaseUrl
             self.videoURLs = resolvedURLs
             self.embyRemotePlaybackContext = remotePlaybackContexts[targetFile.id]
@@ -3782,6 +3862,6 @@ struct PlayerScreen: View {
         guard playerManager.drawableBindVersion > 0 else { return }
         hasIssuedLoad = true
         log("start playback after drawable ready version=\(playerManager.drawableBindVersion)")
-        playerManager.loadFiles(urls: videoURLs, startPosition: startPosition, isBluRay: isBluRayFolder, blurayRootPath: blurayRootPath)
+        playerManager.loadFiles(urls: videoURLs, startPosition: startPosition, isBluRay: isBluRayFolder, blurayRootPath: blurayRootPath, trackPreferenceKey: currentVideoFileId)
     }
 }

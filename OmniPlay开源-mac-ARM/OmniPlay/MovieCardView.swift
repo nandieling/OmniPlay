@@ -16,6 +16,7 @@ struct MovieCardView: View {
     @State private var showSearchModal = false
     @State private var showEditModal = false
     @State private var hasMissingFiles = false
+    @State private var showCancelCacheConfirmation = false
     
     @State private var isHovering = false
     @State private var isFullyWatched = false
@@ -46,11 +47,17 @@ struct MovieCardView: View {
                     }
 
                     if isHomeCacheModeActive {
-                        Button(action: { fetchFilesAndStartCache() }) {
+                        Button(action: {
+                            if isDownloadingAnyFile {
+                                showCancelCacheConfirmation = true
+                            } else {
+                                fetchFilesAndStartCache()
+                            }
+                        }) {
                             posterCacheOverlayContent
                         }
                         .buttonStyle(.plain)
-                        .disabled(!isCacheSupportedForAnyFile || isDownloadingAnyFile || allCacheableFilesCached)
+                        .disabled(!isCacheSupportedForAnyFile || allCacheableFilesCached)
                         .conditionalHelp(cacheOverlayHelpText, show: enableFastTooltip)
                     }
                 }
@@ -138,10 +145,18 @@ struct MovieCardView: View {
         .onReceive(availabilityTimer) { _ in refreshAvailabilityWithoutDB() }
         .sheet(isPresented: $showSearchModal) { MovieSearchModalView(movie: movie) }
         .sheet(isPresented: $showEditModal) { MovieEditModalView(movie: movie) }
+        .alert("取消离线缓存？", isPresented: $showCancelCacheConfirmation) {
+            Button("取消缓存", role: .destructive) {
+                cacheManager.cancelDownloads(files: movieFiles)
+            }
+            Button("继续缓存", role: .cancel) { }
+        } message: {
+            Text("已缓存的内容会保留，未完成的文件将被删除。")
+        }
     }
     
     private var isDownloadingAnyFile: Bool {
-        movieFiles.contains { cacheManager.downloadProgress[$0.id] != nil }
+        movieFiles.contains { cacheManager.progress(for: $0) != nil }
     }
 
     private var isCacheSupportedForAnyFile: Bool {
@@ -159,7 +174,7 @@ struct MovieCardView: View {
         guard !cacheableFiles.isEmpty else { return nil }
         let total = cacheableFiles.reduce(0.0) { partial, file in
             if cacheManager.isCached(file) { return partial + 1.0 }
-            return partial + (cacheManager.downloadProgress[file.id] ?? 0.0)
+            return partial + (cacheManager.progress(for: file) ?? 0.0)
         }
         return total / Double(cacheableFiles.count)
     }

@@ -27,6 +27,11 @@ struct BusinessLogicIntegrationTests {
         #expect(MediaSourceProtocol.webdav.webDAVPathValidationError("https://nas.local:5006/dav") != nil)
         #expect(MediaSourceProtocol.webdav.webDAVPathValidationError("https://nas.local:5006/电影") == nil)
 
+        #expect(MediaSourceProtocol.omniplayDocker.normalizedBaseURL("192.168.1.10:45722") == "http://192.168.1.10:45722")
+        #expect(MediaSourceProtocol.omniplayDocker.normalizedBaseURL("http://nas.local:45722/api/health") == "http://nas.local:45722")
+        #expect(MediaSourceProtocol.omniplayDocker.normalizedBaseURL("http://nas.local:45722/omniplay/api/auth/status") == "http://nas.local:45722/omniplay")
+        #expect(MediaSourceProtocol.omniplayDocker.isValidBaseURL("192.168.1.10:45722"))
+
         #expect(MediaSourceProtocol.direct.normalizedBaseURL("/anything") == "/")
         #expect(MediaSourceProtocol.direct.isValidBaseURL("/"))
 
