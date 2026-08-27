@@ -2,15 +2,6 @@
 
 觅影 OmniPlay 是一款原生开发的海报墙播放器，支持 macOS、Windows、Docker 和安卓 TV。macOS 版采用 Swift / SwiftUI 开发，Windows 版采用 C# / .NET / Avalonia UI。底层播放器核心为 MPVKit-GPL / libmpv / FFmpeg 相关组件。
 
-## 1.7 更新要点
-
-- macOS ARM 版新增 Lucky STUN 穿透媒体源，支持 OmniPlay Docker、WebDAV、Plex、Emby 和 Jellyfin，每个媒体源独立配置 Lucky 管理端、穿透规则和自动更新周期。
-- 新增局域网 OmniPlay Docker、WebDAV、Plex、Emby 和 Jellyfin 的发现、登录与媒体库挂载流程。
-- 播放页标题只显示刮削后的影视名称和季/集信息，不再附加原文件名片段。
-- 修复继续播放可能超过上次保存进度的问题。
-- 离线缓存改为按剧集顺序串行执行，首页和详情页会自动恢复显示进度。
-- 缓存进度环支持点击取消并二次确认；开始前会预检空间，完成后至少保留 1 GiB 可用空间。
-- 缓存文件直接写入用户选定的磁盘和目录，不再经过内置磁盘中转，也不再创建以媒体源 ID 命名的数字子目录。
 
 ## 软件截图
 ![览影首页](https://img3.pixhost.cc/images/5255/763004648_1.jpg)
