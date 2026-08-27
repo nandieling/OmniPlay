@@ -13,8 +13,8 @@
 - 缓存文件直接写入用户选定的磁盘和目录，不再经过内置磁盘中转，也不再创建以媒体源 ID 命名的数字子目录。
 
 ## 软件截图
-![览影首页](https://img2.pixhost.to/images/7534/720265527_2.jpg)
-![览影详情页](https://img2.pixhost.to/images/7534/720265534_3.jpg)
+![览影首页](https://img3.pixhost.cc/images/5255/763004648_1.jpg)
+![览影详情页](https://img3.pixhost.cc/images/5255/763004667_2.jpg)
 ## 功能特色
 
 ### UI
@@ -164,12 +164,6 @@ export default {
 
 5. 点击“验证”或“检测”。验证成功后，TMDB API 请求会经 Worker 转发。
 
-### 3. 安全与限制
-
-- 不要在 Worker 代码、Git 仓库或公开截图中写入 TMDB API Key / v4 Token。
-- Worker 地址可能被他人访问。上述代码已将转发范围限制为 `/3` API，仍建议在 Cloudflare 中配置 Rate Limiting、WAF 或自定义域名访问策略。
-- 该 Worker 不会代理 `image.tmdb.org` 的海报和剧照请求，客户端仍需能访问 TMDB 图片域名。
-- 请遵守 Cloudflare 和 TMDB 的使用条款及频率限制。
 
 ## 自行编译教程
 
