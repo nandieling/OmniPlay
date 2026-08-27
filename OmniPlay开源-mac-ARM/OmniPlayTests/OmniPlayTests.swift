@@ -41,6 +41,7 @@ struct OmniPlayTests {
             password: "secret",
             ruleID: "webdav-rule",
             ruleName: "WebDAV",
+            displayName: "WebDAV-stun",
             autoUpdate: true,
             updateIntervalMinutes: 15,
             lastUpdatedAt: 123,
@@ -50,6 +51,26 @@ struct OmniPlayTests {
         let decoded = try JSONDecoder().decode(LuckyStunSourceConfiguration.self, from: encoded)
 
         #expect(decoded == original)
+    }
+
+    @Test func luckyStunDisplayNameOverridesProtocolSubtitle() throws {
+        let protocols: [MediaSourceProtocol] = [.webdav, .omniplayDocker, .plex, .jellyfin, .emby]
+        for protocolKind in protocols {
+            var source = MediaSource(
+                id: nil,
+                name: "电影",
+                protocolType: protocolKind.rawValue,
+                baseUrl: "https://media.example.com/library",
+                authConfig: nil
+            )
+            source.setAddressConfiguration(MediaSourceAddressConfiguration(
+                luckyStun: LuckyStunSourceConfiguration(displayName: " Lucky-媒体源 ")
+            ))
+            #expect(source.luckyStunDisplayName == "Lucky-媒体源")
+
+            source.setAddressConfiguration(MediaSourceAddressConfiguration())
+            #expect(source.luckyStunDisplayName == nil)
+        }
     }
 
 }

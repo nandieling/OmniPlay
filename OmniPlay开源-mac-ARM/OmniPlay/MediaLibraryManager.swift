@@ -2188,7 +2188,14 @@ struct WebDAVDirectoryBrowser {
         let session = URLSession(configuration: config, delegate: LocalNetworkTrustSessionDelegate.shared, delegateQueue: nil)
 
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response): (Data, URLResponse)
+            do {
+                (data, response) = try await session.data(for: request)
+            } catch let error as URLError where [.timedOut, .networkConnectionLost, .cannotConnectToHost, .notConnectedToInternet].contains(error.code) {
+                // A tunnel may need a moment to establish its first connection.
+                try await Task.sleep(nanoseconds: 250_000_000)
+                (data, response) = try await session.data(for: request)
+            }
             guard let http = response as? HTTPURLResponse else {
                 throw WebDAVDirectoryBrowserError.requestFailed("WebDAV 请求失败：未收到有效响应。")
             }

@@ -181,6 +181,7 @@ nonisolated struct LuckyStunSourceConfiguration: Codable, Hashable {
     var password: String
     var ruleID: String
     var ruleName: String
+    var displayName: String
     var autoUpdate: Bool
     var updateIntervalMinutes: Int
     var lastUpdatedAt: Double
@@ -192,6 +193,7 @@ nonisolated struct LuckyStunSourceConfiguration: Codable, Hashable {
         password: String = "",
         ruleID: String = "",
         ruleName: String = "",
+        displayName: String = "",
         autoUpdate: Bool = true,
         updateIntervalMinutes: Int = 30,
         lastUpdatedAt: Double = 0,
@@ -202,6 +204,7 @@ nonisolated struct LuckyStunSourceConfiguration: Codable, Hashable {
         self.password = password
         self.ruleID = ruleID
         self.ruleName = ruleName
+        self.displayName = displayName
         self.autoUpdate = autoUpdate
         self.updateIntervalMinutes = updateIntervalMinutes
         self.lastUpdatedAt = lastUpdatedAt
@@ -209,7 +212,7 @@ nonisolated struct LuckyStunSourceConfiguration: Codable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case managementURL, username, password, ruleID, ruleName
+        case managementURL, username, password, ruleID, ruleName, displayName
         case autoUpdate, updateIntervalMinutes, lastUpdatedAt, pathSuffix
     }
 
@@ -220,6 +223,7 @@ nonisolated struct LuckyStunSourceConfiguration: Codable, Hashable {
         password = try container.decodeIfPresent(String.self, forKey: .password) ?? ""
         ruleID = try container.decodeIfPresent(String.self, forKey: .ruleID) ?? ""
         ruleName = try container.decodeIfPresent(String.self, forKey: .ruleName) ?? ""
+        displayName = try container.decodeIfPresent(String.self, forKey: .displayName) ?? ""
         autoUpdate = try container.decodeIfPresent(Bool.self, forKey: .autoUpdate) ?? true
         updateIntervalMinutes = try container.decodeIfPresent(Int.self, forKey: .updateIntervalMinutes) ?? 30
         lastUpdatedAt = try container.decodeIfPresent(Double.self, forKey: .lastUpdatedAt) ?? 0
@@ -309,6 +313,13 @@ nonisolated struct MediaSource: Codable, FetchableRecord, PersistableRecord {
 
     nonisolated var activeAddressLabel: String {
         addressConfiguration().activeLabel
+    }
+
+    nonisolated var luckyStunDisplayName: String? {
+        guard let displayName = addressConfiguration().luckyStun?.displayName
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !displayName.isEmpty else { return nil }
+        return displayName
     }
 
     nonisolated func isValidConfiguration() -> Bool {

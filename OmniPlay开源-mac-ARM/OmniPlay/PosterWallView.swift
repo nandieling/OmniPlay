@@ -253,6 +253,8 @@ struct PosterWallView: View {
     @State private var pendingLuckyConfiguration: LuckyStunSourceConfiguration? = nil
     @State private var isShowingWebDAVPreScanLoginSheet = false
     @State private var isShowingWebDAVFolderBrowserSheet = false
+    @State private var shouldStartLuckyWebDAVAfterDismiss = false
+    @State private var shouldShowWebDAVBrowserAfterLoginDismiss = false
     @State private var webDAVBrowserName: String = ""
     @State private var webDAVBrowserBaseURL: String = ""
     @State private var webDAVBrowserUsername: String = ""
@@ -516,7 +518,7 @@ struct PosterWallView: View {
             .sheet(isPresented: $isShowingManualRemoteSourceSheet) {
                 manualRemoteSourceSheet()
             }
-            .sheet(isPresented: $isShowingWebDAVPreScanLoginSheet) {
+            .sheet(isPresented: $isShowingWebDAVPreScanLoginSheet, onDismiss: showPendingWebDAVBrowser) {
                 webDAVPreScanLoginSheet()
             }
             .sheet(isPresented: $isShowingWebDAVFolderBrowserSheet) {
@@ -525,7 +527,7 @@ struct PosterWallView: View {
             .sheet(isPresented: $isShowingMediaServerSheet) {
                 mediaServerSourceSheet()
             }
-            .sheet(isPresented: $isShowingLuckyStunSourceSheet) {
+            .sheet(isPresented: $isShowingLuckyStunSourceSheet, onDismiss: startPendingLuckyWebDAV) {
                 luckyStunSourceSheet()
             }
             .sheet(isPresented: $isShowingRemoveSourceSheet) {
@@ -815,6 +817,9 @@ struct PosterWallView: View {
     }
 
     private func sourceProtocolLabel(_ source: MediaSource) -> String {
+        if let luckyStunDisplayName = source.luckyStunDisplayName {
+            return luckyStunDisplayName
+        }
         switch source.protocolKind {
         case .webdav: return "WebDAV"
         case .plex: return "Plex"
@@ -1048,6 +1053,8 @@ struct PosterWallView: View {
     }
 
     private func closeRemoteSourceSheets() {
+        shouldStartLuckyWebDAVAfterDismiss = false
+        shouldShowWebDAVBrowserAfterLoginDismiss = false
         isShowingManualRemoteSourceSheet = false
         isShowingMediaServerSheet = false
         isShowingLuckyStunSourceSheet = false
@@ -1082,6 +1089,22 @@ struct PosterWallView: View {
         isTestingLuckySource = false
         pendingLuckyConfiguration = nil
         isShowingLuckyStunSourceSheet = true
+    }
+
+    private func startPendingLuckyWebDAV() {
+        guard shouldStartLuckyWebDAVAfterDismiss else { return }
+        shouldStartLuckyWebDAVAfterDismiss = false
+        // Present the browser immediately so a slow first tunnel request still
+        // exposes the current URL and an actionable refresh button.
+        webDAVBrowserIsLoading = true
+        isShowingWebDAVFolderBrowserSheet = true
+        saveWebDAVBrowserLoginAndBrowse(presentBrowserWhenLoaded: false)
+    }
+
+    private func showPendingWebDAVBrowser() {
+        guard shouldShowWebDAVBrowserAfterLoginDismiss else { return }
+        shouldShowWebDAVBrowserAfterLoginDismiss = false
+        isShowingWebDAVFolderBrowserSheet = true
     }
 
     private func testLuckyStunLogin() {
@@ -1135,7 +1158,12 @@ struct PosterWallView: View {
 
             HStack {
                 Button(isTestingLuckySource ? "检测中..." : "登录检测") { testLuckyStunLogin() }
-                    .disabled(isTestingLuckySource || luckyManagementURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(
+                        isTestingLuckySource ||
+                        luckyManagementURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                        luckyUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                        luckyPassword.isEmpty
+                    )
                 if isTestingLuckySource { ProgressView().controlSize(.small) }
             }
 
@@ -1802,6 +1830,7 @@ struct PosterWallView: View {
             HStack {
                 Spacer()
                 Button("取消") {
+                    shouldShowWebDAVBrowserAfterLoginDismiss = false
                     isShowingWebDAVPreScanLoginSheet = false
                     resetWebDAVBrowserState(clearLogin: true)
                 }
@@ -1859,11 +1888,16 @@ struct PosterWallView: View {
                     .disabled(webDAVBrowserPathStack.isEmpty || webDAVBrowserIsLoading)
                     Spacer()
                     Button {
-                        loadWebDAVBrowserDirectory(at: webDAVBrowserCurrentURL, replaceStackWith: webDAVBrowserPathStack)
+                        loadWebDAVBrowserDirectory(
+                            at: webDAVBrowserCurrentURL.isEmpty ? webDAVBrowserBaseURL : webDAVBrowserCurrentURL,
+                            replaceStackWith: webDAVBrowserPathStack
+                        )
                     } label: {
                         Label("刷新", systemImage: "arrow.clockwise")
                     }
-                    .disabled(webDAVBrowserCurrentURL.isEmpty || webDAVBrowserIsLoading)
+                    // Keep refresh available during the first tunnel request so a
+                    // stalled/empty response can be retried without leaving the sheet.
+                    .disabled(webDAVBrowserCurrentURL.isEmpty && webDAVBrowserBaseURL.isEmpty)
                 }
             }
 
@@ -1961,7 +1995,7 @@ struct PosterWallView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
-    private func saveWebDAVBrowserLoginAndBrowse() {
+    private func saveWebDAVBrowserLoginAndBrowse(presentBrowserWhenLoaded: Bool = true) {
         let normalizedInput = MediaSourceProtocol.webdav.normalizedBaseURL(webDAVBrowserBaseURL)
         guard MediaSourceProtocol.webdav.isValidBaseURL(normalizedInput) else {
             webDAVBrowserMessage = "WebDAV 地址无效，请输入 http(s):// 开头且包含主机名的地址。"
@@ -2008,9 +2042,13 @@ struct PosterWallView: View {
                     webDAVBrowserIsLoading = false
                     webDAVBrowserMessage = items.isEmpty ? "连接成功，但当前目录没有可浏览的子文件夹。" : nil
                     webDAVBrowserMessageIsError = false
-                    isShowingWebDAVPreScanLoginSheet = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                        isShowingWebDAVFolderBrowserSheet = true
+                    if presentBrowserWhenLoaded {
+                        if isShowingWebDAVPreScanLoginSheet {
+                            shouldShowWebDAVBrowserAfterLoginDismiss = true
+                            isShowingWebDAVPreScanLoginSheet = false
+                        } else {
+                            isShowingWebDAVFolderBrowserSheet = true
+                        }
                     }
                 }
             } catch {
@@ -2647,9 +2685,10 @@ struct PosterWallView: View {
         let managementURL = luckyManagementURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let luckyAccount = luckyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         let mediaAccount = luckyDockerUsername.trimmingCharacters(in: .whitespacesAndNewlines)
-        let finalName = luckySourceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let customDisplayName = luckySourceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = customDisplayName.isEmpty
             ? "Lucky STUN · \(rule.name)"
-            : luckySourceName.trimmingCharacters(in: .whitespacesAndNewlines)
+            : customDisplayName
         guard !managementURL.isEmpty, isLuckySourceCredentialComplete else {
             luckyStatusMessage = "请填写 Lucky 管理地址和媒体源登录信息。"
             return
@@ -2661,6 +2700,7 @@ struct PosterWallView: View {
             password: luckyPassword,
             ruleID: rule.id,
             ruleName: rule.name,
+            displayName: customDisplayName,
             autoUpdate: luckyAutoUpdate,
             updateIntervalMinutes: luckyUpdateIntervalMinutes,
             lastUpdatedAt: Date().timeIntervalSince1970
@@ -2669,14 +2709,22 @@ struct PosterWallView: View {
         if luckySourceProtocol == .webdav {
             pendingLuckyConfiguration = luckyConfiguration
             webDAVBrowserName = finalName
-            webDAVBrowserBaseURL = address
+            let browserAddress = sanitizedWebDAVBrowserURL(address)
+            webDAVBrowserBaseURL = browserAddress
+            webDAVBrowserCurrentURL = browserAddress
             webDAVBrowserUsername = mediaAccount
             webDAVBrowserPassword = luckyDockerPassword
             webDAVBrowserProtocol = .webdav
             webDAVBrowserLocalLabel = ""
             webDAVBrowserExternalAddresses = []
+            webDAVBrowserPathStack = []
+            webDAVBrowserItems = []
+            webDAVBrowserStarredFolders = []
+            webDAVBrowserMessage = nil
+            webDAVBrowserMessageIsError = false
+            webDAVBrowserIsLoading = false
+            shouldStartLuckyWebDAVAfterDismiss = true
             isShowingLuckyStunSourceSheet = false
-            saveWebDAVBrowserLoginAndBrowse()
             return
         }
 

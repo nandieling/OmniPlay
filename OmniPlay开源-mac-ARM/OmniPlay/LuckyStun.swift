@@ -18,13 +18,15 @@ struct LuckyStunRefreshResult {
 final class LuckyStunClient {
     static let shared = LuckyStunClient()
 
-    private let loginPaths = ["/api/login", "/api/auth/login", "/api/user/login", "/api/auth/signin", "/login"]
-    private let rulePaths = [
-        "/api/stun", "/api/stun/rules", "/api/stun/list", "/api/penetration",
-        "/api/penetration/rules", "/api/nat/stun", "/api/config/stun", "/api/rules", "/api/getstunlist"
-    ]
+    private let session: URLSession
 
-    private init() {}
+    private init() {
+        session = Self.makeSession()
+    }
+
+    init(session: URLSession) {
+        self.session = session
+    }
 
     func fetch(
         managementURL rawManagementURL: String,
@@ -34,42 +36,34 @@ final class LuckyStunClient {
         selectedRuleName: String
     ) async throws -> [LuckyStunRule] {
         let managementURL = try normalizeManagementURL(rawManagementURL)
-        var cookies: [String] = []
-        var token: String?
+        let account = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !account.isEmpty, !password.isEmpty else {
+            throw clientError(code: 4, message: "请填写 Lucky 管理账号和密码。")
+        }
 
-        if !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !password.isEmpty {
-            (token, cookies) = try await login(
-                baseURL: managementURL,
-                username: username.trimmingCharacters(in: .whitespacesAndNewlines),
-                password: password,
-                cookies: cookies
+        let token = try await login(baseURL: managementURL, account: account, password: password)
+        let rulesURL = requestURL("api/stunrulelist", under: managementURL)
+        let response = try await request(
+            rulesURL,
+            method: "GET",
+            body: nil,
+            token: token,
+            baseURL: managementURL
+        )
+        guard (200..<300).contains(response.statusCode) else {
+            throw clientError(
+                code: response.statusCode,
+                message: "无法读取 Lucky STUN 规则：\(rulesURL.path) 返回 HTTP \(response.statusCode)。"
             )
         }
-
-        var lastError = "没有识别到规则列表。"
-        for path in rulePaths {
-            do {
-                let response = try await request(
-                    URL(string: managementURL + path)!,
-                    method: "GET",
-                    body: nil,
-                    token: token,
-                    cookies: cookies
-                )
-                guard (200..<300).contains(response.statusCode) else {
-                    lastError = "HTTP \(response.statusCode)"
-                    continue
-                }
-                let rules = parseRules(response.data)
-                if !rules.isEmpty {
-                    return rules
-                }
-                lastError = "响应中没有识别到穿透规则。"
-            } catch {
-                lastError = error.localizedDescription
-            }
+        guard let object = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any],
+              let result = integer(object["ret"]) else {
+            throw clientError(code: 2, message: "Lucky STUN 返回了无法解析的规则数据。")
         }
-        throw NSError(domain: "OmniPlayLuckyStun", code: 1, userInfo: [NSLocalizedDescriptionKey: "无法读取 Lucky STUN 规则：\(lastError)"])
+        guard result == 0 else {
+            throw clientError(code: result, message: "无法读取 Lucky STUN 规则：\(message(from: object))")
+        }
+        return parseRules(response.data)
     }
 
     func selectedRule(
@@ -99,35 +93,40 @@ final class LuckyStunClient {
     }
 
     private func login(
-        baseURL: String,
-        username: String,
-        password: String,
-        cookies: [String]
-    ) async throws -> (String?, [String]) {
-        let body = try JSONSerialization.data(withJSONObject: ["username": username, "password": password])
-        var currentCookies = cookies
-        var lastStatus = 400
-        for path in loginPaths {
-            do {
-                let response = try await request(
-                    URL(string: baseURL + path)!,
-                    method: "POST",
-                    body: body,
-                    token: nil,
-                    cookies: currentCookies
-                )
-                currentCookies = mergeCookies(currentCookies, response.cookies)
-                lastStatus = response.statusCode
-                guard (200..<300).contains(response.statusCode) else { continue }
-                var token = findString(in: response.data, keys: ["token", "accessToken", "access_token", "jwt", "authorization"])
-                if let value = token, !value.lowercased().hasPrefix("bearer ") { token = "Bearer \(value)" }
-                return (token, currentCookies)
-            } catch { continue }
+        baseURL: URL,
+        account: String,
+        password: String
+    ) async throws -> String {
+        let loginURL = requestURL("api/login", under: baseURL)
+        let body = try JSONSerialization.data(withJSONObject: [
+            "Account": account,
+            "Password": password,
+            "TwoFA": ""
+        ])
+        let response = try await request(
+            loginURL,
+            method: "POST",
+            body: body,
+            token: nil,
+            baseURL: baseURL
+        )
+        guard (200..<300).contains(response.statusCode) else {
+            throw clientError(
+                code: response.statusCode,
+                message: "Lucky STUN 登录失败：\(loginURL.path) 返回 HTTP \(response.statusCode)。"
+            )
         }
-        if lastStatus == 401 || lastStatus == 403 {
-            throw NSError(domain: "OmniPlayLuckyStun", code: 401, userInfo: [NSLocalizedDescriptionKey: "Lucky STUN 登录失败，请检查账号和密码。"])
+        guard let object = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any],
+              let result = integer(object["ret"]) else {
+            throw clientError(code: 2, message: "Lucky STUN 返回了无法解析的登录数据。")
         }
-        return (nil, currentCookies)
+        guard result == 0 else {
+            throw clientError(code: result, message: "Lucky STUN 登录失败：\(message(from: object))")
+        }
+        guard let token = findValue(object, keys: ["token"]), !token.isEmpty else {
+            throw clientError(code: 2, message: "Lucky STUN 登录成功，但响应中没有管理令牌。")
+        }
+        return token
     }
 
     private func request(
@@ -135,29 +134,25 @@ final class LuckyStunClient {
         method: String,
         body: Data?,
         token: String?,
-        cookies: [String]
-    ) async throws -> (data: Data, statusCode: Int, cookies: [String]) {
+        baseURL: URL
+    ) async throws -> (data: Data, statusCode: Int) {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 12
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("OmniPlay-LuckySTUN", forHTTPHeaderField: "User-Agent")
-        if let token, !token.isEmpty { request.setValue(token, forHTTPHeaderField: "Authorization") }
-        if !cookies.isEmpty { request.setValue(cookies.joined(separator: "; "), forHTTPHeaderField: "Cookie") }
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/605.1.15", forHTTPHeaderField: "User-Agent")
+        request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        if let token, !token.isEmpty { request.setValue(token, forHTTPHeaderField: "Lucky-Admin-Token") }
+        setBrowserOriginHeaders(on: &request, baseURL: baseURL)
         if let body {
             request.httpBody = body
             request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
-            throw NSError(domain: "OmniPlayLuckyStun", code: 2, userInfo: [NSLocalizedDescriptionKey: "Lucky STUN 返回了无效响应。"])
+            throw clientError(code: 2, message: "Lucky STUN 返回了无效响应。")
         }
-        let setCookies = (http.allHeaderFields["Set-Cookie"] as? String)
-            .map { [$0] }
-            ?? http.allHeaderFields.reduce(into: [String]()) { result, item in
-                if String(describing: item.key).caseInsensitiveCompare("Set-Cookie") == .orderedSame, let value = item.value as? String { result.append(value) }
-            }
-        return (data, http.statusCode, setCookies.map { String($0.split(separator: ";", maxSplits: 1).first ?? Substring($0)) })
+        return (data, http.statusCode)
     }
 
     private func parseRules(_ data: Data) -> [LuckyStunRule] {
@@ -187,7 +182,7 @@ final class LuckyStunClient {
     }
 
     private func findAddress(_ object: [String: Any]) -> String? {
-        let keys = ["address", "url", "remoteAddress", "publicAddress", "externalAddress", "penetrationAddress", "forwardAddress", "stunAddress", "remoteUrl", "domain", "host"]
+        let keys = ["address", "url", "remoteAddress", "publicAddress", "publicAddr", "externalAddress", "penetrationAddress", "forwardAddress", "stunAddress", "remoteUrl", "domain", "host"]
         if let value = findValue(object, keys: keys), !value.lowercased().contains("/api/") { return value }
         let host = findValue(object, keys: ["remoteHost", "publicHost", "externalHost"])
         let port = findValue(object, keys: ["remotePort", "publicPort", "externalPort", "port"])
@@ -202,43 +197,89 @@ final class LuckyStunClient {
         return nil
     }
 
-    private func findString(in data: Data, keys: [String]) -> String? {
-        guard let object = try? JSONSerialization.jsonObject(with: data) else { return nil }
-        return findString(in: object, keys: keys)
-    }
-
-    private func findString(in value: Any, keys: [String]) -> String? {
-        if let object = value as? [String: Any] {
-            if let direct = findValue(object, keys: keys) { return direct }
-            for child in object.values { if let nested = findString(in: child, keys: keys) { return nested } }
-        } else if let array = value as? [Any] {
-            for child in array { if let nested = findString(in: child, keys: keys) { return nested } }
-        }
-        return nil
-    }
-
-    private func mergeCookies(_ old: [String], _ new: [String]) -> [String] {
-        var result = old
-        for cookie in new {
-            let key = cookie.split(separator: "=", maxSplits: 1).first.map(String.init) ?? cookie
-            result.removeAll { $0.hasPrefix("\(key)=") }
-            result.append(cookie)
-        }
-        return result
-    }
-
-    private func normalizeManagementURL(_ value: String) throws -> String {
+    private func normalizeManagementURL(_ value: String) throws -> URL {
         var candidate = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if !candidate.contains("://") { candidate = "http://\(candidate)" }
         guard var components = URLComponents(string: candidate),
               let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
               components.host?.isEmpty == false else {
-            throw NSError(domain: "OmniPlayLuckyStun", code: 3, userInfo: [NSLocalizedDescriptionKey: "Lucky STUN 管理地址无效。"])
+            throw clientError(code: 3, message: "Lucky STUN 管理地址无效。")
         }
-        if components.path.lowercased().hasSuffix("/api") { components.path = String(components.path.dropLast(4)).trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
         components.query = nil
         components.fragment = nil
-        return (components.url?.absoluteString ?? candidate).trimmedTrailingSlash
+        var pathComponents = components.path.split(separator: "/").map(String.init)
+        if pathComponents.last?.lowercased() == "api" { pathComponents.removeLast() }
+        components.path = pathComponents.isEmpty ? "/" : "/\(pathComponents.joined(separator: "/"))/"
+        guard let url = components.url else {
+            throw clientError(code: 3, message: "Lucky STUN 管理地址无效。")
+        }
+        return url
+    }
+
+    private func requestURL(_ path: String, under baseURL: URL) -> URL {
+        let endpoint = path.split(separator: "/").reduce(baseURL) { url, component in
+            url.appendingPathComponent(String(component))
+        }
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else { return endpoint }
+        components.queryItems = [URLQueryItem(name: "_", value: requestNonce())]
+        return components.url ?? endpoint
+    }
+
+    private func requestNonce(now: Date = Date()) -> String {
+        let milliseconds = String(Int64(now.timeIntervalSince1970 * 1_000))
+        guard milliseconds.count > 1 else { return milliseconds }
+        let prefix = milliseconds.dropLast()
+        let checksum = prefix.compactMap(\.wholeNumberValue).reduce(0, +) % 8
+        return prefix + String(checksum)
+    }
+
+    private func setBrowserOriginHeaders(on request: inout URLRequest, baseURL: URL) {
+        guard let components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme,
+              let host = components.host else { return }
+        let renderedHost = host.contains(":") ? "[\(host)]" : host
+        let port = components.port.map { ":\($0)" } ?? ""
+        request.setValue("\(scheme)://\(renderedHost)\(port)", forHTTPHeaderField: "Origin")
+        request.setValue(baseURL.absoluteString, forHTTPHeaderField: "Referer")
+    }
+
+    private func integer(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let value = value as? NSNumber { return value.intValue }
+        if let value = value as? String { return Int(value) }
+        return nil
+    }
+
+    private func message(from object: [String: Any]) -> String {
+        let rawMessage = (object["msg"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? (object["message"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? "未知错误"
+        switch rawMessage {
+        case "IncorrectAccountOrPassword":
+            return "账号或密码错误"
+        case "LoginFailed":
+            return "登录失败"
+        case "NoPermission", "PermissionDenied":
+            return "当前账号没有访问权限"
+        case "TokenExpired", "InvalidToken":
+            return "登录凭证已失效"
+        default:
+            return rawMessage
+        }
+    }
+
+    private func clientError(code: Int, message: String) -> NSError {
+        NSError(domain: "OmniPlayLuckyStun", code: code, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    private static func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpCookieAcceptPolicy = .always
+        configuration.httpShouldSetCookies = true
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
     }
 }
 
