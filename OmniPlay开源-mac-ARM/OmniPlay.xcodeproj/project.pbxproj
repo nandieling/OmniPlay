@@ -461,6 +461,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "觅影";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "方便添加电影";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "觅影需要访问局域网设备（如 NAS、WebDAV、Plex、Emby、Jellyfin）以连接并播放你的媒体文件。";
 				INFOPLIST_KEY_NSNetworkVolumesUsageDescription = OmniPlay;
 				INFOPLIST_KEY_NSRemovableVolumesUsageDescription = OmniPlay;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -531,6 +532,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "觅影";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "方便添加电影";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "觅影需要访问局域网设备（如 NAS、WebDAV、Plex、Emby、Jellyfin）以连接并播放你的媒体文件。";
 				INFOPLIST_KEY_NSNetworkVolumesUsageDescription = OmniPlay;
 				INFOPLIST_KEY_NSRemovableVolumesUsageDescription = OmniPlay;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
