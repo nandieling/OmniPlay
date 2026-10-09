@@ -12,10 +12,10 @@
     <Product>觅影</Product>
     <Company>觅影</Company>
     <FileDescription>觅影</FileDescription>
-    <Version>1.5</Version>
-    <AssemblyVersion>1.5.0.0</AssemblyVersion>
-    <FileVersion>1.5.0.0</FileVersion>
-    <InformationalVersion>1.5</InformationalVersion>
+    <Version>1.8</Version>
+    <AssemblyVersion>1.8.0.0</AssemblyVersion>
+    <FileVersion>1.8.0.0</FileVersion>
+    <InformationalVersion>1.8</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

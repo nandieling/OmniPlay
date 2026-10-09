@@ -6,6 +6,9 @@ extension Notification.Name { static let libraryUpdated = Notification.Name("Omn
 
 enum LibraryUpdateUserInfoKey {
     static let preferredVideoFileId = "preferredVideoFileId"
+    static let metadataScrapeCompleted = "metadataScrapeCompleted"
+    static let replacedMovieId = "replacedMovieId"
+    static let updatedMovieId = "updatedMovieId"
 }
 
 enum MediaNameParser {
@@ -139,7 +142,7 @@ enum MediaNameParser {
         }
         return textToParse
     }
-
+    
     nonisolated static func extractSearchMetadata(from rawPath: String) -> (chineseTitle: String?, foreignTitle: String?, fullCleanTitle: String?, year: String?) {
         let originalText = cleanedTitleSource(from: rawPath)
         var textToParse = truncateBeforeReleaseMetadata(originalText)
@@ -148,7 +151,7 @@ enum MediaNameParser {
             with: " ",
             options: .regularExpression
         )
-
+        
         let extractedYear: String? = chooseReleaseYear(from: originalText) ?? chooseReleaseYear(from: textToParse)
         if let extractedYear {
             let removePattern = #"[ \.\-_\(\)\[\]\{\}【】（）《》「」『』〔〕〖〗]*\#(extractedYear)[ \.\-_\(\)\[\]\{\}【】（）《》「」『』〔〕〖〗]*"#
@@ -156,7 +159,7 @@ enum MediaNameParser {
                 textToParse = String(textToParse[..<cutRange.lowerBound])
             }
         }
-
+        
         let cleanPatterns = [
             #"(?i)\b(1080p|2160p|4k|720p|480p|blu[- ]?ray|bluray|bdrip|web[- ]?dl|webrip|remux|x264|x265|h\.?264|h\.?265|hevc|avc|vc[- ]?1|aac|dts[- ]?hd|dts|lpcm|truehd|hdr|dv)\b"#,
             #"(?i)\b[sS]\d{1,2}\s*[-–~]\s*(?:[sS])?\d{1,2}\b"#,
@@ -185,13 +188,13 @@ enum MediaNameParser {
         for pattern in cleanPatterns {
             textToParse = textToParse.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
         }
-
+        
         textToParse = textToParse.replacingOccurrences(of: #"[._]+"#, with: " ", options: .regularExpression)
         textToParse = textToParse.replacingOccurrences(of: #"\[[^\]]*\]|\([^\)]*\)"#, with: " ", options: .regularExpression)
         textToParse = textToParse.replacingOccurrences(of: #"[【】（）《》「」『』〔〕〖〗]"#, with: " ", options: .regularExpression)
         textToParse = textToParse.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-
+        
         let tokens = textToParse.split(separator: " ").map(String.init)
         let originalTokens = originalText
             .replacingOccurrences(of: #"[._]+"#, with: " ", options: .regularExpression)
@@ -204,7 +207,7 @@ enum MediaNameParser {
         let chineseTitle = extractChineseTitle(from: tokens) ?? extractChineseTitle(from: originalTokens)
         let foreignTitle = extractForeignTitle(from: tokens)
         let fullTitle = textToParse.isEmpty ? nil : textToParse
-
+        
         return (
             chineseTitle: chineseTitle,
             foreignTitle: foreignTitle,
@@ -212,7 +215,7 @@ enum MediaNameParser {
             year: extractedYear
         )
     }
-
+    
     nonisolated static func extractParentFolderChineseTitle(from rawPath: String) -> String? {
         let parentPath = (rawPath as NSString).deletingLastPathComponent
         guard !parentPath.isEmpty, parentPath != rawPath else { return nil }
@@ -376,7 +379,7 @@ enum MediaNameParser {
             variantSortKey: normalizedEpisodeDetailKey(detail.variantTitle)
         )
     }
-
+    
     nonisolated static func parseEpisodeInfo(from fileName: String, fallbackIndex: Int) -> (season: Int, episode: Int, displayName: String, isTVShow: Bool) {
         let parsed = parseEpisodeDescriptor(from: fileName, fallbackIndex: fallbackIndex)
         return (parsed.season, parsed.episode, parsed.displayName, parsed.isTVShow)
@@ -427,7 +430,7 @@ enum MediaNameParser {
         }
         return parsePreferredSeason(from: rawPath)
     }
-
+    
     nonisolated static func isLikelyTVEpisodePath(_ rawPath: String) -> Bool {
         let lower = rawPath.lowercased()
         if lower.range(of: #"[s]\d{1,2}[e][p]?\d{1,3}"#, options: .regularExpression) != nil { return true }
@@ -500,7 +503,7 @@ enum MediaNameParser {
         value.range(of: #"(?i)^(season|s)\s*[\._-]?\s*\d{1,2}$"#, options: .regularExpression) != nil
             || value.range(of: #"^第\s*[一二三四五六七八九十零〇两\d]{1,3}\s*季$"#, options: .regularExpression) != nil
     }
-
+    
     nonisolated static func episodeSortKey(for fileName: String, fallbackIndex: Int) -> (Int, Int, String) {
         let parsed = parseEpisodeDescriptor(from: fileName, fallbackIndex: fallbackIndex)
         let seasonOrder = parsed.season == 0 ? Int.max : parsed.season
@@ -629,7 +632,7 @@ enum MediaNameParser {
         }
         return total > 0 ? total : nil
     }
-
+    
     nonisolated private static func extractChineseTitle(from tokens: [String]) -> String? {
         let genericChineseTokens: Set<String> = [
             "电影", "電影", "电影版", "電影版", "剧场版", "劇場版", "映画", "完全版", "总集篇", "總集篇",
@@ -637,7 +640,7 @@ enum MediaNameParser {
         ]
         var groups: [[String]] = []
         var current: [String] = []
-
+        
         for token in tokens {
             let hasChinese = token.range(of: #"\p{Han}"#, options: .regularExpression) != nil
             let normalizedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -653,7 +656,7 @@ enum MediaNameParser {
             }
         }
         if !current.isEmpty { groups.append(current) }
-
+        
         let merged = groups
             .max(by: { $0.joined().count < $1.joined().count })?
             .joined()
@@ -680,7 +683,7 @@ enum MediaNameParser {
             .lowercased()
         return token.range(of: #"^(vol(ume)?\d{0,2}|disc\d{0,2}|disk\d{0,2}|dvd\d{0,2}|cd\d{0,2}|bdrom|bdmv)$"#, options: .regularExpression) != nil
     }
-
+    
     nonisolated private static func extractForeignTitle(from tokens: [String]) -> String? {
         let noiseTokens: Set<String> = [
             "tx", "mweb", "adweb", "web", "dl", "bluray", "bdrip", "webrip",
@@ -1028,7 +1031,7 @@ class MediaLibraryManager {
             return count > 0
         }
     }
-
+    
     func fetchAllMovies() throws -> [Movie] {
         try dbQueue.read { db in
             try Movie.fetchVisibleLibrary(in: db)
@@ -1080,12 +1083,12 @@ class MediaLibraryManager {
             NotificationCenter.default.post(name: .libraryUpdated, object: nil)
         }
     }
-
+    
     func batchLockAllMovies() async throws {
         try await dbQueue.write { db in try db.execute(sql: "UPDATE movie SET isLocked = 1") }
         await MainActor.run { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
     }
-
+    
     func updateVideoFileMatch(fileId: String, newTMDBMovieId: Int64) throws {
         try dbQueue.write { db in
             guard var file = try VideoFile.fetchOne(db, key: fileId) else { return }
@@ -1116,7 +1119,7 @@ class MediaLibraryManager {
             return count > 0
         }
     }
-
+    
     // 🌟 核心升级：3轮递进式自动刮削引擎
     func processUnmatchedFiles(
         sourceID: Int64? = nil,
@@ -1173,10 +1176,10 @@ class MediaLibraryManager {
             print("🤖 递进刮削器：没有找到需要刮削的新文件。")
             return
         }
-
+        
         let representativeFiles = representativeUnmatchedFiles(from: unmatchedFiles)
         print("🤖 递进刮削器：开始刮削 \(representativeFiles.count) 个影视条目（来自 \(unmatchedFiles.count) 个新文件）...")
-
+        
         var tvAutoReuseCache: [String: TMDBResult] = [:]
 
         for file in representativeFiles {
@@ -1188,7 +1191,7 @@ class MediaLibraryManager {
             }
             guard isStillUnmatched else { continue }
             if let movieId = file.movieId { let isLocked = try await dbQueue.read { db in try Movie.fetchOne(db, key: movieId)?.isLocked ?? false }; if isLocked { continue } }
-
+            
             if let reuseKey = tvAutoReuseKey(for: file),
                let cached = tvAutoReuseCache[reuseKey],
                shouldAutoReuseTVResult(cached, for: file) {
@@ -1210,9 +1213,9 @@ class MediaLibraryManager {
                 fallbackIndex: 0
             )
             let yearForSearch = targetYear
-
+            
             print("\n🎬 正在处理文件: \(file.fileName)")
-
+            
             // --- 尝试 1: 中文名 + 年份 (精准模式) ---
             if let cnTitle = extraction.chineseTitle, !cnTitle.isEmpty {
                 print("   👉 尝试 [1/3] 精准模式 (中文+年份): [\(cnTitle)] 年份权重: [\(targetYear ?? "无")]")
@@ -1238,7 +1241,7 @@ class MediaLibraryManager {
                     }
                 }
             }
-
+            
             // --- 尝试 2: 父文件夹中文名 + 年份（文件名中文不可靠时回退） ---
             if let folderChinese = extraction.parentChineseTitle,
                !folderChinese.isEmpty,
@@ -1266,7 +1269,7 @@ class MediaLibraryManager {
                     }
                 }
             }
-
+            
             // --- 尝试 3: 外文名 + 年份（中文名缺失或尝试失败后降级） ---
             if let foreignTitle = extraction.foreignTitle, !foreignTitle.isEmpty {
                 let foreignCandidates = buildForeignQueryCandidates(from: foreignTitle)
@@ -1299,7 +1302,7 @@ class MediaLibraryManager {
                 }
                 if matchedInForeignTry { continue }
             }
-
+            
             // --- 尝试 4: 完整清洗名兜底 ---
             if let fullTitle = extraction.fullCleanTitle, !fullTitle.isEmpty {
                 print("   👉 尝试 [4/5] 兜底模式 (完整清洗名+年份): [\(fullTitle)] 年份权重: [\(targetYear ?? "无")]")
@@ -1325,7 +1328,7 @@ class MediaLibraryManager {
                     }
                 }
             }
-
+            
             // --- 尝试 5: 去空格去数字的纯名字强降级 ---
             if let fullTitle = extraction.fullCleanTitle {
                 let fallbackTitle = fullTitle.replacingOccurrences(of: #"[ \d]"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces)
@@ -1346,7 +1349,7 @@ class MediaLibraryManager {
                     print("   ❌ 彻底未找到: [\(fullTitle)]")
                 }
             }
-
+            
         }
 
         if exposeFailures {
@@ -1511,12 +1514,26 @@ class MediaLibraryManager {
             path: file.relativePath
         )
     }
-
+    
     private func saveScrapingResult(_ tmdbResult: TMDBResult, for file: VideoFile) async throws {
         if let path = tmdbResult.posterPath { PosterManager.shared.downloadPoster(posterPath: path) }
         let extracted = extractTitlesAndYear(from: file)
         let chineseFallback = extracted.chineseTitle ?? extracted.parentChineseTitle
         let resultId = Int64(tmdbResult.id); let oldFakeMovieId = file.movieId; let rTitle = tmdbResult.preferredTitle(chineseFallback: chineseFallback); let rDate = tmdbResult.releaseDate ?? tmdbResult.firstAirDate; let rOverview = tmdbResult.overview; let rPoster = tmdbResult.posterPath; let rVoteAverage = tmdbResult.voteAverage; let rFileId = file.id
+
+        // 🌟 导演/主演：强制刮削——只要 TMDB 凭据可用就请求 credits 并更新名单（结果按 TMDB id 缓存，同剧集逐集刮削不重复耗配额；请求为空时保留原值）。
+        var rDirectorInfos: [TMDBPersonInfo] = []
+        var rCastInfos: [TMDBPersonInfo] = []
+        if TMDBService.shared.currentCredentialSource().isAvailable {
+            (rDirectorInfos, rCastInfos) = await TMDBService.shared.fetchCredits(id: tmdbResult.id, mediaType: tmdbResult.mediaType)
+            // 外文人名换成 TMDB 中文译名（无中文条目时保留原名）
+            let localized = await ChineseNameStore.localizeCredits(directors: rDirectorInfos, casts: rCastInfos)
+            rDirectorInfos = localized.directors
+            rCastInfos = localized.casts
+            PersonProfileStore.upsertFromCredits(directors: rDirectorInfos, casts: rCastInfos)
+        }
+        let rDirectorsJSON = Movie.encodePersonList(rDirectorInfos.map(\.name))
+        let rCastsJSON = Movie.encodePersonList(rCastInfos.map(\.name))
 
         try await dbQueue.write { db in
             let movie: Movie
@@ -1527,11 +1544,20 @@ class MediaLibraryManager {
                     existingMovie.overview = rOverview
                     existingMovie.posterPath = rPoster
                     existingMovie.voteAverage = rVoteAverage
+                    if let rDirectorsJSON { existingMovie.directors = rDirectorsJSON }
+                    if let rCastsJSON { existingMovie.casts = rCastsJSON }
                     try existingMovie.update(db)
+                } else {
+                    // 导演/主演为强制刮削字段，始终更新；其余字段保留用户手填内容。
+                    if let rDirectorsJSON { existingMovie.directors = rDirectorsJSON }
+                    if let rCastsJSON { existingMovie.casts = rCastsJSON }
+                    if existingMovie.directors != nil || existingMovie.casts != nil {
+                        try existingMovie.update(db)
+                    }
                 }
                 movie = existingMovie
             } else {
-                movie = Movie(id: resultId, title: rTitle, releaseDate: rDate, overview: rOverview, posterPath: rPoster, voteAverage: rVoteAverage, isLocked: false)
+                movie = Movie(id: resultId, title: rTitle, releaseDate: rDate, overview: rOverview, posterPath: rPoster, voteAverage: rVoteAverage, isLocked: false, directors: rDirectorsJSON, casts: rCastsJSON)
                 try movie.insert(db)
             }
             if let fakeId = oldFakeMovieId, fakeId < 0 {
@@ -1557,8 +1583,23 @@ class MediaLibraryManager {
             if let fakeId = oldFakeMovieId, fakeId < 0 { _ = try Movie.deleteOne(db, key: fakeId) }
         }
 
+        await MainActor.run {
+            var userInfo: [String: Any] = [
+                LibraryUpdateUserInfoKey.metadataScrapeCompleted: true,
+                LibraryUpdateUserInfoKey.preferredVideoFileId: file.id,
+                LibraryUpdateUserInfoKey.updatedMovieId: resultId
+            ]
+            if let oldFakeMovieId {
+                userInfo[LibraryUpdateUserInfoKey.replacedMovieId] = oldFakeMovieId
+            }
+            NotificationCenter.default.post(name: .libraryUpdated, object: nil, userInfo: userInfo)
+        }
+
         let exportSource = try? await dbQueue.read { db in
             try MediaSource.fetchOne(db, key: file.sourceId)
+        }
+        let exportMovie = try? await dbQueue.read { db -> Movie? in
+            try Movie.fetchOne(db, key: resultId)
         }
         if UserDefaults.standard.bool(forKey: "enableLocalMetadataExport"),
            let source = exportSource,
@@ -1574,7 +1615,9 @@ class MediaLibraryManager {
                 voteAverage: rVoteAverage,
                 tmdbId: tmdbResult.id,
                 seasonNumber: nil,
-                episodeNumber: nil
+                episodeNumber: nil,
+                directors: exportMovie?.directorList ?? [],
+                casts: exportMovie?.castList ?? []
             )
             if isTVResult(tmdbResult) {
                 await LocalMetadataSidecarStore.shared.exportTVShow(metadata: sidecar, videoURL: videoURL)
@@ -1583,7 +1626,7 @@ class MediaLibraryManager {
             }
         }
     }
-
+    
     private func extractTitlesAndYear(from file: VideoFile) -> (chineseTitle: String?, parentChineseTitle: String?, foreignTitle: String?, fullCleanTitle: String?, year: String?) {
         return MediaNameParser.combinedSearchMetadata(relativePath: file.relativePath, fileName: file.fileName)
     }
@@ -1662,7 +1705,7 @@ class MediaLibraryManager {
         let release = result.releaseDate ?? ""
         return release.isEmpty
     }
-
+    
     private func isTVResult(_ result: TMDBResult) -> Bool {
         if let mediaType = result.mediaType?.lowercased(), mediaType == "tv" { return true }
         if let firstAir = result.firstAirDate, !firstAir.isEmpty { return true }
@@ -2173,7 +2216,14 @@ struct WebDAVDirectoryBrowser {
         let session = URLSession(configuration: config, delegate: LocalNetworkTrustSessionDelegate.shared, delegateQueue: nil)
 
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response): (Data, URLResponse)
+            do {
+                (data, response) = try await session.data(for: request)
+            } catch let error as URLError where [.timedOut, .networkConnectionLost, .cannotConnectToHost, .notConnectedToInternet].contains(error.code) {
+                // A tunnel may need a moment to establish its first connection.
+                try await Task.sleep(nanoseconds: 250_000_000)
+                (data, response) = try await session.data(for: request)
+            }
             guard let http = response as? HTTPURLResponse else {
                 throw WebDAVDirectoryBrowserError.requestFailed("WebDAV 请求失败：未收到有效响应。")
             }
@@ -2730,7 +2780,6 @@ struct MediaServerLibraryBrowser {
         case .plex: return "Plex"
         case .emby: return "Emby"
         case .jellyfin: return "Jellyfin"
-        case .omniplayDocker: return "OmniPlay Docker"
         default: return "媒体服务器"
         }
     }
@@ -3485,7 +3534,6 @@ struct MediaServerPreflightChecker {
         case .plex: return "Plex"
         case .emby: return "Emby"
         case .jellyfin: return "Jellyfin"
-        case .omniplayDocker: return "OmniPlay Docker"
         default: return "媒体服务器"
         }
     }
@@ -3509,7 +3557,7 @@ private enum MediaSourceScannerFactory {
                 throw MediaSourceScanError.invalidBaseURL(source.baseUrl)
             }
             return MediaServerScanner(source: source)
-        case .direct, .omniplayDocker:
+        case .direct:
             throw MediaSourceScanError.unsupportedProtocol(protocolKind.rawValue)
         }
     }
@@ -3519,371 +3567,6 @@ extension MediaLibraryManager {
     // 🌟 这里是完完整整的本地文件雷达扫描入库逻辑！保证它存在！
     func scanLocalSource(_ source: MediaSource) async {
         _ = await scanLocalSourceWithResult(source)
-    }
-
-    func syncOmniPlayDockerSourceWithResult(_ source: MediaSource) async -> MediaSourceScanResult {
-        guard let sourceId = source.id else {
-            let message = "Docker 媒体源缺少ID，无法同步。"
-            return MediaSourceScanResult(
-                sourceId: nil,
-                sourceName: source.name,
-                protocolType: source.protocolType,
-                scannedCount: 0,
-                insertedCount: 0,
-                removedCount: 0,
-                errorCategory: .config,
-                userMessage: message,
-                diagnostic: buildDiagnostic(source: source, category: .config, message: message, error: nil, retryAttempts: 0)
-            )
-        }
-
-        do {
-            let config = OmniPlayDockerAuthConfig.decode(source.authConfig)
-            let client = try OmniPlayDockerClient(baseURLString: source.baseUrl, sessionCookie: config?.sessionCookie)
-            let summaries = try await client.libraryItems()
-            let details = try await withThrowingTaskGroup(of: OmniPlayDockerLibraryDetail.self) { group in
-                for item in summaries {
-                    group.addTask {
-                        try await client.libraryDetail(id: item.id)
-                    }
-                }
-                var values: [OmniPlayDockerLibraryDetail] = []
-                for try await detail in group {
-                    values.append(detail)
-                }
-                return values
-            }
-            let stats = try await importOmniPlayDocker(details: details, sourceId: sourceId, client: client)
-            DispatchQueue.main.async { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
-            return MediaSourceScanResult(
-                sourceId: sourceId,
-                sourceName: source.name,
-                protocolType: source.protocolType,
-                scannedCount: stats.scannedCount,
-                insertedCount: stats.insertedCount,
-                removedCount: stats.removedCount,
-                errorCategory: nil,
-                userMessage: "Docker 同步完成：新增 \(stats.insertedCount)，移除 \(stats.removedCount)，共 \(stats.scannedCount) 个文件。",
-                diagnostic: nil
-            )
-        } catch {
-            let category = dockerScanErrorCategory(error)
-            let message = userFacingMessage(for: category, sourceName: source.name, fallback: error.localizedDescription)
-            return MediaSourceScanResult(
-                sourceId: sourceId,
-                sourceName: source.name,
-                protocolType: source.protocolType,
-                scannedCount: 0,
-                insertedCount: 0,
-                removedCount: 0,
-                errorCategory: category,
-                userMessage: message,
-                diagnostic: buildDiagnostic(source: source, category: category, message: error.localizedDescription, error: error, retryAttempts: 0)
-            )
-        }
-    }
-
-    private func dockerScanErrorCategory(_ error: Error) -> MediaSourceScanErrorCategory {
-        if let dockerError = error as? OmniPlayDockerClientError {
-            switch dockerError {
-            case .authenticationRequired:
-                return .auth
-            case .invalidBaseURL:
-                return .config
-            case .requestFailed(let status, _):
-                return status == 401 || status == 403 ? .auth : .server
-            case .network:
-                return .network
-            case .invalidResponse:
-                return .server
-            }
-        }
-        if error is URLError {
-            return .network
-        }
-        return .unknown
-    }
-
-    private func importOmniPlayDocker(
-        details: [OmniPlayDockerLibraryDetail],
-        sourceId: Int64,
-        client: OmniPlayDockerClient
-    ) async throws -> (scannedCount: Int, insertedCount: Int, removedCount: Int) {
-        let importedPosters = await importOmniPlayDockerPosters(details: details, client: client)
-        await importOmniPlayDockerThumbnails(details: details, sourceId: sourceId, client: client)
-
-        return try await dbQueue.write { db in
-            var remoteFileIds = Set<String>()
-            var insertedCount = 0
-            var scannedCount = 0
-
-            for detail in details {
-                let movieId = Self.omniPlayDockerMovieId(for: detail.id)
-                let effectiveOverview = detail.overview?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                    ? detail.overview
-                    : detail.douban?.summary
-                let existingPosterPath = try Movie.fetchOne(db, key: movieId)?.posterPath
-                let posterPath = importedPosters[detail.id]
-                    ?? existingPosterPath
-                    ?? detail.douban?.posterUrl
-                let movie = Movie(
-                    id: movieId,
-                    title: detail.title,
-                    releaseDate: detail.releaseDate,
-                    overview: effectiveOverview,
-                    posterPath: posterPath,
-                    voteAverage: detail.voteAverage,
-                    isLocked: true
-                )
-                try movie.save(db)
-
-                if let douban = Self.doubanMetadata(from: detail, movieId: movieId) {
-                    try douban.save(db)
-                }
-
-                let files = Self.flattenDockerFiles(detail)
-                for remoteFile in files {
-                    let localFileId = Self.omniPlayDockerVideoFileId(for: remoteFile.id, sourceId: sourceId)
-                    let displayRelativePath = Self.omniPlayDockerDisplayRelativePath(for: remoteFile)
-                    let displayFileName = Self.omniPlayDockerDisplayFileName(for: remoteFile, relativePath: displayRelativePath)
-                    scannedCount += 1
-                    remoteFileIds.insert(localFileId)
-                    let file = VideoFile(
-                        id: localFileId,
-                        sourceId: sourceId,
-                        relativePath: displayRelativePath,
-                        fileName: displayFileName,
-                        mediaType: detail.itemKind == "tv" ? "tv" : "movie",
-                        movieId: movieId,
-                        episodeId: nil,
-                        playProgress: remoteFile.positionSeconds,
-                        duration: remoteFile.durationSeconds,
-                        fileSize: remoteFile.fileSizeBytes ?? 0,
-                        lastPlayedAt: remoteFile.positionSeconds > 5 ? Date().timeIntervalSince1970 : nil
-                    )
-                    if var existing = try VideoFile.fetchOne(db, key: localFileId) {
-                        let existingProgressIsNewer = existing.playProgress > 5 && remoteFile.positionSeconds <= 0
-                        existing.sourceId = sourceId
-                        existing.relativePath = file.relativePath
-                        existing.fileName = file.fileName
-                        existing.mediaType = file.mediaType
-                        existing.movieId = file.movieId
-                        existing.episodeId = nil
-                        existing.fileSize = file.fileSize
-                        existing.duration = max(existing.duration, file.duration)
-                        if !existingProgressIsNewer {
-                            existing.playProgress = file.playProgress
-                            existing.lastPlayedAt = file.lastPlayedAt
-                        }
-                        try existing.update(db)
-                    } else {
-                        try file.insert(db)
-                        insertedCount += 1
-                    }
-                }
-            }
-
-            let existingIds = try String.fetchAll(db, sql: "SELECT id FROM videoFile WHERE sourceId = ?", arguments: [sourceId])
-            var removedCount = 0
-            for id in existingIds where !remoteFileIds.contains(id) {
-                _ = try VideoFile.deleteOne(db, key: id)
-                removedCount += 1
-            }
-            try db.execute(sql: "DELETE FROM movie WHERE id NOT IN (SELECT DISTINCT movieId FROM videoFile WHERE movieId IS NOT NULL)")
-            return (scannedCount, insertedCount, removedCount)
-        }
-    }
-
-    private func importOmniPlayDockerPosters(
-        details: [OmniPlayDockerLibraryDetail],
-        client: OmniPlayDockerClient
-    ) async -> [String: String] {
-        await withTaskGroup(of: (String, String)?.self) { group in
-            for detail in details {
-                guard let assetId = detail.posterAssetId else { continue }
-                group.addTask {
-                    do {
-                        let data = try await client.posterData(assetId: assetId)
-                        guard NSImage(data: data) != nil else { return nil }
-                        let cacheKey = "omniplay-docker-\(detail.id)-\(assetId)"
-                        let (fileName, destination) = await MainActor.run {
-                            let fileName = PosterManager.shared.cacheFileName(for: cacheKey)
-                            let destination = PosterManager.shared.cacheDirectory.appendingPathComponent(fileName)
-                            return (fileName, destination)
-                        }
-                        try FileManager.default.createDirectory(
-                            at: destination.deletingLastPathComponent(),
-                            withIntermediateDirectories: true
-                        )
-                        try data.write(to: destination, options: .atomic)
-                        await MainActor.run {
-                            NotificationCenter.default.post(name: NSNotification.Name("PosterUpdated_\(fileName)"), object: nil)
-                        }
-                        return (detail.id, destination.path)
-                    } catch {
-                        return nil
-                    }
-                }
-            }
-
-            var imported: [String: String] = [:]
-            for await result in group {
-                if let result {
-                    imported[result.0] = result.1
-                }
-            }
-            return imported
-        }
-    }
-
-    private func importOmniPlayDockerThumbnails(
-        details: [OmniPlayDockerLibraryDetail],
-        sourceId: Int64,
-        client: OmniPlayDockerClient
-    ) async {
-        let candidates: [(String, String)] = details.flatMap { detail in
-            detail.seasons.flatMap { season in
-                season.episodes.flatMap { episode -> [(String, String)] in
-                    guard let assetId = episode.stillAssetId else { return [] }
-                    return episode.videoFiles.map { ($0.id, assetId) }
-                }
-            }
-        }
-        guard !candidates.isEmpty else { return }
-
-        let thumbnailDirectory = await MainActor.run { ThumbnailManager.shared.thumbDirectory }
-        try? FileManager.default.createDirectory(at: thumbnailDirectory, withIntermediateDirectories: true)
-
-        await withTaskGroup(of: Void.self) { group in
-            var iterator = candidates.makeIterator()
-            func addNext() -> Bool {
-                guard let candidate = iterator.next() else { return false }
-                group.addTask {
-                    let localFileId = Self.omniPlayDockerVideoFileId(for: candidate.0, sourceId: sourceId)
-                    let destination = thumbnailDirectory.appendingPathComponent("\(localFileId).jpg")
-                    if FileManager.default.fileExists(atPath: destination.path) { return }
-                    do {
-                        let data = try await client.thumbnailData(assetId: candidate.1)
-                        guard NSImage(data: data) != nil else { return }
-                        try data.write(to: destination, options: .atomic)
-                    } catch {
-                        return
-                    }
-                }
-                return true
-            }
-
-            for _ in 0..<4 where addNext() {}
-            while await group.next() != nil {
-                _ = addNext()
-            }
-        }
-    }
-
-    nonisolated static func omniPlayDockerMovieId(for id: String) -> Int64 {
-        let raw = "omniplay-docker:\(id)".precomposedStringWithCanonicalMapping.lowercased()
-        var hash: UInt64 = 1469598103934665603
-        for byte in raw.utf8 {
-            hash ^= UInt64(byte)
-            hash = hash &* 1099511628211
-        }
-        let positive = Int64(hash & 0x3FFF_FFFF_FFFF_FFFF)
-        return -max(positive, 1)
-    }
-
-    nonisolated static func omniPlayDockerVideoFileId(for id: String, sourceId: Int64) -> String {
-        "omniplay-docker:\(sourceId):\(id)"
-    }
-
-    nonisolated private static func flattenDockerFiles(_ detail: OmniPlayDockerLibraryDetail) -> [OmniPlayDockerVideoFile] {
-        var files = detail.videoFiles
-        for season in detail.seasons {
-            files.append(contentsOf: season.episodes.flatMap(\.videoFiles))
-        }
-        var seen = Set<String>()
-        return files.filter { file in
-            guard !seen.contains(file.id) else { return false }
-            seen.insert(file.id)
-            return true
-        }
-    }
-
-    nonisolated private static func omniPlayDockerDisplayRelativePath(for file: OmniPlayDockerVideoFile) -> String {
-        let relativePath = file.relativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalized = relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        if !normalized.isEmpty, !isOmniPlayDockerPlaybackEndpointPath(normalized) {
-            return normalized
-        }
-
-        return file.fileName.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    nonisolated private static func omniPlayDockerDisplayFileName(for file: OmniPlayDockerVideoFile, relativePath: String) -> String {
-        let fileName = file.fileName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !fileName.isEmpty,
-           fileName.lowercased() != "stream",
-           !isOmniPlayDockerPlaybackEndpointPath(fileName) {
-            return fileName
-        }
-
-        let relativeLastComponent = (relativePath as NSString).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !relativeLastComponent.isEmpty, relativeLastComponent.lowercased() != "stream" {
-            return relativeLastComponent
-        }
-
-        return fileName.isEmpty ? relativePath : fileName
-    }
-
-    nonisolated private static func isOmniPlayDockerPlaybackEndpointPath(_ value: String) -> Bool {
-        let parts = value.trimmingCharacters(in: CharacterSet(charactersIn: "/")).split(separator: "/").map(String.init)
-        return parts.count >= 5
-            && parts[0] == "api"
-            && parts[1] == "playback"
-            && parts[2] == "files"
-            && parts[4] == "stream"
-    }
-
-    nonisolated private static func doubanMetadata(from detail: OmniPlayDockerLibraryDetail, movieId: Int64) -> DoubanMetadata? {
-        guard let douban = detail.douban ?? minimalDoubanMetadata(from: detail) else { return nil }
-        let fetchedAt = ISO8601DateFormatter().date(from: douban.fetchedAt) ?? Date()
-        return DoubanMetadata(
-            movieId: movieId,
-            subjectId: douban.subjectId,
-            subjectURL: douban.subjectUrl,
-            title: douban.title,
-            originalTitle: douban.originalTitle,
-            year: douban.year,
-            rating: douban.rating,
-            ratingCount: douban.ratingCount,
-            summary: douban.summary,
-            genres: douban.genres,
-            countries: douban.countries,
-            directors: nil,
-            casts: nil,
-            posterURL: douban.posterUrl,
-            fetchedAt: fetchedAt.timeIntervalSince1970,
-            nextRefreshAt: fetchedAt.addingTimeInterval(30 * 24 * 60 * 60).timeIntervalSince1970,
-            lastError: nil
-        )
-    }
-
-    nonisolated private static func minimalDoubanMetadata(from detail: OmniPlayDockerLibraryDetail) -> OmniPlayDockerDoubanMetadata? {
-        guard let rating = detail.doubanRating else { return nil }
-        let year = detail.releaseDate.map { String($0.prefix(4)) }
-        return OmniPlayDockerDoubanMetadata(
-            subjectId: "docker-\(detail.id)",
-            subjectUrl: "",
-            title: detail.title,
-            originalTitle: nil,
-            year: year,
-            rating: rating,
-            ratingCount: nil,
-            summary: nil,
-            genres: nil,
-            countries: nil,
-            posterUrl: nil,
-            fetchedAt: ISO8601DateFormatter().string(from: Date())
-        )
     }
 
     func scanLocalSourceWithResult(
@@ -4267,7 +3950,9 @@ extension MediaLibraryManager {
                 overview: imported?.overview ?? (group.shouldAttemptAutomaticScrape ? "正在排队等待刮削..." : "未能自动识别影视名称，可手动重新匹配。"),
                 posterPath: imported?.posterPath,
                 voteAverage: imported?.voteAverage,
-                isLocked: imported != nil || !group.shouldAttemptAutomaticScrape
+                isLocked: imported != nil || !group.shouldAttemptAutomaticScrape,
+                directors: Movie.encodePersonList(imported?.directors ?? []),
+                casts: Movie.encodePersonList(imported?.casts ?? [])
             )
             try? dummyMovie.insert(db)
 

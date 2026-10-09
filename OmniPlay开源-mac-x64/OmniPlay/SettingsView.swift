@@ -16,18 +16,13 @@ struct SettingsView: View {
     @AppStorage("enableLocalMetadataImport") var enableLocalMetadataImport = false
     @AppStorage("enableLocalMetadataExport") var enableLocalMetadataExport = false
     @AppStorage("tmdbApiKey") var tmdbApiKey = ""
+    @AppStorage("tmdbProxyURL") var tmdbProxyURL = ""
     
     @AppStorage("appLanguage") var appLanguage = "zh-Hans"
     @AppStorage("defaultAudio") var defaultAudio = "auto"
     @AppStorage("defaultSub") var defaultSub = "chi"
     @AppStorage("playbackQualityMode") var playbackQualityMode = "balanced"
     @AppStorage("playBluRayExtras") var playBluRayExtras = false
-    @AppStorage("luckyStunManagementURL") var luckyStunManagementURL = ""
-    @AppStorage("luckyStunUsername") var luckyStunUsername = ""
-    @AppStorage("luckyStunPassword") var luckyStunPassword = ""
-    @AppStorage("luckyStunRuleID") var luckyStunRuleID = ""
-    @AppStorage("luckyStunAutoUpdate") var luckyStunAutoUpdate = false
-    @AppStorage("luckyStunUpdateIntervalMinutes") var luckyStunUpdateIntervalMinutes = 30
     
     @AppStorage("appTheme") var appTheme = ThemeType.appleLight.rawValue
     var theme: AppTheme { ThemeType(rawValue: appTheme)?.colors ?? ThemeType.crystal.colors }
@@ -41,9 +36,6 @@ struct SettingsView: View {
     @State private var isCheckingForUpdate = false
     @State private var updateStatusMessage = ""
     @State private var updateStatusColor: Color = .secondary
-    @State private var luckyStunRules: [LuckyStunRule] = []
-    @State private var luckyStunStatusMessage = "尚未检测 Lucky STUN。"
-    @State private var isUpdatingLuckyStun = false
     @FocusState private var isTMDBApiFocused: Bool
 
     private let githubRepositoryURL = "https://github.com/nandieling/OmniPlay"
@@ -111,69 +103,6 @@ struct SettingsView: View {
                     Toggle("媒体源显示真实路径", isOn: $showMediaSourceRealPath)
                     Toggle("移除 WebDAV 源时同时删除保存的登录凭据", isOn: $removeWebDAVCredentialsOnDelete)
                         .help("若开启，删除 WebDAV 源会连同钥匙串里的账号密码一并清理。关闭则保留以便下次自动填充。")
-                }
-
-                Section(header: Text("Lucky STUN 穿透地址").font(.headline).padding(.top, 10)) {
-                    Text("登录 Lucky 管理端读取指定规则的最新穿透地址，并同步到 OmniPlay Docker 媒体源。")
-                        .font(.caption)
-                        .foregroundColor(theme.textSecondary)
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("管理地址").font(.caption.weight(.semibold)).foregroundColor(theme.textSecondary)
-                        TextField("例如 http://192.168.1.1:16601", text: $luckyStunManagementURL)
-                    }
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("账号").font(.caption.weight(.semibold)).foregroundColor(theme.textSecondary)
-                        TextField("Lucky 管理账号", text: $luckyStunUsername)
-                    }
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("密码").font(.caption.weight(.semibold)).foregroundColor(theme.textSecondary)
-                        SecureField("Lucky 管理密码", text: $luckyStunPassword)
-                    }
-                    if !luckyStunRules.isEmpty {
-                        VStack(alignment: .leading, spacing: 7) {
-                            Text("已登录 Lucky STUN 规则").font(.caption.weight(.semibold)).foregroundColor(theme.textSecondary)
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    ForEach(luckyStunRules) { rule in
-                                        HStack(alignment: .top, spacing: 8) {
-                                            Image(systemName: rule.id == luckyStunRuleID ? "checkmark.circle.fill" : "circle")
-                                                .foregroundColor(rule.id == luckyStunRuleID ? theme.accent : theme.textSecondary)
-                                            VStack(alignment: .leading, spacing: 2) {
-                                                Text(rule.name).font(.subheadline.weight(.semibold))
-                                                Text(rule.address).font(.caption.monospacedDigit()).foregroundColor(theme.textSecondary)
-                                            }
-                                            Spacer()
-                                        }
-                                        .contentShape(Rectangle())
-                                        .onTapGesture {
-                                            luckyStunRuleID = rule.id
-                                            UserDefaults.standard.set(rule.name, forKey: "luckyStunRuleName")
-                                        }
-                                    }
-                                }
-                            }
-                            .frame(maxHeight: 130)
-                            .padding(8)
-                            .background(theme.textSecondary.opacity(0.06))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                        }
-                        Picker("穿透地址指定规则", selection: $luckyStunRuleID) {
-                            ForEach(luckyStunRules) { rule in
-                                Text("\(rule.name) · \(rule.address)").tag(rule.id)
-                            }
-                        }
-                    }
-                    HStack(spacing: 10) {
-                        Button(action: refreshLuckyStun) {
-                            if isUpdatingLuckyStun { ProgressView().controlSize(.small) } else { Text("登录检测并更新") }
-                        }
-                        .disabled(isUpdatingLuckyStun || luckyStunManagementURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        Toggle("定期自动更新", isOn: $luckyStunAutoUpdate)
-                    }
-                    Stepper("更新周期：\(luckyStunUpdateIntervalMinutes) 分钟", value: $luckyStunUpdateIntervalMinutes, in: 5...1440, step: 5)
-                    Text(luckyStunStatusMessage)
-                        .font(.caption)
-                        .foregroundColor(theme.textSecondary)
                 }
 
                 Section(header: Text("本地刮削文件").font(.headline).padding(.top, 10)) {
@@ -308,6 +237,21 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(theme.textSecondary)
 
+                    Text("TMDB API 代理网关（可选）。留空直连官方 API；无法直连时可填写反向代理地址，支持域名或带路径前缀的地址，例如 https://proxy.example.com/tmdb。")
+                        .font(.caption)
+                        .foregroundColor(theme.textSecondary)
+
+                    HStack(spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "globe")
+                                .foregroundColor(.secondary)
+                            TextField("留空直连官方 API", text: $tmdbProxyURL)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        .frame(width: 482)
+                        Spacer(minLength: 0)
+                    }
+
                     Link("请往TMDB官网注册获取api：https://www.themoviedb.org", destination: URL(string: "https://www.themoviedb.org")!)
                         .font(.caption)
                         .foregroundColor(theme.accent)
@@ -352,8 +296,6 @@ struct SettingsView: View {
         }
         .onAppear {
             restoreAutomaticUpdateStatusIfAvailable()
-            luckyStunRules = LuckyStunCoordinator.shared.cachedRules
-            LuckyStunCoordinator.shared.startAutomaticUpdates()
             guard focusTMDBApi else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                 isTMDBApiFocused = true
@@ -363,17 +305,14 @@ struct SettingsView: View {
             UserDefaults.standard.set([newValue], forKey: "AppleLanguages")
             UserDefaults.standard.synchronize()
         }
-        .onChange(of: luckyStunAutoUpdate) { _, _ in LuckyStunCoordinator.shared.startAutomaticUpdates() }
-        .onChange(of: luckyStunUpdateIntervalMinutes) { _, _ in LuckyStunCoordinator.shared.startAutomaticUpdates() }
-        .onReceive(NotificationCenter.default.publisher(for: LuckyStunCoordinator.rulesUpdatedNotification)) { notification in
-            if let rules = notification.object as? [LuckyStunRule] {
-                luckyStunRules = rules
-            }
-        }
     }
 
     private var trimmedTMDBApiKey: String {
         tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedTMDBProxyURL: String {
+        tmdbProxyURL.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var currentAppVersion: String {
@@ -397,11 +336,17 @@ struct SettingsView: View {
         guard !customKey.isEmpty else { return }
 
         isValidatingAPI = true
-        apiValidationMessage = "正在连接 TMDB 服务器..."
+        apiValidationMessage = trimmedTMDBProxyURL.isEmpty ? "正在连接 TMDB 服务器..." : "正在通过自定义网关连接 TMDB..."
         apiValidationColor = .secondary
         
         Task {
-            let result = await TMDBService.shared.checkConnection(customAPIInput: customKey)
+            // 与扫描前的连通性检测走同一条后台路径，主线程只等结果
+            let result = await Task.detached(priority: .utility) {
+                await TMDBService.probeConnection(
+                    credential: TMDBService.credentialSource(customAPIInput: customKey),
+                    customProxyURL: trimmedTMDBProxyURL
+                )
+            }.value
             await MainActor.run {
                 if result.isConnected {
                     apiValidationMessage = "✅ 验证成功！API 状态正常。"
@@ -412,21 +357,6 @@ struct SettingsView: View {
                 }
                 isValidatingAPI = false
             }
-        }
-    }
-
-    private func refreshLuckyStun() {
-        isUpdatingLuckyStun = true
-        luckyStunStatusMessage = "正在登录并读取 Lucky STUN 规则..."
-        Task { @MainActor in
-            let result = await LuckyStunCoordinator.shared.refresh()
-            luckyStunRules = result.rules
-            if let selected = result.selectedRule {
-                luckyStunRuleID = selected.id
-            }
-            luckyStunStatusMessage = result.message
-            isUpdatingLuckyStun = false
-            LuckyStunCoordinator.shared.startAutomaticUpdates()
         }
     }
 

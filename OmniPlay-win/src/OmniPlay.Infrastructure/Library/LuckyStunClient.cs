@@ -1,24 +1,27 @@
-using System.Net;
+using System.Globalization;
+using System.Net.Sockets;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using OmniPlay.Core.Interfaces;
+using OmniPlay.Core.Models.Network;
 using OmniPlay.Core.Settings;
 
 namespace OmniPlay.Infrastructure.Library;
 
+/// <summary>
+/// Speaks the real Lucky STUN admin API (parity with ARM: LuckyStun.swift):
+/// POST /api/login with {Account, Password, TwoFA}, then GET /api/stunrulelist
+/// with the Lucky-Admin-Token header and a browser-like header set.
+/// </summary>
 public sealed class LuckyStunClient : ILuckyStunClient
 {
-    private static readonly string[] LoginPaths =
-    [
-        "/api/login",
-        "/api/auth/login",
-        "/api/user/login",
-        "/api/auth/signin",
-        "/login"
-    ];
+    private const string UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/605.1.15";
+    private const string AcceptLanguage = "zh-CN,zh;q=0.9,en;q=0.8";
+    private const string LoginPath = "/api/login";
+    private const string RulesPath = "/api/stunrulelist";
 
-    private static readonly string[] RulePaths =
+    private static readonly string[] LegacyRulePaths =
     [
         "/api/stun",
         "/api/stun/rules",
@@ -39,6 +42,7 @@ public sealed class LuckyStunClient : ILuckyStunClient
         "url",
         "remoteAddress",
         "publicAddress",
+        "publicAddr",
         "externalAddress",
         "penetrationAddress",
         "forwardAddress",
@@ -47,6 +51,9 @@ public sealed class LuckyStunClient : ILuckyStunClient
         "domain",
         "host"
     ];
+    private static readonly string[] HostKeys = ["remoteHost", "publicHost", "externalHost"];
+    private static readonly string[] PortKeys = ["remotePort", "publicPort", "externalPort", "port"];
+    private static readonly string[] TokenKeys = ["token", "accessToken", "access_token", "jwt", "authorization"];
 
     private readonly HttpClient httpClient;
 
@@ -62,187 +69,276 @@ public sealed class LuckyStunClient : ILuckyStunClient
         var baseUrl = NormalizeManagementUrl(settings.ManagementUrl);
         if (string.IsNullOrWhiteSpace(baseUrl))
         {
-            throw new InvalidOperationException("请填写 Lucky STUN 管理地址。");
+            throw new InvalidOperationException("Lucky STUN 管理地址无效。");
         }
 
-        var cookies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        string? token = null;
-        if (!string.IsNullOrWhiteSpace(settings.Username) || !string.IsNullOrWhiteSpace(settings.Password))
+        var account = (settings.Username ?? string.Empty).Trim();
+        var password = settings.Password ?? string.Empty;
+        if (account.Length == 0 || password.Length == 0)
         {
-            (token, cookies) = await TryLoginAsync(
-                baseUrl,
-                settings.Username.Trim(),
-                settings.Password,
-                cookies,
-                cancellationToken);
+            throw new InvalidOperationException("请填写 Lucky 管理账号和密码。");
         }
 
-        var lastFailure = "Lucky STUN 没有返回规则列表。";
-        foreach (var path in RulePaths)
-        {
-            try
-            {
-                var response = await SendAsync(
-                    HttpMethod.Get,
-                    CombineUrl(baseUrl, path),
-                    body: null,
-                    token,
-                    cookies,
-                    cancellationToken);
-                if ((int)response.StatusCode is < 200 or >= 300)
-                {
-                    lastFailure = $"HTTP {(int)response.StatusCode}";
-                    continue;
-                }
+        var token = await LoginAsync(baseUrl, account, password, cancellationToken);
+        var rules = await TryFetchRulesAsync(baseUrl, token, cancellationToken)
+            ?? await TryFetchLegacyRulesAsync(baseUrl, token, cancellationToken);
+        rules ??= [];
 
-                var rules = ParseRules(response.Body);
-                if (rules.Count == 0)
-                {
-                    lastFailure = "响应中没有识别到穿透规则。";
-                    continue;
-                }
-
-                var selected = SelectRule(rules, settings);
-                return new LuckyStunSnapshot(
-                    rules,
-                    selected,
-                    selected is null
-                        ? "已登录，但没有可用的穿透地址。"
-                        : $"已读取 {rules.Count} 条规则，当前地址：{selected.Address}");
-            }
-            catch (HttpRequestException ex)
-            {
-                lastFailure = ex.Message;
-            }
-            catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                lastFailure = "Lucky STUN 请求超时。";
-            }
-            catch (JsonException ex)
-            {
-                lastFailure = $"规则响应解析失败：{ex.Message}";
-            }
-        }
-
-        throw new InvalidOperationException($"无法读取 Lucky STUN 规则：{lastFailure}");
+        var selected = SelectRule(rules, settings);
+        return new LuckyStunSnapshot(
+            rules,
+            selected,
+            selected is null
+                ? "登录成功，但没有读取到穿透规则。"
+                : $"登录成功，已读取 {rules.Count} 条穿透规则。");
     }
 
     public static string NormalizeAddress(string value)
     {
-        var trimmed = value.Trim();
-        if (trimmed.StartsWith("//", StringComparison.Ordinal))
-        {
-            return $"http:{trimmed}";
-        }
-
-        if (trimmed.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-            trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-        {
-            return trimmed.TrimEnd('/');
-        }
-
-        return trimmed.Contains(':', StringComparison.Ordinal) || trimmed.Contains('.', StringComparison.Ordinal)
-            ? $"http://{trimmed.TrimEnd('/') }"
-            : trimmed;
+        return LuckyStunAddressHelper.NormalizeAddress(value);
     }
 
-    private async Task<(string? Token, HashSet<string> Cookies)> TryLoginAsync(
+    private async Task<string> LoginAsync(
         string baseUrl,
-        string username,
+        string account,
         string password,
-        HashSet<string> cookies,
         CancellationToken cancellationToken)
     {
-        var body = JsonSerializer.Serialize(new { username, password });
-        var lastStatus = HttpStatusCode.BadRequest;
-        foreach (var path in LoginPaths)
+        var url = BuildUrl(baseUrl, LoginPath);
+        var body = JsonSerializer.Serialize(new { Account = account, Password = password, TwoFA = string.Empty });
+        (int Status, string Body) response;
+        try
+        {
+            response = await SendAsync(HttpMethod.Post, url, baseUrl, body, token: null, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (TaskCanceledException)
+        {
+            throw new InvalidOperationException("Lucky STUN 请求超时。");
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new InvalidOperationException($"Lucky STUN 连接失败：{ExplainHttpError(ex)}");
+        }
+
+        var (status, responseBody) = response;
+        if (status is < 200 or >= 300)
+        {
+            throw new InvalidOperationException($"Lucky STUN 登录失败：{LoginPath} 返回 HTTP {status}。");
+        }
+
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(responseBody);
+        }
+        catch (JsonException)
+        {
+            throw new InvalidOperationException("Lucky STUN 返回了无法解析的登录数据。");
+        }
+
+        using (document)
+        {
+            if (document.RootElement.ValueKind != JsonValueKind.Object || !TryGetInt32(document.RootElement, "ret", out var result))
+            {
+                throw new InvalidOperationException("Lucky STUN 返回了无法解析的登录数据。");
+            }
+
+            if (result != 0)
+            {
+                throw new InvalidOperationException($"Lucky STUN 登录失败：{MapErrorMessage(document.RootElement)}");
+            }
+
+            var token = FindStringRecursive(document.RootElement, TokenKeys);
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                throw new InvalidOperationException("Lucky STUN 登录成功，但响应中没有管理令牌。");
+            }
+
+            var trimmed = token.Trim();
+            if (trimmed.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            {
+                trimmed = trimmed["Bearer ".Length..].Trim();
+            }
+
+            return trimmed;
+        }
+    }
+
+    private async Task<IReadOnlyList<LuckyStunRule>?> TryFetchRulesAsync(
+        string baseUrl,
+        string token,
+        CancellationToken cancellationToken)
+    {
+        var url = BuildUrl(baseUrl, RulesPath);
+        (int Status, string Body) response;
+        try
+        {
+            response = await SendAsync(HttpMethod.Get, url, baseUrl, jsonBody: null, token, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (TaskCanceledException)
+        {
+            throw new InvalidOperationException("Lucky STUN 请求超时。");
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new InvalidOperationException($"无法读取 Lucky STUN 规则：{ExplainHttpError(ex)}");
+        }
+
+        var (status, responseBody) = response;
+        if (status is < 200 or >= 300)
+        {
+            if (status == 404)
+            {
+                return null;
+            }
+
+            throw new InvalidOperationException($"无法读取 Lucky STUN 规则：{RulesPath} 返回 HTTP {status}。");
+        }
+
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(responseBody);
+        }
+        catch (JsonException)
+        {
+            throw new InvalidOperationException("Lucky STUN 返回了无法解析的规则数据。");
+        }
+
+        using (document)
+        {
+            if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                TryGetInt32(document.RootElement, "ret", out var result) &&
+                result != 0)
+            {
+                throw new InvalidOperationException($"无法读取 Lucky STUN 规则：{MapErrorMessage(document.RootElement)}");
+            }
+        }
+
+        return ParseRules(responseBody);
+    }
+
+    private async Task<IReadOnlyList<LuckyStunRule>?> TryFetchLegacyRulesAsync(
+        string baseUrl,
+        string token,
+        CancellationToken cancellationToken)
+    {
+        foreach (var path in LegacyRulePaths)
         {
             try
             {
-                var response = await SendAsync(
-                    HttpMethod.Post,
-                    CombineUrl(baseUrl, path),
-                    body,
-                    token: null,
-                    cookies,
-                    cancellationToken);
-                lastStatus = response.StatusCode;
-                if ((int)response.StatusCode is < 200 or >= 300)
+                var (status, responseBody) = await SendAsync(HttpMethod.Get, BuildUrl(baseUrl, path), baseUrl, jsonBody: null, token, cancellationToken);
+                if (status is < 200 or >= 300)
                 {
                     continue;
                 }
 
-                var token = TryFindString(response.Body, ["token", "accessToken", "access_token", "jwt", "authorization"]);
-                if (!string.IsNullOrWhiteSpace(token))
+                var rules = ParseRules(responseBody);
+                if (rules.Count > 0)
                 {
-                    token = token.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
-                        ? token
-                        : $"Bearer {token}";
+                    return rules;
                 }
-
-                return (token, cookies);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (TaskCanceledException)
+            {
+                throw new InvalidOperationException("Lucky STUN 请求超时。");
             }
             catch (HttpRequestException)
             {
             }
-            catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (JsonException)
             {
             }
         }
 
-        if (lastStatus is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
-        {
-            throw new UnauthorizedAccessException("Lucky STUN 登录失败，请检查账号和密码。");
-        }
-
-        return (null, cookies);
+        return null;
     }
 
-    private async Task<LuckyHttpResponse> SendAsync(
+    private async Task<(int Status, string Body)> SendAsync(
         HttpMethod method,
         string url,
-        string? body,
+        string baseUrl,
+        string? jsonBody,
         string? token,
-        HashSet<string> cookies,
         CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(method, url);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        request.Headers.UserAgent.ParseAdd("OmniPlay-LuckySTUN");
+        request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
+        request.Headers.TryAddWithoutValidation("Accept-Language", AcceptLanguage);
+        request.Headers.TryAddWithoutValidation("Origin", new Uri(baseUrl).GetLeftPart(UriPartial.Authority));
+        request.Headers.TryAddWithoutValidation("Referer", baseUrl);
         if (!string.IsNullOrWhiteSpace(token))
         {
-            request.Headers.Authorization = AuthenticationHeaderValue.Parse(token);
+            request.Headers.TryAddWithoutValidation("Lucky-Admin-Token", token);
+            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
         }
 
-        if (cookies.Count > 0)
+        if (jsonBody is not null)
         {
-            request.Headers.TryAddWithoutValidation("Cookie", string.Join("; ", cookies));
-        }
-
-        if (body is not null)
-        {
-            request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+            request.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
         }
 
         using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken);
-        foreach (var cookie in response.Headers.TryGetValues("Set-Cookie", out var values) ? values : [])
+        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+        return ((int)response.StatusCode, responseBody);
+    }
+
+    private static string ExplainHttpError(HttpRequestException ex)
+    {
+        if (ex.InnerException is SocketException socket)
         {
-            var value = cookie.Split(';', 2)[0].Trim();
-            if (!string.IsNullOrWhiteSpace(value))
+            return socket.SocketErrorCode switch
             {
-                cookies.RemoveWhere(existing => existing.StartsWith(value.Split('=', 2)[0] + "=", StringComparison.OrdinalIgnoreCase));
-                cookies.Add(value);
-            }
+                SocketError.ConnectionRefused => "连接被拒绝，请确认 Lucky STUN 服务已启动且管理地址正确。",
+                SocketError.TimedOut => "连接超时。",
+                _ => socket.Message
+            };
         }
 
-        return new LuckyHttpResponse(response.StatusCode, await response.Content.ReadAsStringAsync(cancellationToken));
+        return ex.Message;
+    }
+
+    private static string BuildUrl(string baseUrl, string path)
+    {
+        return $"{baseUrl.TrimEnd('/')}{path}?_={BuildNonce()}";
+    }
+
+    private static string BuildNonce()
+    {
+        var milliseconds = ((long)(DateTimeOffset.UtcNow - DateTimeOffset.UnixEpoch).TotalMilliseconds).ToString(CultureInfo.InvariantCulture);
+        if (milliseconds.Length <= 1)
+        {
+            return milliseconds;
+        }
+
+        var prefix = milliseconds.AsSpan()[..^1];
+        var checksum = 0;
+        foreach (var character in prefix)
+        {
+            checksum += character - 48;
+        }
+
+        return prefix.ToString() + (checksum % 8).ToString(CultureInfo.InvariantCulture);
     }
 
     private static IReadOnlyList<LuckyStunRule> ParseRules(string body)
     {
         using var document = JsonDocument.Parse(body);
         var rules = new List<LuckyStunRule>();
-        CollectRules(document.RootElement, rules, "rule");
+        CollectRules(document.RootElement, rules, "Lucky STUN 规则");
         return rules
             .GroupBy(static rule => $"{rule.Id}\n{rule.Name}\n{rule.Address}", StringComparer.OrdinalIgnoreCase)
             .Select(static group => group.First())
@@ -297,8 +393,8 @@ public sealed class LuckyStunClient : ILuckyStunClient
             }
         }
 
-        var host = FindString(element, ["remoteHost", "publicHost", "externalHost"]);
-        var port = FindString(element, ["remotePort", "publicPort", "externalPort", "port"]);
+        var host = FindString(element, HostKeys);
+        var port = FindString(element, PortKeys);
         return string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(port)
             ? null
             : $"{host}:{port}";
@@ -324,26 +420,6 @@ public sealed class LuckyStunClient : ILuckyStunClient
         }
 
         return null;
-    }
-
-    private static bool LooksLikeAddress(string value)
-    {
-        var trimmed = value.Trim();
-        return (trimmed.Contains('.', StringComparison.Ordinal) || trimmed.Contains(':', StringComparison.Ordinal)) &&
-               !trimmed.Contains("/api/", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string? TryFindString(string body, IReadOnlyList<string> keys)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(body);
-            return FindStringRecursive(document.RootElement, keys);
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
     }
 
     private static string? FindStringRecursive(JsonElement element, IReadOnlyList<string> keys)
@@ -380,6 +456,13 @@ public sealed class LuckyStunClient : ILuckyStunClient
         return null;
     }
 
+    private static bool LooksLikeAddress(string value)
+    {
+        var trimmed = value.Trim();
+        return (trimmed.Contains('.', StringComparison.Ordinal) || trimmed.Contains(':', StringComparison.Ordinal)) &&
+               !trimmed.Contains("/api/", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static LuckyStunRule? SelectRule(IReadOnlyList<LuckyStunRule> rules, LuckyStunSettings settings)
     {
         if (!string.IsNullOrWhiteSpace(settings.SelectedRuleId))
@@ -401,6 +484,40 @@ public sealed class LuckyStunClient : ILuckyStunClient
         }
 
         return rules.FirstOrDefault();
+    }
+
+    private static string MapErrorMessage(JsonElement element)
+    {
+        var raw = (FindString(element, ["msg", "message"]) ?? string.Empty).Trim();
+        if (raw.Length == 0)
+        {
+            return "未知错误";
+        }
+
+        return raw switch
+        {
+            "IncorrectAccountOrPassword" => "账号或密码错误",
+            "LoginFailed" => "登录失败",
+            "NoPermission" or "PermissionDenied" => "当前账号没有访问权限",
+            "TokenExpired" or "InvalidToken" => "登录凭证已失效",
+            _ => raw
+        };
+    }
+
+    private static bool TryGetInt32(JsonElement element, string key, out int value)
+    {
+        value = 0;
+        if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty(key, out var property))
+        {
+            return false;
+        }
+
+        return property.ValueKind switch
+        {
+            JsonValueKind.Number => property.TryGetInt32(out value),
+            JsonValueKind.String => int.TryParse(property.GetString(), out value),
+            _ => false
+        };
     }
 
     private static string NormalizeManagementUrl(string value)
@@ -432,11 +549,4 @@ public sealed class LuckyStunClient : ILuckyStunClient
         var builder = new UriBuilder(uri) { Path = path, Query = string.Empty, Fragment = string.Empty };
         return builder.Uri.AbsoluteUri.TrimEnd('/');
     }
-
-    private static string CombineUrl(string baseUrl, string path)
-    {
-        return $"{baseUrl.TrimEnd('/')}/{path.TrimStart('/')}";
-    }
-
-    private sealed record LuckyHttpResponse(HttpStatusCode StatusCode, string Body);
 }

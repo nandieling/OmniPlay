@@ -29,7 +29,7 @@ final class OmniPlayUITestsLaunchTests: XCTestCase {
         var ready = false
         while Date() < deadline {
             if app.buttons["toolbar.addSource"].exists ||
-                app.buttons["媒体源管理"].exists ||
+                app.buttons["添加源"].exists ||
                 app.staticTexts["我的觅影库"].exists ||
                 app.staticTexts["所有影视"].exists ||
                 app.staticTexts["媒体库空空如也，快去添加文件夹吧！"].exists {

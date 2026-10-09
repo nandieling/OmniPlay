@@ -27,11 +27,6 @@ struct BusinessLogicIntegrationTests {
         #expect(MediaSourceProtocol.webdav.webDAVPathValidationError("https://nas.local:5006/dav") != nil)
         #expect(MediaSourceProtocol.webdav.webDAVPathValidationError("https://nas.local:5006/电影") == nil)
 
-        #expect(MediaSourceProtocol.omniplayDocker.normalizedBaseURL("192.168.1.10:45722") == "http://192.168.1.10:45722")
-        #expect(MediaSourceProtocol.omniplayDocker.normalizedBaseURL("http://nas.local:45722/api/health") == "http://nas.local:45722")
-        #expect(MediaSourceProtocol.omniplayDocker.normalizedBaseURL("http://nas.local:45722/omniplay/api/auth/status") == "http://nas.local:45722/omniplay")
-        #expect(MediaSourceProtocol.omniplayDocker.isValidBaseURL("192.168.1.10:45722"))
-
         #expect(MediaSourceProtocol.direct.normalizedBaseURL("/anything") == "/")
         #expect(MediaSourceProtocol.direct.isValidBaseURL("/"))
 
@@ -606,6 +601,8 @@ struct BusinessLogicIntegrationTests {
                 t.column("posterPath", .text)
                 t.column("voteAverage", .double)
                 t.column("isLocked", .boolean).notNull().defaults(to: false)
+                t.column("directors", .text)
+                t.column("casts", .text)
             }
             try db.create(table: "tvShow") { t in
                 t.primaryKey("id", .integer)
@@ -613,6 +610,22 @@ struct BusinessLogicIntegrationTests {
                 t.column("posterPath", .text)
                 t.column("voteAverage", .double)
                 t.column("isLocked", .boolean).notNull().defaults(to: false)
+            }
+            try db.create(table: "categoryFolder") { t in
+                t.primaryKey("id", .text)
+                t.column("kind", .text).notNull()
+                t.column("name", .text).notNull()
+                t.column("posterPath", .text)
+                t.column("updatedAt", .double)
+            }
+            try db.create(table: "personProfile") { t in
+                t.primaryKey("id", .text)
+                t.column("name", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("tmdbPersonId", .integer)
+                t.column("photoPath", .text)
+                t.column("filmographyJson", .text)
+                t.column("updatedAt", .double)
             }
             try db.create(table: "videoFile") { t in
                 t.primaryKey("id", .text)

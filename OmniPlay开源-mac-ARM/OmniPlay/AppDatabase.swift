@@ -4,11 +4,17 @@ import GRDB
 class AppDatabase {
     static let shared = AppDatabase()
     var dbQueue: DatabaseQueue!
+    /// 实际打开的数据库文件（本地镜像）
+    var databaseURL: URL?
+    /// 当前数据库所在的 iCloud 容器目录（使用本地路径时为 nil）
+    var icloudContainerURL: URL?
     
     private init() {}
     
-    func setup(databaseURL: URL) throws {
+    func setup(databaseURL: URL, icloudContainerURL: URL? = nil) throws {
         dbQueue = try DatabaseQueue(path: databaseURL.path)
+        self.databaseURL = databaseURL
+        self.icloudContainerURL = icloudContainerURL
         
         var migrator = DatabaseMigrator()
         
@@ -107,7 +113,44 @@ class AppDatabase {
                 t.add(column: "addressConfig", .text)
             }
         }
+
+        // v8: 影片元数据引入导演/主演名单，并支持首页分类文件夹（海报可手动指定或自定义）。
+        migrator.registerMigration("v8") { db in
+            try db.alter(table: "movie") { t in
+                t.add(column: "directors", .text)
+                t.add(column: "casts", .text)
+            }
+            try db.create(table: "categoryFolder") { t in
+                t.primaryKey("id", .text)
+                t.column("kind", .text).notNull()
+                t.column("name", .text).notNull()
+                t.column("posterPath", .text)
+                t.column("updatedAt", .double)
+            }
+        }
+
+        // v9: 人物资料（导演/主演头像 + 完整作品列表缓存），支撑分类文件夹人物照片与作品简介。
+        migrator.registerMigration("v9") { db in
+            try db.create(table: "personProfile") { t in
+                t.primaryKey("id", .text)
+                t.column("name", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("tmdbPersonId", .integer)
+                t.column("photoPath", .text)
+                t.column("filmographyJson", .text)
+                t.column("updatedAt", .double)
+            }
+        }
         
+        // v10: 中文译名缓存（外文导演/主演名与外文片名的中文译名，含"确认无中文译名"的负缓存）。
+        migrator.registerMigration("v10") { db in
+            try db.create(table: "chineseNameCache") { t in
+                t.primaryKey("key", .text)
+                t.column("value", .text)
+                t.column("updatedAt", .double).notNull()
+            }
+        }
+
         try migrator.migrate(dbQueue)
     }
 }

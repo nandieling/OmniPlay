@@ -90,8 +90,8 @@ struct MovieCardView: View {
                 .font(.headline)
                 .foregroundColor(theme.textPrimary)
                 .lineLimit(2)
-                .frame(height: 42, alignment: .topLeading)
-                .multilineTextAlignment(.leading)
+                .frame(width: 160, height: 42, alignment: .top)
+                .multilineTextAlignment(.center)
             
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {

@@ -273,12 +273,6 @@ public sealed class NetworkShareDiscoveryService : INetworkShareDiscoveryService
 
         var baseUri = new Uri(candidate.GetLeftPart(UriPartial.Authority));
 
-        var docker = await ProbeOmniPlayDockerAsync(baseUri, cancellationToken);
-        if (docker is not null)
-        {
-            return docker;
-        }
-
         if (baseUri.Port == 32400)
         {
             var plex = await ProbePlexAsync(baseUri, cancellationToken);
@@ -295,45 +289,6 @@ public sealed class NetworkShareDiscoveryService : INetworkShareDiscoveryService
         }
 
         return await ProbePlexAsync(baseUri, cancellationToken);
-    }
-
-    private async Task<NetworkSourceDiscoveryItem?> ProbeOmniPlayDockerAsync(Uri baseUri, CancellationToken cancellationToken)
-    {
-        foreach (var path in new[] { "/api/health", "/api/auth/status" })
-        {
-            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(baseUri, path));
-            request.Headers.Accept.ParseAdd("application/json");
-            try
-            {
-                using var response = await SendProbeAsync(request, cancellationToken);
-                if (response is null ||
-                    (!response.IsSuccessStatusCode &&
-                     response.StatusCode is not HttpStatusCode.Unauthorized and not HttpStatusCode.Forbidden))
-                {
-                    continue;
-                }
-
-                var body = await response.Content.ReadAsStringAsync(cancellationToken);
-                if (!LooksLikeOmniPlayDockerResponse(path, body, response))
-                {
-                    continue;
-                }
-
-                var normalized = MediaSourceNormalizer.NormalizeBaseUrl(MediaSourceProtocol.OmniPlayDocker, baseUri.AbsoluteUri);
-                return new NetworkSourceDiscoveryItem
-                {
-                    Name = "OmniPlay Docker",
-                    ProtocolType = "omniplay-docker",
-                    BaseUrl = normalized,
-                    Description = $"预扫描到的 OmniPlay Docker 服务：{normalized}"
-                };
-            }
-            catch
-            {
-            }
-        }
-
-        return null;
     }
 
     private async Task<NetworkSourceDiscoveryItem?> ProbePlexAsync(Uri baseUri, CancellationToken cancellationToken)
@@ -788,24 +743,6 @@ public sealed class NetworkShareDiscoveryService : INetworkShareDiscoveryService
                TryGetJsonString(root, "Version", out _);
     }
 
-    private static bool LooksLikeOmniPlayDockerResponse(string path, string body, HttpResponseMessage response)
-    {
-        var normalized = body.ToLowerInvariant();
-        if (path.Contains("auth/status", StringComparison.OrdinalIgnoreCase) &&
-            (normalized.Contains("\"issetuprequired\"", StringComparison.Ordinal) ||
-             normalized.Contains("\"isauthenticated\"", StringComparison.Ordinal)))
-        {
-            return true;
-        }
-
-        return normalized.Contains("omniplay.server", StringComparison.Ordinal) ||
-               normalized.Contains("\"omniplay\"", StringComparison.Ordinal) ||
-               (normalized.Contains("\"service\"", StringComparison.Ordinal) &&
-                normalized.Contains("omniplay", StringComparison.Ordinal)) ||
-               (response.Headers.Server.Any(product => product.Product?.Name?.Contains("Kestrel", StringComparison.OrdinalIgnoreCase) == true) &&
-                normalized.Contains("database", StringComparison.Ordinal));
-    }
-
     private static bool IsLikelyEmbyCompatiblePort(int port)
     {
         return port is 8096 or 8097 or 8098 or 8099 or 8920;
@@ -1131,35 +1068,46 @@ public sealed class NetworkShareDiscoveryService : INetworkShareDiscoveryService
             }
         ];
 
-        using var request = BuildWebDavRequest(
-            rootUri,
-            MediaSourceAuthConfigSerializer.DeserializeWebDav(source.AuthConfig));
-        using var response = await httpClient.SendAsync(
-            request,
-            HttpCompletionOption.ResponseHeadersRead,
-            cancellationToken);
-        response.EnsureSuccessStatusCode();
-
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var document = await XDocument.LoadAsync(stream, LoadOptions.None, cancellationToken);
-        var rootKey = NormalizeUri(rootUri);
-
-        foreach (var folderUri in ParseWebDavFolders(document, rootUri))
+        try
         {
-            if (string.Equals(NormalizeUri(folderUri), rootKey, StringComparison.OrdinalIgnoreCase))
+            using var request = BuildWebDavRequest(
+                rootUri,
+                MediaSourceAuthConfigSerializer.DeserializeWebDav(source.AuthConfig));
+            using var response = await httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
+            if (!response.IsSuccessStatusCode)
             {
-                continue;
+                throw new HttpRequestException(
+                    $"WebDAV 服务器返回 HTTP {(int)response.StatusCode} {response.ReasonPhrase}".TrimEnd());
             }
 
-            var url = folderUri.AbsoluteUri.TrimEnd('/');
-            folders.Add(new NetworkShareFolderItem
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var document = await XDocument.LoadAsync(stream, LoadOptions.None, cancellationToken);
+            var rootKey = NormalizeUri(rootUri);
+
+            foreach (var folderUri in ParseWebDavFolders(document, rootUri))
             {
-                Name = ResolveWebDavName(url),
-                ProtocolType = "webdav",
-                BaseUrl = url,
-                Description = url,
-                AuthConfig = source.AuthConfig
-            });
+                if (string.Equals(NormalizeUri(folderUri), rootKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var url = folderUri.AbsoluteUri.TrimEnd('/');
+                folders.Add(new NetworkShareFolderItem
+                {
+                    Name = ResolveWebDavName(url),
+                    ProtocolType = "webdav",
+                    BaseUrl = url,
+                    Description = url,
+                    AuthConfig = source.AuthConfig
+                });
+            }
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or System.Xml.XmlException)
+        {
+            throw new InvalidOperationException($"读取 WebDAV 文件夹失败：{ex.Message}", ex);
         }
 
         return folders
@@ -1401,15 +1349,25 @@ public sealed class NetworkShareDiscoveryService : INetworkShareDiscoveryService
 
     private static string ResolveWebDavName(string baseUrl)
     {
-        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
+        try
+        {
+            if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
+            {
+                return "WebDAV";
+            }
+
+            var lastSegment = uri.Segments.LastOrDefault()?.Trim('/');
+            if (string.IsNullOrWhiteSpace(lastSegment))
+            {
+                return string.IsNullOrWhiteSpace(uri.Host) ? "WebDAV" : uri.Host;
+            }
+
+            return Uri.UnescapeDataString(lastSegment);
+        }
+        catch (Exception)
         {
             return "WebDAV";
         }
-
-        var lastSegment = uri.Segments.LastOrDefault()?.Trim('/');
-        return string.IsNullOrWhiteSpace(lastSegment)
-            ? uri.Host
-            : Uri.UnescapeDataString(lastSegment);
     }
 
     private static string ResolveWebDavDiscoveryName(Uri probeUri, string normalizedBaseUrl)

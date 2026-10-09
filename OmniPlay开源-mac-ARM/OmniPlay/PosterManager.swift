@@ -6,13 +6,8 @@ class PosterManager {
     let cacheDirectory: URL
     
     private init() {
-        // 🌟 核心：使用 Application Support，海报将永久安全存储，再也不会莫名其妙消失
-        let paths = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-        cacheDirectory = paths[0].appendingPathComponent("OmniPlay/Posters", isDirectory: true)
-        
-        if !FileManager.default.fileExists(atPath: cacheDirectory.path) {
-            try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
-        }
+        // 🌟 核心：海报永久存储。iCloud 容器可用时直接放容器内（两台 mac 原生同步），否则放本地 Application Support
+        cacheDirectory = OmniPlayICloudSync.posterDirectory()
     }
     
     func cacheFileName(for path: String) -> String {

@@ -11,6 +11,8 @@ struct MovieEditModalView: View {
     @State private var releaseDate: String
     @State private var tmdbVoteAverage: String
     @State private var doubanRating: String
+    @State private var directors: String
+    @State private var casts: String
     @State private var overview: String
     
     @State private var sourceFileName: String = "正在解析文件..."
@@ -22,6 +24,8 @@ struct MovieEditModalView: View {
         _releaseDate = State(initialValue: movie.releaseDate ?? "")
         _tmdbVoteAverage = State(initialValue: movie.voteAverage != nil ? String(format: "%.1f", movie.voteAverage!) : "")
         _doubanRating = State(initialValue: "")
+        _directors = State(initialValue: movie.directorList.joined(separator: "、"))
+        _casts = State(initialValue: movie.castList.joined(separator: "、"))
         _overview = State(initialValue: movie.overview ?? "")
     }
 
@@ -45,6 +49,13 @@ struct MovieEditModalView: View {
                         TextField("TMDB评分 (0.0 - 10.0)", text: $tmdbVoteAverage)
                             .textFieldStyle(.roundedBorder)
                         TextField("豆瓣评分 (0.0 - 10.0)", text: $doubanRating)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    editorSection("导演与主演") {
+                        TextField("导演（多人用顿号或逗号分隔）", text: $directors)
+                            .textFieldStyle(.roundedBorder)
+                        TextField("主演（多人用顿号或逗号分隔）", text: $casts)
                             .textFieldStyle(.roundedBorder)
                     }
 
@@ -171,9 +182,7 @@ struct MovieEditModalView: View {
         if panel.runModal() == .OK, let url = panel.url {
             let newName = "custom_poster_\(UUID().uuidString.prefix(8)).jpg"
             do {
-                let appSupportURL = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-                let posterDirectory = appSupportURL.appendingPathComponent("OmniPlay/Posters", isDirectory: true)
-                if !FileManager.default.fileExists(atPath: posterDirectory.path) { try FileManager.default.createDirectory(at: posterDirectory, withIntermediateDirectories: true, attributes: nil) }
+                let posterDirectory = OmniPlayICloudSync.posterDirectory()
                 
                 let destURL = posterDirectory.appendingPathComponent(newName)
                 try FileManager.default.copyItem(at: url, to: destURL)
@@ -189,6 +198,8 @@ struct MovieEditModalView: View {
         let finalDoubanRating = normalizedRatingValue(doubanRating)
         let finalOverview = self.overview
         let finalPoster = self.tempNewPosterPath
+        let finalDirectorsJSON = Movie.encodePersonList(Movie.splitPersonNames(directors))
+        let finalCastsJSON = Movie.encodePersonList(Movie.splitPersonNames(casts))
         let targetId = self.movie.id
         
         Task {
@@ -196,6 +207,8 @@ struct MovieEditModalView: View {
                 try await AppDatabase.shared.dbQueue.write { db in
                     if var m = try Movie.fetchOne(db, key: targetId) {
                         m.title = finalTitle; m.releaseDate = finalDate; m.voteAverage = finalTMDBVote; m.overview = finalOverview; m.isLocked = true
+                        m.directors = finalDirectorsJSON
+                        m.casts = finalCastsJSON
                         if let np = finalPoster { m.posterPath = np }
                         try m.update(db)
 

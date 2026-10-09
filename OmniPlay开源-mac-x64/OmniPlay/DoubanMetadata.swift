@@ -32,19 +32,37 @@ struct DoubanMetadata: Codable, FetchableRecord, PersistableRecord {
     }
 
     func applyPosterToMovie(_ db: Database) throws {
-        guard let posterURL = posterURL?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !posterURL.isEmpty,
-              Self.isUsablePosterURL(posterURL),
-              var movie = try Movie.fetchOne(db, key: movieId) else {
-            return
+        guard var movie = try Movie.fetchOne(db, key: movieId) else { return }
+        var dirty = false
+
+        // 海报：仅在当前海报缺失或不可用时用豆瓣海报补上。
+        if let posterURL = posterURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !posterURL.isEmpty,
+           Self.isUsablePosterURL(posterURL) {
+            let currentPoster = movie.posterPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if currentPoster?.isEmpty == true || Self.isUnusableDoubanPosterURL(currentPoster ?? "") {
+                movie.posterPath = posterURL
+                dirty = true
+            }
         }
-        if let currentPoster = movie.posterPath?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !currentPoster.isEmpty,
-           !Self.isUnusableDoubanPosterURL(currentPoster) {
-            return
+
+        // 🌟 导演/主演：影片缺失名单时用豆瓣数据补全，便于首页分类。
+        if movie.directorList.isEmpty {
+            if let encoded = Self.encodeList(directorList) {
+                movie.directors = encoded
+                dirty = true
+            }
         }
-        movie.posterPath = posterURL
-        try movie.update(db)
+        if movie.castList.isEmpty {
+            if let encoded = Self.encodeList(castList) {
+                movie.casts = encoded
+                dirty = true
+            }
+        }
+
+        if dirty {
+            try movie.update(db)
+        }
     }
 
     static func clearUnusableDoubanPosterIfNeeded(movieId: Int64, db: Database) throws {

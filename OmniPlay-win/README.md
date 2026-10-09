@@ -14,13 +14,19 @@
 - SQLite 初始化与本地运行目录管理
 - 本地目录扫描、剧集分流、失效文件清理
 - BDMV 主片段筛选与重复路径收敛
+- 蓝光 ISO/BDMV 播放（本地 `bd://`/`dvd://` 代理流）
 - 最近一次扫描摘要与媒体源诊断信息
 - `.slnx` 方案级 restore/build/test
-- 扫描后基础 TMDB 元数据补全
-- TMDB 海报下载到本地 `posters/` 并回写 SQLite
+- 扫描后基础 TMDB 元数据补全、海报下载与自动补全/海报/剧照开关
 - 详情页 TMDB 手动重匹配、锁定和候选结果应用
 - WebDAV 媒体源表单、连通性测试、递归扫描与带认证播放链路
+- Plex / Emby / Jellyfin 媒体源枚举、库列表预扫描与带令牌播放链路
+- SMB 网络共享发现与直连播放、Direct 直连协议
+- 网络共享预扫描扁平列表 + 星标一键挂载
 - 本地媒体源后续更换目录，方便盘符或目录迁移后修正路径
+- TMDB API 代理网关（`TmdbProxyGateway`，与 ARM mac 的 Worker 反代配置对齐）
+- Lucky STUN 按源穿透媒体源（`LuckyStunSourceConfiguration` + 地址/路径后缀工具，对齐 ARM mac 移植）
+- ARM Mac 上一键交叉打包 `win-x64` 安装包与便携版（`package-setup.sh`）
 
 仍在进行中：
 
@@ -28,6 +34,8 @@
 - 剧照/缩略图链路
 - WebDAV 更复杂认证与远程媒体源稳定性
 - 播放器交互细节继续补齐
+
+> 说明：Windows 版是 C# / .NET / Avalonia 独立重写，与 ARM mac 版功能持续对齐中；截至 2026-09-04 的差异扫描与移植记录见 [2026-09-04-win-vs-arm-mac-feature-diff.md](2026-09-04-win-vs-arm-mac-feature-diff.md)。Windows 版暂不支持接入 OmniPlay Docker 服务端做播放进度同步（ARM mac / 安卓 TV 已支持）。
 
 ## 目录结构
 
@@ -165,6 +173,9 @@ cd /Users/nan/Downloads/swift/OmniPlay/OmniPlay/OmniPlay-win
 
 脚本会校验载荷压缩包、Windows x64 原生依赖和最终 PE 架构。ARM Mac 无法直接执行 Windows 安装程序，因此 `/verify`、安装、卸载等运行时验证需要在 Windows 或兼容的 Windows 虚拟机中完成。当前项目内置的 `libmpv-2.dll` 是 x64 版本，所以暂不支持生成 `win-arm64` 原生包。
 
+前置条件：本机可用的 `dotnet` SDK 10（或仓库内自带的 `.dotnet-sdk/`，脚本会自动回退 `DOTNET_CLI_HOME` 到 `.dotnet/`）、`zip`/`unzip`。离线环境下 restore 可能出现 `NU1900` 警告，属预期现象，不阻塞打包。
+
+
 ## 日志与运行目录
 
 应用根目录按以下顺序解析：
@@ -245,6 +256,7 @@ $env:OMNIPLAY_TMDB_LANGUAGE='zh-CN'
 说明：
 
 - 若同时设置 `OMNIPLAY_TMDB_ACCESS_TOKEN`，请求会优先走 Bearer Token。
+- 无法直连 `https://api.themoviedb.org` 时，设置页可填写 TMDB API 代理网关（`TmdbProxyGateway`）：支持带路径前缀的反向代理根地址，请求会改道到网关转发，与 ARM mac 的 Cloudflare Workers 反代配置一致（部署说明见根 README 的 Cloudflare Workers 一节）。这是 TMDB 反代网关，不是通用 HTTP/SOCKS 出站代理。
 - 设置页现在可以直接保存 TMDB 语言；保存后的设置优先于环境变量。
 - 设置页现在也支持自动元数据补全、自动海报下载和自动剧照下载三个开关。
 - 若未保存语言设置，则继续回退到 `OMNIPLAY_TMDB_LANGUAGE` / `TMDB_LANGUAGE`，最终默认 `zh-CN`。

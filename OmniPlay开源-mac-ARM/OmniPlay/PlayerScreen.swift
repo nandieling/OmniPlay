@@ -1600,17 +1600,6 @@ struct PlayerScreen: View {
             prepareVideoWithPermission()
             resetHideTimer()
         }
-        .task(id: videoURLs.count) {
-            guard !videoURLs.isEmpty else { return }
-            // Let the initial MPV load/seek settle before publishing progress;
-            // otherwise a remote client could briefly overwrite a saved resume
-            // position with the initial 0-second state.
-            try? await Task.sleep(nanoseconds: 8_000_000_000)
-            while !Task.isCancelled {
-                await syncCurrentPlaybackProgressToDocker()
-                try? await Task.sleep(nanoseconds: 10_000_000_000)
-            }
-        }
         .onDisappear {
             traceClose("onDisappear triggered")
             hideUITask?.cancel()
@@ -1950,92 +1939,9 @@ struct PlayerScreen: View {
     }
 
     nonisolated private static func playbackResumeStartPosition(for file: VideoFile) -> Double {
-        guard file.playProgress > 5.0 else { return 0.0 }
+        guard PlaybackWatchState(progress: file.playProgress, duration: file.duration) == .inProgress else { return 0.0 }
         guard file.duration > 0 else { return file.playProgress }
-        if file.playProgress / file.duration >= 0.95 || file.duration - file.playProgress <= 5.0 {
-            return 0.0
-        }
         return min(file.playProgress, max(file.duration - 5.0, 0.0))
-    }
-
-    nonisolated private static func omniPlayDockerRemoteFileId(from file: VideoFile) -> String? {
-        let idParts = file.id.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
-        if idParts.count == 3, idParts[0] == "omniplay-docker", !idParts[2].isEmpty {
-            return idParts[2].removingPercentEncoding ?? idParts[2]
-        }
-
-        let trimmed = file.relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let parts = trimmed.split(separator: "/").map(String.init)
-        guard parts.count >= 5,
-              parts[0] == "api",
-              parts[1] == "playback",
-              parts[2] == "files",
-              parts[4] == "stream" else {
-            return nil
-        }
-        return parts[3].removingPercentEncoding ?? parts[3]
-    }
-
-    private static func syncOmniPlayDockerProgressIfNeeded(file: VideoFile, source: MediaSource?) async {
-        guard source?.protocolKind == .omniplayDocker,
-              let source,
-              let remoteFileId = omniPlayDockerRemoteFileId(from: file) else {
-            return
-        }
-        let config = OmniPlayDockerAuthConfig.decode(source.authConfig)
-        do {
-            let client = try OmniPlayDockerClient(baseURLString: source.baseUrl, sessionCookie: config?.sessionCookie)
-            try await client.updateProgress(
-                videoFileId: remoteFileId,
-                positionSeconds: file.playProgress,
-                durationSeconds: file.duration
-            )
-        } catch {
-            print("Docker 进度同步失败：\(error.localizedDescription)")
-        }
-    }
-
-    private func syncCurrentPlaybackProgressToDocker() async {
-        guard playbackSourceProtocolType == MediaSourceProtocol.omniplayDocker.rawValue,
-              let baseURL = playbackSourceBaseURL,
-              !isClosingPlayback else {
-            return
-        }
-
-        let snapshot = playerManager.playbackEngineSnapshot
-        guard snapshot.timePos.isFinite, snapshot.timePos > 0.5 else { return }
-        guard let fileIndex = resolvedPlaybackFileIndex(from: snapshot),
-              allPlaylistFiles.indices.contains(fileIndex) else {
-            return
-        }
-
-        let file = allPlaylistFiles[fileIndex]
-        guard let remoteFileId = Self.omniPlayDockerRemoteFileId(from: file) else { return }
-        let duration = max(
-            snapshot.duration.isFinite ? snapshot.duration : 0,
-            file.duration,
-            playerManager.duration
-        )
-        guard duration > 0 else { return }
-
-        let config = OmniPlayDockerAuthConfig.decode(playbackSourceAuthConfig)
-        do {
-            let client = try OmniPlayDockerClient(
-                baseURLString: baseURL,
-                sessionCookie: config?.sessionCookie
-            )
-            try await client.updateProgress(
-                videoFileId: remoteFileId,
-                positionSeconds: snapshot.timePos,
-                durationSeconds: duration
-            )
-            if allPlaylistFiles.indices.contains(fileIndex) {
-                allPlaylistFiles[fileIndex].playProgress = snapshot.timePos
-                allPlaylistFiles[fileIndex].duration = max(allPlaylistFiles[fileIndex].duration, duration)
-            }
-        } catch {
-            print("Docker 播放中进度同步失败：\(error.localizedDescription)")
-        }
     }
 
     private func normalizedPlaybackFilename(_ value: String) -> String {
@@ -2134,9 +2040,7 @@ struct PlayerScreen: View {
                 let thread = "bg"
                 print("[PlayerScreenClose][\(formatter.string(from: Date()))][\(thread)][q:\(queue)] progress save task begin fileId=\(fileId)")
                 do {
-                    let syncTarget = try await AppDatabase.shared.dbQueue.write { db -> (VideoFile, MediaSource?)? in
-                        var fileForRemoteSync: VideoFile?
-                        var sourceForRemoteSync: MediaSource?
+                    try await AppDatabase.shared.dbQueue.write { db in
                         for completedId in completedFileIds where completedId != fileId {
                             if var completedFile = try VideoFile.fetchOne(db, key: completedId) {
                                 Self.applyFinishedPlaybackState(to: &completedFile)
@@ -2159,14 +2063,7 @@ struct PlayerScreen: View {
                                 file.lastPlayedAt = thresholded > 0.0 ? Date().timeIntervalSince1970 : nil
                             }
                             try file.update(db)
-                            fileForRemoteSync = file
-                            sourceForRemoteSync = try file.request(for: VideoFile.mediaSource).fetchOne(db)
                         }
-                        guard let fileForRemoteSync else { return nil }
-                        return (fileForRemoteSync, sourceForRemoteSync)
-                    }
-                    if let syncTarget {
-                        await Self.syncOmniPlayDockerProgressIfNeeded(file: syncTarget.0, source: syncTarget.1)
                     }
                     await MainActor.run { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
                     let doneFormatter = ISO8601DateFormatter()
@@ -2230,11 +2127,8 @@ struct PlayerScreen: View {
         let mediaServerCredential = (sourceKind == .plex || sourceKind == .emby || sourceKind == .jellyfin)
             ? MediaServerAuthConfig.decode(sourceAuthConfig)
             : nil
-        let omniPlayDockerAuth = sourceKind == .omniplayDocker
-            ? OmniPlayDockerAuthConfig.decode(sourceAuthConfig)
-            : nil
         switch sourceKind {
-        case .webdav, .plex, .emby, .jellyfin, .omniplayDocker:
+        case .webdav, .plex, .emby, .jellyfin:
             guard let remoteBase = URL(string: normalizedBase) else { return false }
             sourceBaseUrl = remoteBase
         case .local, .direct:
@@ -2456,7 +2350,7 @@ struct PlayerScreen: View {
         }
 
         func remoteISOProxyPlaybackRegistration(for file: VideoFile, remoteURL: URL) async -> RemoteISOProxyRegistration? {
-            guard sourceKind == .webdav || sourceKind == .omniplayDocker,
+            guard sourceKind == .webdav,
                   !remoteURL.isFileURL,
                   isISOFile(file) else {
                 return nil
@@ -2649,15 +2543,6 @@ struct PlayerScreen: View {
                 }
                 components.queryItems = items.isEmpty ? nil : items
                 return components.url
-            case .omniplayDocker:
-                guard let remoteId = Self.omniPlayDockerRemoteFileId(from: file),
-                      let client = try? OmniPlayDockerClient(
-                        baseURLString: normalizedBase,
-                        sessionCookie: omniPlayDockerAuth?.sessionCookie
-                      ) else {
-                    return nil
-                }
-                return try? await client.playbackURL(videoFileId: remoteId)
             case .local, .direct:
                 let relativePath = file.relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
                 return sourceBaseUrl.appendingPathComponent(relativePath)
@@ -2845,7 +2730,7 @@ struct PlayerScreen: View {
         guard let originalTargetSourceURL = await sourcePlaybackURL(for: targetFile) else { return false }
         let targetLocalURL = localPlaybackURL(for: targetFile)
         let requiresRemoteISO = targetLocalURL == nil
-            && (sourceKind == .webdav || sourceKind == .omniplayDocker)
+            && sourceKind == .webdav
             && !originalTargetSourceURL.isFileURL
             && isISOFile(targetFile)
         let remoteISOProxyRegistration = requiresRemoteISO
@@ -2857,11 +2742,7 @@ struct PlayerScreen: View {
             ? await webDAVMountedISOPlaybackURL(for: targetFile, remoteURL: originalTargetSourceURL)
             : nil
         if requiresRemoteISO && remoteISOProxyRegistration == nil && mountedISOPlaybackURL == nil {
-            if sourceKind == .omniplayDocker {
-                errorMessage = "无法播放 OmniPlay Docker ISO：客户端 Range 代理失败，请确认服务端支持 Range 请求。"
-            } else {
-                errorMessage = "无法播放 WebDAV ISO：远程 Range 解析失败，系统挂载也失败。请确认服务器支持 Range 请求，或使用 SMB/NFS 源播放 ISO。"
-            }
+            errorMessage = "无法播放 WebDAV ISO：远程 Range 解析失败，系统挂载也失败。请确认服务器支持 Range 请求，或使用 SMB/NFS 源播放 ISO。"
             return false
         }
         let targetSourceURL = remoteISOProxyRegistration?.urls.first ?? mountedISOPlaybackURL ?? originalTargetSourceURL
@@ -2875,7 +2756,7 @@ struct PlayerScreen: View {
             switch sourceKind {
             case .local:
                 return FileManager.default.fileExists(atPath: targetSourceURL.path)
-            case .webdav, .direct, .plex, .emby, .jellyfin, .omniplayDocker:
+            case .webdav, .direct, .plex, .emby, .jellyfin:
                 return true
             }
         }()

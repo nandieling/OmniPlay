@@ -271,7 +271,7 @@ struct WebDAVMockIntegrationTests {
         #expect(result.errorCategory == .server)
         #expect(result.diagnostic?.statusCode == 500)
         #expect(result.diagnostic?.retryAttempts == 3)
-        #expect(WebDAVMockURLProtocol.callCount(path: "/dav/Fail") >= 3)
+        #expect(WebDAVMockURLProtocol.callCount(path: "/dav/Fail") == 3)
     }
 
     @Test("WebDAV scanner should classify URLError as network error")
@@ -321,17 +321,19 @@ struct WebDAVMockIntegrationTests {
         #expect(result.diagnostic?.retryAttempts == 3)
     }
 
-    @Test("Offline cache policy blocks WebDAV source but allows local/direct")
+    @Test("Offline cache policy allows WebDAV/local/direct and blocks media servers")
     func offlineCachePolicyForWebDAV() {
         let manager = OfflineCacheManager.shared
 
         let webdav = MediaSource(id: 1, name: "webdav", protocolType: MediaSourceProtocol.webdav.rawValue, baseUrl: "https://mock/dav", authConfig: nil)
         let local = MediaSource(id: 2, name: "local", protocolType: MediaSourceProtocol.local.rawValue, baseUrl: "/tmp/demo", authConfig: nil)
         let direct = MediaSource(id: 3, name: "direct", protocolType: MediaSourceProtocol.direct.rawValue, baseUrl: "/", authConfig: nil)
+        let plex = MediaSource(id: 4, name: "plex", protocolType: MediaSourceProtocol.plex.rawValue, baseUrl: "http://mock:32400", authConfig: nil)
 
-        #expect(manager.supportsCaching(mediaSource: webdav) == false)
+        #expect(manager.supportsCaching(mediaSource: webdav) == true)
         #expect(manager.supportsCaching(mediaSource: local) == true)
         #expect(manager.supportsCaching(mediaSource: direct) == true)
+        #expect(manager.supportsCaching(mediaSource: plex) == false)
     }
 
     @Test("Missing-source check should not block WebDAV playback")

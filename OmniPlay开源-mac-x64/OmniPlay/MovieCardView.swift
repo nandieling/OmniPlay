@@ -6,26 +6,27 @@ struct MovieCardView: View {
     let movie: Movie
     var isContinueWatchingContext: Bool = false
     var isHomeCacheModeActive: Bool = false
-
+    
     @AppStorage("appTheme") var appTheme = ThemeType.appleLight.rawValue
     var theme: AppTheme { ThemeType(rawValue: appTheme)?.colors ?? ThemeType.appleLight.colors }
     @AppStorage("enableFastTooltip") var enableFastTooltip = true
-
+    
     @ObservedObject var cacheManager = OfflineCacheManager.shared
-
+    
     @State private var showSearchModal = false
     @State private var showEditModal = false
     @State private var hasMissingFiles = false
-
+    @State private var showCancelCacheConfirmation = false
+    
     @State private var isHovering = false
     @State private var isFullyWatched = false
     @State private var movieFiles: [VideoFile] = []
     @State private var sourcePairs: [(VideoFile, MediaSource?)] = []
     @State private var doubanMetadata: DoubanMetadata? = nil
     @State private var refreshTask: Task<Void, Never>? = nil
-
+    
     private let availabilityTimer = Timer.publish(every: 15.0, on: .main, in: .common).autoconnect()
-
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .topTrailing) {
@@ -34,7 +35,7 @@ struct MovieCardView: View {
                         .frame(width: 160, height: 240)
                         .cornerRadius(12)
                         .shadow(color: .black.opacity(0.1), radius: 8, y: 4)
-
+                    
                     VStack {
                         Spacer()
                         HStack(alignment: .bottom, spacing: 5) {
@@ -46,15 +47,21 @@ struct MovieCardView: View {
                     }
 
                     if isHomeCacheModeActive {
-                        Button(action: { fetchFilesAndStartCache() }) {
+                        Button(action: {
+                            if isDownloadingAnyFile {
+                                showCancelCacheConfirmation = true
+                            } else {
+                                fetchFilesAndStartCache()
+                            }
+                        }) {
                             posterCacheOverlayContent
                         }
                         .buttonStyle(.plain)
-                        .disabled(!isCacheSupportedForAnyFile || isDownloadingAnyFile || allCacheableFilesCached)
+                        .disabled(!isCacheSupportedForAnyFile || allCacheableFilesCached)
                         .conditionalHelp(cacheOverlayHelpText, show: enableFastTooltip)
                     }
                 }
-
+                
                 if isHovering {
                     HStack(spacing: 8) {
                         Button(action: { showSearchModal = true }) {
@@ -64,7 +71,7 @@ struct MovieCardView: View {
                                 .shadow(radius: 3)
                         }
                         .buttonStyle(.plain)
-
+                        
                         Button(action: { showEditModal = true }) {
                             Image(systemName: "pencil.circle.fill")
                                 .font(.title2)
@@ -78,14 +85,14 @@ struct MovieCardView: View {
                 }
             }
             .onHover { isHovering = $0 }
-
+            
             Text(movie.title)
                 .font(.headline)
                 .foregroundColor(theme.textPrimary)
                 .lineLimit(2)
-                .frame(height: 42, alignment: .topLeading)
-                .multilineTextAlignment(.leading)
-
+                .frame(width: 160, height: 42, alignment: .top)
+                .multilineTextAlignment(.center)
+            
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     if let date = movie.releaseDate, date.count >= 4 {
@@ -93,9 +100,9 @@ struct MovieCardView: View {
                             .font(.caption)
                             .foregroundColor(theme.textSecondary)
                     }
-
+                    
                     Spacer(minLength: 0)
-
+                    
                     if hasMissingFiles {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 12))
@@ -109,7 +116,7 @@ struct MovieCardView: View {
                     }
                     .buttonStyle(.plain)
                 }
-
+                
                 if let progressRatio = continueWatchingProgressRatio {
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
@@ -138,10 +145,18 @@ struct MovieCardView: View {
         .onReceive(availabilityTimer) { _ in refreshAvailabilityWithoutDB() }
         .sheet(isPresented: $showSearchModal) { MovieSearchModalView(movie: movie) }
         .sheet(isPresented: $showEditModal) { MovieEditModalView(movie: movie) }
+        .alert("取消离线缓存？", isPresented: $showCancelCacheConfirmation) {
+            Button("取消缓存", role: .destructive) {
+                cacheManager.cancelDownloads(files: movieFiles)
+            }
+            Button("继续缓存", role: .cancel) { }
+        } message: {
+            Text("已缓存的内容会保留，未完成的文件将被删除。")
+        }
     }
-
+    
     private var isDownloadingAnyFile: Bool {
-        movieFiles.contains { cacheManager.downloadProgress[$0.id] != nil }
+        movieFiles.contains { cacheManager.progress(for: $0) != nil }
     }
 
     private var isCacheSupportedForAnyFile: Bool {
@@ -159,7 +174,7 @@ struct MovieCardView: View {
         guard !cacheableFiles.isEmpty else { return nil }
         let total = cacheableFiles.reduce(0.0) { partial, file in
             if cacheManager.isCached(file) { return partial + 1.0 }
-            return partial + (cacheManager.downloadProgress[file.id] ?? 0.0)
+            return partial + (cacheManager.progress(for: file) ?? 0.0)
         }
         return total / Double(cacheableFiles.count)
     }
@@ -221,7 +236,7 @@ struct MovieCardView: View {
         let progress = min(max(targetFile.playProgress, 0), duration)
         return min(max(progress / duration, 0), 1)
     }
-
+    
     private func refreshCardState() {
         refreshTask?.cancel()
         refreshTask = Task {
@@ -247,7 +262,7 @@ struct MovieCardView: View {
             } catch {}
         }
     }
-
+    
     private func toggleWatched() {
         Task {
             do {
@@ -272,7 +287,7 @@ struct MovieCardView: View {
             } catch {}
         }
     }
-
+    
     private func fetchFilesAndStartCache() {
         Task {
             do {
@@ -292,7 +307,7 @@ struct MovieCardView: View {
             } catch {}
         }
     }
-
+    
     private func refreshAvailabilityWithoutDB() {
         guard !sourcePairs.isEmpty else { return }
         let latestMissing = evaluateMissingState(with: sourcePairs)
@@ -300,7 +315,7 @@ struct MovieCardView: View {
             hasMissingFiles = latestMissing
         }
     }
-
+    
     private func evaluateMissingState(with pairs: [(VideoFile, MediaSource?)]) -> Bool {
         pairs.contains { file, source in
             cacheManager.hasMissingSource(for: file, mediaSource: source)

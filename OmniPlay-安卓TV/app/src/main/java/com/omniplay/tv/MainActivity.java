@@ -6,7 +6,9 @@ import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -16,13 +18,19 @@ import android.provider.Settings;
 import android.text.Html;
 import android.text.Editable;
 import android.text.InputType;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
 import android.text.TextUtils;
 import android.text.TextWatcher;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.RelativeSizeSpan;
 import android.view.Display;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.ViewParent;
 import android.view.ViewConfiguration;
 import android.view.Window;
@@ -35,20 +43,38 @@ import android.widget.FrameLayout;
 import android.widget.GridLayout;
 import android.widget.ImageButton;
 import android.widget.ImageView;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 
+import android.os.Environment;
+
 import com.omniplay.tv.data.Models;
-import com.omniplay.tv.data.LuckyStunClient;
-import com.omniplay.tv.data.OmniPlayApi;
+import com.omniplay.tv.data.LocalPlayApi;
 import com.omniplay.tv.iso.RemoteIsoStreamServer;
+import com.omniplay.tv.local.LanDiscovery;
+import com.omniplay.tv.local.LocalEngine;
+import com.omniplay.tv.local.PhoneInputServer;
+import com.omniplay.tv.local.QrCode;
+import com.omniplay.tv.local.BrowseEntry;
+import com.omniplay.tv.local.SavedConnections;
+import com.omniplay.tv.local.CrashLog;
+import com.omniplay.tv.local.SmbClient;
+import com.omniplay.tv.local.SmbStreamServer;
+import com.omniplay.tv.local.TvSettings;
+import com.omniplay.tv.local.UrlLabels;
+import com.omniplay.tv.local.WebDavClient;
 import com.omniplay.tv.player.MpvVideoView;
 import com.omniplay.tv.subtitle.PgsSubtitleCue;
 import com.omniplay.tv.subtitle.PgsSubtitleParser;
 import com.omniplay.tv.subtitle.PgsSubtitleView;
 import com.omniplay.tv.ui.ImageLoader;
+import com.omniplay.tv.ui.FocusGrid;
+import com.omniplay.tv.ui.Overlays;
+import com.omniplay.tv.ui.Theme;
+import com.omniplay.tv.ui.Widgets;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -71,11 +97,14 @@ import java.nio.charset.StandardCharsets;
 import java.text.Collator;
 import java.text.Normalizer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -86,34 +115,51 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class MainActivity extends Activity {
     private static final String UI_PREFS = "omniplay_tv_ui";
     private static final String KEY_4K_DV_HDR_PLAYBACK_MODE = "4k_dv_hdr_playback_mode";
-    private static final int DOCKER_SERVER_PORT = 45722;
     private static final String PLAYBACK_MODE_COMPATIBLE_SUBTITLE = "compatible_subtitle";
     private static final String PLAYBACK_MODE_HIGH_PERFORMANCE_DIRECT = "high_performance_direct";
-    private static final int COLOR_BACKGROUND = Color.rgb(245, 247, 250);
-    private static final int COLOR_SURFACE = Color.rgb(255, 255, 255);
-    private static final int COLOR_SURFACE_ALT = Color.rgb(243, 244, 246);
-    private static final int COLOR_BORDER = Color.rgb(221, 226, 235);
-    private static final int COLOR_TEXT = Color.rgb(17, 24, 39);
-    private static final int COLOR_MUTED = Color.rgb(75, 85, 99);
-    private static final int COLOR_SUBTLE = Color.rgb(107, 114, 128);
-    private static final int COLOR_FOCUS = Color.rgb(37, 99, 235);
-    private static final int COLOR_ACCENT = Color.rgb(20, 184, 166);
-    private static final int COLOR_FOCUS_SOFT = Color.rgb(232, 240, 255);
-    private static final int COLOR_DANGER = Color.rgb(185, 28, 28);
-    private static final int COLOR_PLAYER_TEXT = Color.WHITE;
-    private static final int COLOR_PLAYER_MUTED = Color.rgb(229, 231, 235);
+    // The palette lives in ui/Theme; these aliases exist only so older call sites keep reading.
+    // Snapshots of the applied variant, refreshed by {@link #syncThemeColors()}: the screens use
+    // these names, so switching themes never needs a rebuild of the call sites.
+    private static int COLOR_SURFACE = Theme.SURFACE;
+    private static int COLOR_SURFACE_ALT = Theme.SURFACE_ALT;
+    private static int COLOR_BORDER = Theme.BORDER;
+    private static int COLOR_TEXT = Theme.TEXT;
+    private static int COLOR_MUTED = Theme.MUTED;
+    private static int COLOR_SUBTLE = Theme.SUBTLE;
+    private static int COLOR_FOCUS = Theme.FOCUS;
+    private static int COLOR_ACCENT = Theme.ACCENT;
+    private static int COLOR_FOCUS_SOFT = Theme.FOCUS_SOFT;
+    private static int COLOR_DANGER = Theme.DANGER;
+    private static int COLOR_PLAYER_TEXT = Theme.PLAYER_TEXT;
+    private static int COLOR_PLAYER_MUTED = Theme.PLAYER_MUTED;
     private static final int UNKNOWN_MOVIE_PART_INDEX = Integer.MAX_VALUE;
     private static final int PLAYER_SEEK_REPEAT_MS = 80;
     private static final double PLAYER_SEEK_STEP_SECONDS = 0.8d;
-    private static final int FOCUS_STROKE_PX = 1;
-    private static final float FOCUS_SCALE = 1.04f;
-    private static final int FOCUS_ANIMATION_MS = 120;
+    private static int FOCUS_STROKE_PX = Theme.STROKE;
+
+    /** Re-reads the applied variant into the aliases above; call it after Theme.apply(). */
+    private void syncThemeColors() {
+        COLOR_SURFACE = Theme.SURFACE;
+        COLOR_SURFACE_ALT = Theme.SURFACE_ALT;
+        COLOR_BORDER = Theme.BORDER;
+        COLOR_TEXT = Theme.TEXT;
+        COLOR_MUTED = Theme.MUTED;
+        COLOR_SUBTLE = Theme.SUBTLE;
+        COLOR_FOCUS = Theme.FOCUS;
+        COLOR_ACCENT = Theme.ACCENT;
+        COLOR_FOCUS_SOFT = Theme.FOCUS_SOFT;
+        COLOR_DANGER = Theme.DANGER;
+        COLOR_PLAYER_TEXT = Theme.PLAYER_TEXT;
+        COLOR_PLAYER_MUTED = Theme.PLAYER_MUTED;
+        FOCUS_STROKE_PX = Theme.STROKE;
+    }
     private static final int HOME_PAGE_HORIZONTAL_PADDING_DP = 44;
     private static final int HOME_POSTER_COLUMNS = 6;
     private static final int HOME_POSTER_CARD_MARGIN_DP = 4;
@@ -131,8 +177,12 @@ public final class MainActivity extends Activity {
     private final ExecutorService io = Executors.newFixedThreadPool(4);
     private final Collator titleCollator = Collator.getInstance(Locale.CHINA);
     private FrameLayout root;
-    private OmniPlayApi api;
+    private LocalPlayApi api;
     private ImageLoader imageLoader;
+    private Theme theme;
+    private Widgets widgets;
+    private FocusGrid focusGrid;
+    private Overlays overlays;
     private SharedPreferences uiPreferences;
     private List<Models.LibraryItem> libraryItems = Collections.emptyList();
     private final Map<String, Models.LibraryDetail> detailCache = new ConcurrentHashMap<>();
@@ -142,9 +192,9 @@ public final class MainActivity extends Activity {
     private Models.LibraryDetail currentDetail;
     private MpvVideoView playerView;
     private ScrollView homeScrollView;
-    private View settingsDim;
-    private View settingsPanel;
-    private View settingsInitialFocus;
+    private Overlays.Overlay settingsOverlay;
+    private View settingsRestoreFocus;
+    private View sourcesRestoreFocus;
     private Models.VideoFile activePlaybackFile;
     private List<Models.VideoFile> activePlaybackQueue = Collections.emptyList();
     private int activePlaybackIndex;
@@ -179,12 +229,78 @@ public final class MainActivity extends Activity {
     private double playerSeekPreviewPosition = -1;
     private Runnable pendingSearchRender;
     private int homeScrollY;
-    private boolean restoreHomeScroll;
+    // Persistent home chrome: rebuilt once, so sort / search toggles never tear the page down.
+    private LinearLayout homeControls;
+    private LinearLayout homeBody;
+    private Button homeSearchToggle;
+    private Button homeSortToggle;
+    private Button homeDirectionToggle;
+    private Button homeSourcesToggle;
+    private Button homeSettingsToggle;
+    private EditText homeSearchInput;
     private boolean advancingPlaybackPart;
     private Screen screen = Screen.SETUP;
     private boolean isSearchOpen;
     private boolean isSortOpen;
     private boolean isSettingsOpen;
+    private final Map<String, Button> kindToggleButtons = new LinkedHashMap<>();
+    private boolean isSourcesOpen;
+    private Overlays.Overlay sourcesOverlay;
+    private boolean isPhoneInputOpen;
+    private Overlays.Overlay phoneInputOverlay;
+    private Overlays.Overlay textInputOverlay;
+    private TextView phoneInputStatus;
+    private TextView phoneInputUrl;
+    private ImageView phoneInputQr;
+    private Button phoneInputCloseButton;
+    private Button setupPhoneInputBtn;
+    private PhoneInputServer phoneInput;
+    private TextView homeStatusView;
+    /** 在屏海报卡片，按条目 id 索引；刮削过程中就地刷新用。 */
+    private final Map<String, List<PosterViews>> homePosterViews = new HashMap<>();
+    private boolean libraryPatchInFlight;
+    private long lastLibraryPatchAt;
+    private boolean startupSyncStarted;
+    private final Set<String> episodeMetaAttempts = ConcurrentHashMap.newKeySet();
+
+    // ---- setup screen media-source flows (LAN scan / network login / folder browser) ----
+    private Button setupLocalBtn, setupWebDavBtn, setupSmbBtn, setupEnterBtn, setupRescanBtn, setupScrapeBtn, setupRescanLanBtn;
+    private Button setupPickLocalBtn, setupLoginBtn;
+    private EditText setupAddressInput;
+    private TextView setupStatusView, sourceSummaryView;
+    private LinearLayout lanListContainer;
+    private TextView lanStatus;
+    private final List<View> lanDeviceButtons = new ArrayList<>();
+    private final Object lanLock = new Object();
+    private boolean lanDiscovering;
+    private final List<LanDiscovery.LanDevice> lanDevices = new ArrayList<>();
+    private int lanScanToken = 0;
+    private boolean isNetworkLoginOpen;
+    private boolean isFolderBrowserOpen;
+    private Overlays.Overlay loginOverlay;
+    private Overlays.Overlay browserOverlay;
+    private final String[] selectedKind = {"webdav"};
+    private String loginDialogKind = "webdav";
+    private boolean loginRunning;
+    private String loginDialogLabel = "";
+    private String browserKind;
+    private String browserRoot;
+    private String browserCurrent;
+    private String browserUser = "";
+    private String browserPass = "";
+    private final List<BrowseEntry> browserItems = new ArrayList<>();
+    private final List<Button> browserItemButtons = new ArrayList<>();
+    private LinearLayout savedConnectionContainer;
+    private final List<View> savedConnectionButtons = new ArrayList<>();
+    private SavedConnections savedConnections;
+    private LinearLayout browserListContainer;
+    private TextView browserPathText, browserMessage;
+    private Button browserBackButton, browserMountButton, browserCancelButton;
+    private EditText loginAddress, loginUser, loginPass;
+    private TextView loginStatus;
+    private Button loginButton, loginCancelButton;
+    // One task per host+port during the LAN scan, so the pool needs to be wide.
+    private final ExecutorService lanProbeExecutor = Executors.newFixedThreadPool(96);
     private boolean showEpisodeDetails = true;
     private boolean highPerformanceDirectPlayback;
     private boolean activeDirectPlayback;
@@ -219,16 +335,27 @@ public final class MainActivity extends Activity {
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
         preferHighestResolutionDisplayMode();
+        // A TV has no console: record whatever kills a worker thread so the next launch can say why.
+        CrashLog.install(this);
+        // The palette has to be chosen before a single view is built.
+        Theme.apply(new TvSettings(this).themeId());
 
-        api = new OmniPlayApi(this);
+        api = new LocalPlayApi(this);
+        savedConnections = new SavedConnections(this);
         imageLoader = new ImageLoader(this);
+        theme = new Theme(this);
+        syncThemeColors();
+        widgets = new Widgets(theme);
+        focusGrid = new FocusGrid();
         uiPreferences = getApplicationContext().getSharedPreferences(UI_PREFS, MODE_PRIVATE);
+        showEpisodeDetails = api.engine().settings().showEpisodeDetails();
         highPerformanceDirectPlayback = PLAYBACK_MODE_HIGH_PERFORMANCE_DIRECT.equals(uiPreferences.getString(
                 KEY_4K_DV_HDR_PLAYBACK_MODE,
                 PLAYBACK_MODE_COMPATIBLE_SUBTITLE));
         root = new FrameLayout(this);
         root.setClipChildren(false);
         root.setClipToPadding(false);
+        overlays = new Overlays(root, theme, widgets, focusGrid);
         applyAppBackground();
         setContentView(root);
 
@@ -282,7 +409,7 @@ public final class MainActivity extends Activity {
     }
 
     private void checkSession() {
-        showLoading("正在连接 OmniPlay 服务端");
+        showLoading("正在打开媒体库");
         runAsync(
                 () -> api.authStatus(),
                 status -> {
@@ -299,6 +426,8 @@ public final class MainActivity extends Activity {
         screen = Screen.SETUP;
         currentDetail = null;
         destroyPlayer();
+        applyImmersiveMode(true);
+        closeAllOverlays();
         root.removeAllViews();
         applyAppBackground();
 
@@ -306,255 +435,1059 @@ public final class MainActivity extends Activity {
         scroll.setFillViewport(true);
         scroll.setClipChildren(false);
         scroll.setClipToPadding(false);
+        scroll.setFocusable(false);
+        scroll.setFocusableInTouchMode(false);
         root.addView(scroll, match());
 
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setGravity(Gravity.CENTER_HORIZONTAL);
-        page.setPadding(dp(96), dp(28), dp(96), dp(28));
+        page.setPadding(sdp(64), sdp(44), sdp(64), sdp(36));
         page.setClipChildren(false);
         page.setClipToPadding(false);
-        scroll.addView(page, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        scroll.addView(page, matchWidth());
 
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(40), dp(26), dp(40), dp(28));
-        panel.setClipChildren(false);
-        panel.setClipToPadding(false);
-        panel.setBackground(rounded(COLOR_SURFACE, COLOR_BORDER, dp(2), dp(8)));
-        panel.setElevation(dp(12));
-        page.addView(panel, new LinearLayout.LayoutParams(dp(720), ViewGroup.LayoutParams.WRAP_CONTENT));
+        page.addView(title("OmniPlay TV"));
+        page.addView(body("独立版：添加本地目录、WebDAV 或 SMB 媒体源，自动扫描并用 TMDB 刮削海报。"));
 
-        panel.addView(title("OmniPlay TV"));
-        panel.addView(body("连接docker服务端，安卓TV端只播放，不扫描刮削。"));
-
-        EditText serverInput = input("Docker 服务端地址，例如 http://192.168.1.10:45722", api.serverUrl());
-        panel.addView(serverInput, margin(matchWidth(), 0, dp(18), 0, 0));
-        TextView discoveryStatus = text("", 13, Typeface.BOLD, COLOR_SUBTLE);
-        panel.addView(discoveryStatus, margin(matchWidth(), 0, dp(6), 0, dp(8)));
-
-        EditText usernameInput = input("用户名", api.savedUsername());
-        panel.addView(usernameInput, margin(matchWidth(), 0, dp(10), 0, 0));
-
-        EditText passwordInput = input("密码", api.savedPassword());
-        passwordInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        panel.addView(passwordInput, margin(matchWidth(), 0, dp(10), 0, 0));
+        sourceSummaryView = text(api.engine().sources().isEmpty()
+                ? "当前没有媒体源。"
+                : "当前媒体源：" + api.engine().sources().size() + " 个。", 14, Typeface.BOLD, COLOR_SUBTLE);
+        page.addView(sourceSummaryView, margin(matchWidth(), 0, sdp(10), 0, 0));
 
         if (message != null && !message.isEmpty()) {
             TextView error = body(message);
             error.setTextColor(COLOR_DANGER);
-            panel.addView(error, margin(matchWidth(), 0, 0, 0, dp(16)));
+            page.addView(error);
         }
+
+        // Anything that killed the app since the last visit is reported once, here.
+        String crash = CrashLog.take(this);
+        if (!crash.isEmpty()) {
+            TextView reported = body("上次异常退出：" + crash.replace('\n', ' ').trim());
+            reported.setTextColor(COLOR_DANGER);
+            page.addView(reported);
+        }
+
+        page.addView(text("媒体源", 15, Typeface.BOLD, COLOR_MUTED), margin(matchWidth(), 0, 0, 0, sdp(8)));
+        final TextView pathHint = text(kindHint(selectedKind[0]), 12, Typeface.NORMAL, COLOR_SUBTLE);
+        LinearLayout kindRow = new LinearLayout(this);
+        kindRow.setGravity(Gravity.CENTER_VERTICAL);
+        kindRow.setClipChildren(false);
+        kindRow.setClipToPadding(false);
+        page.addView(kindRow, margin(matchWidth(), 0, sdp(4), 0, 0));
+        kindToggleButtons.clear();
+        setupLocalBtn = kindToggleButton("local", "本地目录", selectedKind, pathHint);
+        setupWebDavBtn = kindToggleButton("webdav", "WebDAV", selectedKind, pathHint);
+        setupSmbBtn = kindToggleButton("smb", "SMB", selectedKind, pathHint);
+        // WebDAV first, then SMB, then the local folder: the two network kinds are what a TV needs most.
+        kindRow.addView(setupWebDavBtn, new LinearLayout.LayoutParams(0, sdp(58), 1f));
+        kindRow.addView(setupSmbBtn, margin(new LinearLayout.LayoutParams(0, sdp(58), 1f), sdp(10), 0, 0, 0));
+        kindRow.addView(setupLocalBtn, margin(new LinearLayout.LayoutParams(0, sdp(58), 1f), sdp(10), 0, 0, 0));
+        pathHint.setLineSpacing(sdp(2), 1f);
+        page.addView(pathHint, margin(matchWidth(), 0, sdp(8), 0, sdp(6)));
+
+        // Connections that already logged in once: one key press reconnects them.
+        savedConnectionContainer = new LinearLayout(this);
+        savedConnectionContainer.setOrientation(LinearLayout.VERTICAL);
+        savedConnectionContainer.setClipChildren(false);
+        savedConnectionContainer.setClipToPadding(false);
+        savedConnectionContainer.setVisibility(View.GONE);
+        page.addView(savedConnectionContainer, margin(matchWidth(), 0, sdp(2), 0, sdp(14)));
+
+        setupPickLocalBtn = button("选择本地目录");
+        LinearLayout.LayoutParams pickParams = matchWidth();
+        pickParams.height = sdp(60);
+        setupPickLocalBtn.setOnClickListener(view -> openLocalFolderPicker());
+        page.addView(setupPickLocalBtn, margin(pickParams, 0, 0, 0, sdp(10)));
+
+        setupAddressInput = input("WebDAV 地址，例如 https://192.168.0.10:5006 或 https://nas:5006/webdav", "");
+        page.addView(setupAddressInput, margin(matchWidth(), 0, 0, 0, sdp(10)));
+        setupLoginBtn = button("登录");
+        LinearLayout.LayoutParams loginParams = matchWidth();
+        loginParams.height = sdp(60);
+        setupLoginBtn.setOnClickListener(view -> openLoginDialog(
+                selectedKind[0],
+                setupAddressInput.getText().toString().trim(),
+                "", "", ""));
+        page.addView(setupLoginBtn, margin(loginParams, 0, 0, 0, sdp(24)));
+        setupPhoneInputBtn = button("手机输入");
+        LinearLayout.LayoutParams phoneParams = matchWidth();
+        phoneParams.height = sdp(56);
+        setupPhoneInputBtn.setOnClickListener(view -> openPhoneInputOverlay("填写媒体源地址",
+                "填好后回到电视点“登录”。",
+                Collections.singletonList(boundField("address", "媒体源地址", () -> setupAddressInput, false)),
+                true));
+        page.addView(setupPhoneInputBtn, margin(phoneParams, 0, 0, 0, sdp(24)));
+
+        LinearLayout lanHeader = new LinearLayout(this);
+        lanHeader.setGravity(Gravity.CENTER_VERTICAL);
+        lanHeader.setClipChildren(false);
+        lanHeader.setClipToPadding(false);
+        page.addView(lanHeader, margin(matchWidth(), 0, 0, 0, sdp(8)));
+        lanHeader.addView(text("局域网设备（自动扫描）", 15, Typeface.BOLD, COLOR_MUTED),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        setupRescanLanBtn = compactButton("重新扫描局域网");
+        setupRescanLanBtn.setOnClickListener(view -> startLanScan());
+        lanHeader.addView(setupRescanLanBtn, new LinearLayout.LayoutParams(sdp(150), sdp(42)));
+        lanStatus = text("正在扫描局域网...", 12, Typeface.NORMAL, COLOR_SUBTLE);
+        page.addView(lanStatus, margin(matchWidth(), 0, sdp(4), 0, sdp(8)));
+        lanListContainer = new LinearLayout(this);
+        lanListContainer.setOrientation(LinearLayout.VERTICAL);
+        lanListContainer.setClipChildren(false);
+        lanListContainer.setClipToPadding(false);
+        page.addView(lanListContainer, margin(matchWidth(), 0, 0, 0, sdp(24)));
 
         LinearLayout actions = new LinearLayout(this);
         actions.setGravity(Gravity.CENTER_VERTICAL);
         actions.setClipChildren(false);
         actions.setClipToPadding(false);
-        panel.addView(actions, margin(matchWidth(), 0, dp(14), 0, 0));
-
-        Button login = button("登录");
-        login.setId(View.generateViewId());
-        actions.addView(login, new LinearLayout.LayoutParams(dp(180), dp(52)));
-        Button scan = button("预扫描");
-        scan.setId(View.generateViewId());
-        actions.addView(scan, margin(new LinearLayout.LayoutParams(dp(180), dp(52)), dp(14), 0, 0, 0));
-        login.setNextFocusRightId(scan.getId());
-        scan.setNextFocusLeftId(login.getId());
-        login.setOnClickListener(view -> {
-            String server = serverInput.getText().toString();
-            String username = usernameInput.getText().toString();
-            String password = passwordInput.getText().toString();
-            showLoading("正在登录");
-            runAsync(
-                    () -> api.login(server, username, password),
-                    status -> showHome(),
-                    error -> showSetup(error.getMessage()));
+        page.addView(actions, margin(matchWidth(), 0, sdp(6), 0, 0));
+        setupEnterBtn = button("进入");
+        setupEnterBtn.setOnClickListener(view -> {
+            if (api.hasServerUrl()) {
+                showHome();
+            } else {
+                setupStatusView.setText("请先添加媒体源。");
+            }
         });
-        scan.setOnClickListener(view -> {
-            discoveryStatus.setText("正在预扫描 Docker 服务端");
-            scan.setEnabled(false);
+        actions.addView(setupEnterBtn, new LinearLayout.LayoutParams(0, sdp(56), 1f));
+        setupRescanBtn = button("重新扫描");
+        setupRescanBtn.setOnClickListener(view -> {
+            showLoading("正在扫描媒体源");
             runAsync(
-                    this::discoverServerUrl,
-                    serverUrl -> {
-                        scan.setEnabled(true);
-                        if (serverUrl != null && !serverUrl.isEmpty()) {
-                            serverInput.setText(serverUrl);
-                            serverInput.setSelection(serverInput.getText().length());
-                            discoveryStatus.setText("已发现 Docker 服务端");
-                        } else {
-                            discoveryStatus.setText("未发现 Docker 服务端，可手动输入");
+                    () -> api.engine().scanAll(status -> main.post(() -> {
+                        if (screen == Screen.SETUP) {
+                            setupStatusView.setText(status);
+                        }
+                    })),
+                    report -> {
+                        if (screen != Screen.SETUP) {
+                            return;
+                        }
+                        setupStatusView.setText(report.message + " 待刮削 " + api.engine().scrapeQueueCount() + " 个条目。");
+                        sourceSummaryView.setText("当前媒体源：" + api.engine().sources().size() + " 个。");
+                        if (report.success) {
+                            showHome();
                         }
                     },
-                    error -> {
-                        scan.setEnabled(true);
-                        discoveryStatus.setText("未发现 Docker 服务端，可手动输入");
-                    });
+                    error -> setupStatusView.setText("扫描失败：" + error.getMessage()));
         });
-        serverInput.requestFocus();
-        startServerDiscovery(serverInput, discoveryStatus);
-    }
+        actions.addView(setupRescanBtn, margin(new LinearLayout.LayoutParams(0, sdp(56), 1f), sdp(12), 0, 0, 0));
+        setupScrapeBtn = button("刮削海报");
+        setupScrapeBtn.setOnClickListener(view -> {
+            if (!api.engine().tmdb().isConfigured()) {
+                setupStatusView.setText(api.engine().tmdbStatusMessage());
+                return;
+            }
+            setupStatusView.setText("正在刮削海报...");
+            runAsync(
+                    () -> {
+                        api.engine().scrapePending(status -> main.post(() -> {
+                            if (screen == Screen.SETUP) {
+                                setupStatusView.setText(status);
+                            }
+                        }));
+                        return null;
+                    },
+                    ignored -> {
+                        if (screen == Screen.SETUP) {
+                            showHome();
+                        }
+                    },
+                    error -> setupStatusView.setText("刮削失败：" + error.getMessage()));
+        });
+        actions.addView(setupScrapeBtn, margin(new LinearLayout.LayoutParams(0, sdp(56), 1f), sdp(12), 0, 0, 0));
 
-    private void startServerDiscovery(EditText serverInput, TextView discoveryStatus) {
-        if (serverInput.getText().toString().trim().length() > 0) {
-            return;
-        }
+        setupStatusView = text("", 13, Typeface.BOLD, COLOR_SUBTLE);
+        page.addView(setupStatusView, margin(matchWidth(), 0, sdp(12), 0, 0));
 
-        discoveryStatus.setText("正在预扫描 Docker 服务端");
-        runAsync(
-                this::discoverServerUrl,
-                serverUrl -> {
-                    if (screen != Screen.SETUP) {
-                        return;
-                    }
-                    if (serverUrl != null && !serverUrl.isEmpty() && serverInput.getText().toString().trim().isEmpty()) {
-                        serverInput.setText(serverUrl);
-                        serverInput.setSelection(serverInput.getText().length());
-                        discoveryStatus.setText("已发现 Docker 服务端");
-                    } else {
-                        discoveryStatus.setText("未发现 Docker 服务端，可手动输入");
-                    }
+        updateSetupKindUi();
+        renderSavedConnections();
+        rebuildSetupDpadGrid();
+        startLanScan();
+        // Load the SMB library now: if it cannot start on this device, say so here rather than
+        // waiting for the user to press SMB and be thrown back to the launcher.
+        runAsync(SmbClient::warmUp,
+                library -> {
                 },
                 error -> {
-                    if (screen == Screen.SETUP) {
-                        discoveryStatus.setText("未发现 Docker 服务端，可手动输入");
+                    if (setupStatusView != null) {
+                        setupStatusView.setText("SMB 组件不可用：" + friendlyLoginError(error));
+                    }
+                });
+        View initial = api.hasServerUrl() ? setupEnterBtn
+                : (!savedConnectionButtons.isEmpty() ? savedConnectionButtons.get(0) : setupWebDavBtn);
+        initial.requestFocus();
+    }
+
+    /**
+     * Declares the D-pad layout of the current screen: rows top-to-bottom, each row
+     * left-to-right. The next-focus links, the arrow routing and the scroll-following all
+     * live in {@link FocusGrid}, which also keeps a stack of grids so an overlay can hand
+     * navigation back to whatever opened it.
+     */
+    private void applyDpadRows(List<List<View>> rows) {
+        focusGrid.apply(rows);
+    }
+
+    /** Moves D-pad focus across the active grid. */
+    private boolean handleDpadChain(KeyEvent event) {
+        return focusGrid.handleKey(event, getCurrentFocus());
+    }
+
+    private Button kindToggleButton(String kind, String label, final String[] selectedKind, final TextView hint) {
+        boolean isSelected = kind.equals(selectedKind[0]);
+        Button button = new Button(this);
+        button.setTextSize(ssp(16));
+        button.setAllCaps(false);
+        button.setIncludeFontPadding(false);
+        button.setGravity(Gravity.CENTER);
+        button.setMinWidth(0);
+        button.setMinHeight(0);
+        button.setMinimumWidth(0);
+        button.setMinimumHeight(0);
+        button.setBackgroundTintList(null);
+        button.setStateListAnimator(null);
+        button.setClipToOutline(true);
+        button.setFocusable(true);
+        button.setFocusableInTouchMode(false);
+        applyKindToggleStyle(button, label, isSelected);
+        button.setOnFocusChangeListener((focusedView, hasFocus) -> {
+            animateFocusScale(focusedView, hasFocus);
+            boolean selected = kind.equals(selectedKind[0]);
+            button.setTextColor(hasFocus ? COLOR_FOCUS : (selected ? COLOR_TEXT : COLOR_MUTED));
+            focusedView.setBackground(rounded(
+                    hasFocus ? COLOR_FOCUS_SOFT : (selected ? COLOR_FOCUS_SOFT : COLOR_SURFACE),
+                    hasFocus || selected ? COLOR_FOCUS : COLOR_BORDER,
+                    hasFocus || selected ? dp(2) : dp(1), dp(10)));
+            focusedView.setElevation(0);
+        });
+        button.setOnClickListener(view -> {
+            selectedKind[0] = kind;
+            for (Map.Entry<String, Button> entry : kindToggleButtons.entrySet()) {
+                applyKindToggleStyle(entry.getValue(), kindLabel(entry.getKey()),
+                        entry.getKey().equals(selectedKind[0]));
+            }
+            hint.setText(kindHint(selectedKind[0]));
+            updateSetupKindUi();
+            rebuildSetupDpadGrid();
+            button.requestFocus();
+        });
+        kindToggleButtons.put(kind, button);
+        return button;
+    }
+
+    private static String kindLabel(String kind) {
+        if (kind.equals("webdav")) {
+            return "WebDAV";
+        }
+        if (kind.equals("smb")) {
+            return "SMB";
+        }
+        return "本地目录";
+    }
+
+    private static String kindHint(String kind) {
+        if (kind.equals("smb")) {
+            return "SMB：可从下方局域网扫描结果中点选，或手动填写 smb://主机 形式的地址后点击“登录”，再选择要挂载的共享目录。";
+        }
+        if (kind.equals("webdav")) {
+            return "WebDAV：可从下方局域网扫描结果中点选，或手动填写 https://nas:5006 形式的地址后点击“登录”，再选择要挂载的目录。";
+        }
+        return "本地目录：点击“选择本地目录”，在文件夹管理器中浏览并选择影片目录。";
+    }
+
+    private void applyKindToggleStyle(Button button, String label, boolean selected) {
+        button.setText((selected ? "✓ " : "") + label);
+        button.setTextColor(selected ? COLOR_TEXT : COLOR_MUTED);
+        button.setBackground(rounded(
+                selected ? COLOR_FOCUS_SOFT : COLOR_SURFACE,
+                selected ? COLOR_FOCUS : COLOR_BORDER,
+                selected ? dp(2) : dp(1), dp(10)));
+    }
+
+
+    // ---- setup screen helpers: immersive, LAN scan, focus grid, overlays ----
+
+    private void applyImmersiveMode(boolean immersive) {
+        try {
+            if (Build.VERSION.SDK_INT >= 30) {
+                WindowInsetsController controller = getWindow().getInsetsController();
+                if (controller == null) {
+                    return;
+                }
+                int type = WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars();
+                if (immersive) {
+                    controller.hide(type);
+                    controller.setSystemBarsBehavior(
+                            WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                } else {
+                    controller.show(type);
+                    controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_DEFAULT);
+                }
+            } else {
+                int flags = immersive
+                        ? (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                                | View.SYSTEM_UI_FLAG_FULLSCREEN
+                                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION)
+                        : View.SYSTEM_UI_FLAG_VISIBLE;
+                getWindow().getDecorView().setSystemUiVisibility(flags);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Toggles the kind-specific action block (local folder picker vs address + login). */
+    private void updateSetupKindUi() {
+        boolean local = selectedKind[0].equals("local");
+        setupPickLocalBtn.setVisibility(local ? View.VISIBLE : View.GONE);
+        setupAddressInput.setVisibility(local ? View.GONE : View.VISIBLE);
+        setupLoginBtn.setVisibility(local ? View.GONE : View.VISIBLE);
+        setupPhoneInputBtn.setVisibility(local ? View.GONE : View.VISIBLE);
+        setupAddressInput.setHint(selectedKind[0].equals("smb")
+                ? "SMB 地址，例如 smb://192.168.0.10 或 smb://192.168.0.10/video"
+                : "WebDAV 地址，例如 https://192.168.0.10:5006 或 https://nas:5006/webdav");
+        setupLoginBtn.setText(selectedKind[0].equals("smb") ? "SMB 登录" : "WebDAV 登录");
+    }
+
+    /** Rebuilds the D-pad grid for the setup screen from the currently visible controls. */
+    private void rebuildSetupDpadGrid() {
+        List<List<View>> rows = new ArrayList<>();
+        rows.add(Arrays.asList(setupWebDavBtn, setupSmbBtn, setupLocalBtn));
+        for (View button : savedConnectionButtons) {
+            rows.add(Collections.singletonList(button));
+        }
+        if (selectedKind[0].equals("local")) {
+            rows.add(Collections.singletonList(setupPickLocalBtn));
+        } else {
+            rows.add(Collections.singletonList(setupAddressInput));
+            rows.add(Collections.singletonList(setupLoginBtn));
+            rows.add(Collections.singletonList(setupPhoneInputBtn));
+        }
+        rows.add(Collections.singletonList(setupRescanLanBtn));
+        for (View button : lanDeviceButtons) {
+            rows.add(Collections.singletonList(button));
+        }
+        rows.add(Arrays.asList(setupEnterBtn, setupRescanBtn, setupScrapeBtn));
+        applyDpadRows(rows);
+    }
+
+    private void startLanScan() {
+        synchronized (lanLock) {
+            lanDiscovering = true;
+            lanDevices.clear();
+            lanDeviceButtons.clear();
+        }
+        if (lanListContainer != null) {
+            lanListContainer.removeAllViews();
+        }
+        if (lanStatus != null) {
+            lanStatus.setText("正在扫描局域网中的 WebDAV / SMB 设备...");
+        }
+        LanDiscovery.cancel(lanScanToken);
+        final int[] tokenRef = new int[1];
+        LanDiscovery.Listener listener = new LanDiscovery.Listener() {
+            @Override
+            public void onDevice(LanDiscovery.LanDevice device) {
+                main.post(() -> {
+                    if (screen != Screen.SETUP || lanScanToken != tokenRef[0]) {
+                        return;
+                    }
+                    addLanDeviceButton(device);
+                });
+            }
+
+            @Override
+            public void onDone(List<LanDiscovery.LanDevice> devices) {
+                main.post(() -> {
+                    if (screen != Screen.SETUP || lanScanToken != tokenRef[0]) {
+                        return;
+                    }
+                    lanDiscovering = false;
+                    if (lanStatus != null) {
+                        lanStatus.setText(devices.isEmpty()
+                                ? "未扫描到 WebDAV / SMB 设备，可手动填写地址后登录。"
+                                : "扫描完成，发现 " + devices.size() + " 个设备，点选后登录。");
+                    }
+                    rebuildSetupDpadGrid();
+                });
+            }
+        };
+        tokenRef[0] = LanDiscovery.start(this, lanProbeExecutor, listener);
+        lanScanToken = tokenRef[0];
+    }
+
+    private void addLanDeviceButton(LanDiscovery.LanDevice device) {
+        synchronized (lanLock) {
+            lanDevices.add(device);
+        }
+        SavedConnections.Entry saved = savedConnections == null
+                ? null : savedConnections.find(device.kind, device.url);
+        String deviceDetail = saved == null
+                ? (saved == null && "webdav".equals(device.kind)
+                        ? UrlLabels.displayPath(device.url) : device.url)
+                : (saved.primaryPath().isEmpty() ? saved.title() : saved.detail());
+        Button button = listRowButton(device.label(), deviceDetail);
+        button.setOnClickListener(view -> connectDiscoveredDevice(device));
+        lanListContainer.addView(button, listItemParams());
+        lanDeviceButtons.add(button);
+        rebuildSetupDpadGrid();
+    }
+
+    private LinearLayout.LayoutParams listItemParams() {
+        return widgets.listRowParams();
+    }
+
+    /** A list row with a title and a quieter second line underneath it. */
+    private Button listRowButton(String title, String detail) {
+        return widgets.listRow(title, detail);
+    }
+
+    private static CharSequence stackedLabel(String title, String detail) {
+        return Widgets.stacked(title, detail);
+    }
+
+    /** Renders the "已保存的连接" block; hidden while nothing has logged in successfully. */
+    private void renderSavedConnections() {
+        if (savedConnectionContainer == null || savedConnections == null) {
+            return;
+        }
+        rememberExistingSources();
+        List<SavedConnections.Entry> entries = savedConnections.all();
+        savedConnectionContainer.removeAllViews();
+        savedConnectionButtons.clear();
+        if (entries.isEmpty()) {
+            savedConnectionContainer.setVisibility(View.GONE);
+            return;
+        }
+        savedConnectionContainer.setVisibility(View.VISIBLE);
+        savedConnectionContainer.addView(text("已保存的连接（点选直接连接）", 15, Typeface.BOLD, COLOR_MUTED),
+                margin(matchWidth(), 0, 0, 0, sdp(6)));
+        for (SavedConnections.Entry entry : entries) {
+            Button button = listRowButton(entry.title(), entry.detail());
+            button.setOnClickListener(view -> connectSavedConnection(entry));
+            savedConnectionContainer.addView(button, listItemParams());
+            savedConnectionButtons.add(button);
+        }
+    }
+
+    /** Connections saved by earlier builds become one-tap rows the first time setup renders. */
+    private void rememberExistingSources() {
+        for (LocalEngine.Source source : api.engine().sources()) {
+            if (!"webdav".equals(source.kind) && !"smb".equals(source.kind)) {
+                continue;
+            }
+            if (savedConnections.find(source.kind, source.path) == null) {
+                savedConnections.recordMount(source.kind, source.path,
+                        source.name, source.username, source.password);
+            }
+        }
+    }
+
+    /** Reconnect a saved server; jump straight to the folder that was mounted last time. */
+    private void connectSavedConnection(SavedConnections.Entry entry) {
+        String path = entry.primaryPath();
+        setupStatusView.setText("正在连接 " + entry.title() + "...");
+        if (!path.isEmpty()) {
+            mountMediaSource(entry.kind, path, entry.username, entry.password, entry.label);
+            return;
+        }
+        openLoginDialog(entry.kind, entry.hostKey, entry.username, entry.password, entry.label);
+    }
+
+    /** LAN scan row: reuse stored credentials, and skip the picker when the folder is known. */
+    private void connectDiscoveredDevice(LanDiscovery.LanDevice device) {
+        SavedConnections.Entry saved = savedConnections == null
+                ? null : savedConnections.find(device.kind, device.url);
+        if (saved != null && !saved.primaryPath().isEmpty()) {
+            mountMediaSource(device.kind, saved.primaryPath(),
+                    saved.username, saved.password, device.label());
+            return;
+        }
+        openLoginDialog(device.kind, device.url,
+                saved == null ? "" : saved.username,
+                saved == null ? "" : saved.password,
+                device.label());
+    }
+
+    // ---- network login dialog ----
+
+    private void openLoginDialog(String kind, String address, String username, String password,
+                                 String deviceTitle) {
+        if (loginOverlay != null) {
+            return;
+        }
+        isNetworkLoginOpen = true;
+        loginDialogKind = kind;
+        loginDialogLabel = deviceTitle == null ? "" : deviceTitle;
+
+        String kindLabel = "smb".equals(kind) ? "SMB" : "WebDAV";
+        SavedConnections.Entry remembered = savedConnections == null
+                ? null : savedConnections.find(kind, address);
+        String initialUser = username == null || username.isEmpty()
+                ? (remembered == null ? "" : remembered.username) : username;
+        String initialPass = password == null || password.isEmpty()
+                ? (remembered == null ? "" : remembered.password) : password;
+        String prefix = deviceTitle == null || deviceTitle.isEmpty() ? "" : deviceTitle + "：";
+
+        Overlays.Options options = new Overlays.Options();
+        options.title = "登录 " + kindLabel;
+        options.subtitle = remembered == null
+                ? prefix + "输入账号密码后登录，登录成功后再选择要挂载的目录。"
+                : prefix + "已保存这台服务器的账号，直接点“登录”即可；需要换账号时再修改。";
+        options.widthDp = 560;
+        options.restoreFocus = getCurrentFocus();
+        Overlays.Overlay overlay = overlays.open(options);
+        overlay.onClose = () -> {
+            if (loginOverlay == overlay) {
+                loginOverlay = null;
+                isNetworkLoginOpen = false;
+            }
+        };
+        loginOverlay = overlay;
+        LinearLayout panel = loginOverlay.body;
+
+        loginAddress = input("smb".equals(kind)
+                ? "SMB 地址，例如 smb://192.168.0.10"
+                : "WebDAV 地址，例如 https://192.168.0.10:5006", address);
+        panel.addView(loginAddress, margin(matchWidth(), 0, 0, 0, sdp(4)));
+        loginUser = input("用户名（匿名访问可留空）", initialUser);
+        panel.addView(loginUser, margin(matchWidth(), 0, 0, 0, sdp(4)));
+        loginPass = input("密码（匿名访问可留空）", initialPass);
+        loginPass.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        panel.addView(loginPass, matchWidth());
+
+        loginStatus = loginOverlay.statusLine();
+
+        Button loginPhoneInput = button("手机输入");
+        loginPhoneInput.setOnClickListener(view -> openPhoneInputOverlay(
+                "登录 " + ("smb".equals(loginDialogKind) ? "SMB" : "WebDAV"),
+                "只填需要改的项，留空的项不会被改动。",
+                Arrays.asList(
+                        boundField("address", "媒体源地址", () -> loginAddress, false),
+                        boundField("username", "用户名（匿名可留空）", () -> loginUser, false),
+                        boundField("password", "密码（匿名可留空）", () -> loginPass, true)),
+                false));
+        loginCancelButton = button("取消");
+        loginCancelButton.setOnClickListener(view -> closeLoginDialog());
+        loginButton = button("登录");
+        loginButton.setOnClickListener(view -> runLogin());
+        overlays.footer(panel, loginCancelButton, loginPhoneInput, loginButton);
+
+        loginOverlay.focus(Arrays.asList(
+                Collections.singletonList(loginAddress),
+                Collections.singletonList(loginUser),
+                Collections.singletonList(loginPass),
+                Arrays.asList(loginCancelButton, loginPhoneInput, loginButton)), loginButton);
+    }
+
+    private void closeLoginDialog() {
+        if (loginOverlay == null) {
+            return;
+        }
+        Overlays.Overlay closing = loginOverlay;
+        loginOverlay = null;
+        isNetworkLoginOpen = false;
+        loginRunning = false;
+        loginAddress = null;
+        loginUser = null;
+        loginPass = null;
+        loginStatus = null;
+        loginButton = null;
+        loginCancelButton = null;
+        loginDialogLabel = "";
+        closing.close();
+    }
+
+    private void runLogin() {
+        if (loginRunning) {
+            return;
+        }
+        String kind = loginDialogKind;
+        String address = loginAddress.getText().toString().trim();
+        if (address.isEmpty()) {
+            loginStatus.setText("请填写地址。");
+            return;
+        }
+        final String username = loginUser.getText().toString().trim();
+        final String password = loginPass.getText().toString();
+        loginRunning = true;
+        loginStatus.setText("正在登录...");
+        runAsync(
+                () -> {
+                    if (kind.equals("smb")) {
+                        SmbClient client = new SmbClient(address, username, password);
+                        List<BrowseEntry> shares = client.listShares(address);
+                        if (shares.isEmpty()) {
+                            throw new IOException("连接成功，但该服务器下没有可见的共享。");
+                        }
+                        return SmbClient.normalize(address);
+                    }
+                    return probeWebDavRoot(address, new WebDavClient.Credential(username, password));
+                },
+                resolved -> {
+                    loginRunning = false;
+                    if (!isNetworkLoginOpen) {
+                        return;
+                    }
+                    String resolvedRoot = (String) resolved;
+                    if (savedConnections != null) {
+                        // The credentials worked: remember them so the next time is one key press.
+                        savedConnections.recordLogin(kind, resolvedRoot, loginDialogLabel, username, password);
+                    }
+                    closeLoginDialog();
+                    openFolderBrowser(kind, resolvedRoot, resolvedRoot, username, password);
+                    renderSavedConnections();
+                },
+                error -> {
+                    loginRunning = false;
+                    if (loginStatus != null && isNetworkLoginOpen) {
+                        loginStatus.setText("登录失败：" + friendlyLoginError(error));
                     }
                 });
     }
 
-    private String discoverServerUrl() throws Exception {
-        Set<String> candidates = new LinkedHashSet<>();
-        Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
-        while (interfaces != null && interfaces.hasMoreElements()) {
-            NetworkInterface networkInterface = interfaces.nextElement();
-            if (!networkInterface.isUp() || networkInterface.isLoopback()) {
-                continue;
-            }
-
-            for (InterfaceAddress interfaceAddress : networkInterface.getInterfaceAddresses()) {
-                InetAddress address = interfaceAddress.getAddress();
-                if (!(address instanceof Inet4Address) || address.isLoopbackAddress() || !isLanIPv4(address)) {
-                    continue;
-                }
-
-                byte[] bytes = address.getAddress();
-                int prefixLength = interfaceAddress.getNetworkPrefixLength();
-                if (prefixLength < 0 || prefixLength > 32) {
-                    prefixLength = 24;
-                }
-                long ipValue = ((long) (bytes[0] & 0xff) << 24)
-                        | ((long) (bytes[1] & 0xff) << 16)
-                        | ((long) (bytes[2] & 0xff) << 8)
-                        | (long) (bytes[3] & 0xff);
-                long mask = prefixLength == 0 ? 0 : (0xffffffffL << (32 - prefixLength)) & 0xffffffffL;
-                long network = ipValue & mask;
-                long broadcast = network | (~mask & 0xffffffffL);
-                long hostCount = broadcast > network ? broadcast - network - 1 : 0;
-                if (hostCount > 0 && hostCount <= 1022) {
-                    for (long value = network + 1; value < broadcast; value++) {
-                        candidates.add(formatIPv4(value));
-                    }
-                } else {
-                    long local24 = ipValue & 0xffffff00L;
-                    for (int host = 1; host <= 254; host++) {
-                        candidates.add(formatIPv4(local24 | host));
-                    }
-                }
+    /**
+     * Probes candidate WebDAV roots (the entered url plus common path suffixes
+     * when it is a bare authority) and returns the first that answers PROPFIND.
+     */
+    private String probeWebDavRoot(String address, WebDavClient.Credential credential) throws IOException {
+        String base = WebDavClient.normalizeRoot(address);
+        List<String> candidates = new ArrayList<>();
+        candidates.add(base);
+        String authority = base.replaceFirst("^https?://", "");
+        if (!authority.contains("/")) {
+            for (String path : new String[]{"/webdav", "/dav", "/remote.php/dav/files"}) {
+                candidates.add(base + path);
             }
         }
-
-        if (candidates.isEmpty()) {
-            return "";
-        }
-
-        ExecutorService scanner = Executors.newFixedThreadPool(Math.min(32, candidates.size()));
-        ExecutorCompletionService<String> completion = new ExecutorCompletionService<>(scanner);
-        ArrayList<Future<String>> futures = new ArrayList<>();
-        for (String host : candidates) {
-            futures.add(completion.submit(() -> probeServer(host)));
-        }
-
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
-        try {
-            for (int remaining = futures.size(); remaining > 0; remaining--) {
-                long waitNanos = deadline - System.nanoTime();
-                if (waitNanos <= 0) {
-                    break;
-                }
-
-                Future<String> future = completion.poll(waitNanos, TimeUnit.NANOSECONDS);
-                if (future == null) {
-                    break;
-                }
-
-                String result = future.get();
-                if (result != null && !result.isEmpty()) {
-                    return result;
-                }
+        IOException last = null;
+        for (String url : candidates) {
+            try {
+                new WebDavClient(url, credential).list(url);
+                return url;
+            } catch (IOException error) {
+                last = error;
             }
-        } finally {
-            for (Future<String> future : futures) {
-                future.cancel(true);
-            }
-            scanner.shutdownNow();
         }
-
-        return "";
+        throw last == null ? new IOException("无法连接 WebDAV 服务。") : last;
     }
 
-    private String probeServer(String host) {
-        String url = "http://" + host + ":" + DOCKER_SERVER_PORT;
-        HttpURLConnection connection = null;
-        try {
-            connection = (HttpURLConnection) new URL(url + "/api/auth/status").openConnection();
-            connection.setInstanceFollowRedirects(true);
-            connection.setConnectTimeout(1000);
-            connection.setReadTimeout(2500);
-            connection.setRequestProperty("Accept", "application/json");
-            connection.setRequestProperty("User-Agent", "OmniPlay-Android/1.5");
-            int status = connection.getResponseCode();
-            if (status >= 200 && status < 300) {
-                String body = readRemoteText(connection.getInputStream()).toLowerCase(Locale.ROOT);
-                if (body.contains("\"issetuprequired\"")
-                        || body.contains("\"isauthenticated\"")
-                        || body.contains("\"service\":\"omniplay.server\"")) {
-                    return url;
-                }
-            }
-        } catch (Exception ignored) {
-        } finally {
-            if (connection != null) {
-                connection.disconnect();
-            }
+    private static String friendlyLoginError(Throwable error) {
+        String message = error.getMessage() == null || error.getMessage().isEmpty()
+                ? CrashLog.summarize(error) : error.getMessage();
+        // Linkage failures name a class, which is useless to a user; keep the reason short.
+        if (error instanceof LinkageError || error instanceof VirtualMachineError) {
+            return CrashLog.summarize(error);
         }
-        return "";
+        if (message.contains("401") || message.contains("403")) {
+            return "认证失败，请检查用户名和密码（或留空尝试匿名访问）。";
+        }
+        if (message.contains("404") || message.contains("405") || message.contains("501")) {
+            return "该地址下没有可用的 WebDAV 入口，请检查地址（例如是否需要 /webdav 路径）。";
+        }
+        if (message.toLowerCase(Locale.ROOT).contains("unknownhost")) {
+            return "无法解析该地址。";
+        }
+        if (message.toLowerCase(Locale.ROOT).contains("ssl")
+                || message.toLowerCase(Locale.ROOT).contains("certificate")
+                || message.toLowerCase(Locale.ROOT).contains("handshake")) {
+            return "HTTPS 证书不可信，可改用 http 端口（例如 5005）重试。";
+        }
+        if (message.toUpperCase(Locale.ROOT).contains("LOGON_FAILURE")
+                || message.toUpperCase(Locale.ROOT).contains("BAD_NETWORK_NAME")
+                || message.toLowerCase(Locale.ROOT).contains("logon failure")
+                || message.toLowerCase(Locale.ROOT).contains("bad password")
+                || message.toLowerCase(Locale.ROOT).contains("access denied")) {
+            return "认证失败，请检查用户名和密码（或留空尝试匿名访问）。";
+        }
+        if (message.contains("refused") || message.toLowerCase(Locale.ROOT).contains("timeout")
+                || message.toLowerCase(Locale.ROOT).contains("timed out")) {
+            return "无法连接到服务器，请检查网络。";
+        }
+        return message;
     }
 
-    private static boolean isLanIPv4(InetAddress address) {
-        if (!(address instanceof Inet4Address)) {
+    // ---- folder browser (local / webdav / smb share picker) ----
+
+    private void openLocalFolderPicker() {
+        File start = Environment.getExternalStorageDirectory();
+        if (start == null || !start.isDirectory()) {
+            File fallback = new File("/storage/emulated/0");
+            start = fallback.isDirectory() ? fallback : new File(Environment.getDataDirectory(), "media");
+        }
+        openFolderBrowser("local", "/", start.getAbsolutePath(), "", "");
+    }
+
+    private void openFolderBrowser(String kind, String rootUrl, String current, String username, String password) {
+        closeLoginDialog();
+        if (browserOverlay != null) {
+            return;
+        }
+        isFolderBrowserOpen = true;
+        browserKind = kind;
+        browserRoot = rootUrl;
+        browserCurrent = current;
+        browserUser = username == null ? "" : username;
+        browserPass = password == null ? "" : password;
+        browserItems.clear();
+        browserItemButtons.clear();
+
+        Overlays.Options options = new Overlays.Options();
+        options.title = "选择媒体目录";
+        options.widthDp = 720;
+        options.scrollable = false;
+        options.restoreFocus = screen == Screen.SETUP ? getCurrentFocus() : null;
+        Overlays.Overlay overlay = overlays.open(options);
+        overlay.onClose = () -> {
+            if (browserOverlay == overlay) {
+                browserOverlay = null;
+                isFolderBrowserOpen = false;
+            }
+        };
+        browserOverlay = overlay;
+        LinearLayout panel = browserOverlay.body;
+
+        browserPathText = widgets.caption(displayPathForBrowser(current), COLOR_SUBTLE);
+        browserPathText.setMaxLines(2);
+        browserPathText.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        panel.addView(browserPathText, margin(matchWidth(), 0, 0, 0, sdp(10)));
+
+        ScrollView listScroll = new ScrollView(this);
+        listScroll.setBackground(rounded(COLOR_SURFACE_ALT, COLOR_BORDER, dp(1), dp(10)));
+        listScroll.setFillViewport(true);
+        listScroll.setClipChildren(false);
+        listScroll.setClipToPadding(false);
+        listScroll.setFocusable(false);
+        listScroll.setFocusableInTouchMode(false);
+        panel.addView(listScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, sdp(330)));
+        browserListContainer = new LinearLayout(this);
+        browserListContainer.setOrientation(LinearLayout.VERTICAL);
+        browserListContainer.setClipChildren(false);
+        browserListContainer.setClipToPadding(false);
+        listScroll.addView(browserListContainer, matchWidth());
+
+        browserMessage = widgets.caption(kind.equals("local") ? "" : "正在读取目录...", COLOR_SUBTLE);
+        panel.addView(browserMessage, margin(matchWidth(), 0, sdp(8), 0, sdp(4)));
+
+        browserMountButton = button("选择此目录");
+        browserMountButton.setOnClickListener(view -> confirmMediaSource());
+        browserBackButton = button("返回上级");
+        browserBackButton.setOnClickListener(view -> browserNavigateUp());
+        browserCancelButton = button("取消");
+        browserCancelButton.setOnClickListener(view -> closeFolderBrowser());
+        overlays.footer(panel, browserMountButton, browserBackButton, browserCancelButton);
+
+        loadBrowserEntries(browserCurrent);
+        browserOverlay.focus(browserFocusRows(), browserMountButton);
+    }
+
+    /**
+     * The action row first, then one row per folder; rebuilt whenever the list changes.
+     * <p>
+     * The action row sits under the list on screen but leads the D-pad order: a video folder
+     * routinely holds dozens of subfolders, and the remote has to reach 「选择此目录」 in one key
+     * press from the top rather than by walking the whole list. DOWN enters the folders, UP
+     * returns to the buttons.
+     */
+    private List<List<View>> browserFocusRows() {
+        List<List<View>> rows = new ArrayList<>();
+        if (browserMountButton != null) {
+            rows.add(Arrays.asList(browserMountButton, browserBackButton, browserCancelButton));
+        }
+        for (Button item : browserItemButtons) {
+            rows.add(Collections.singletonList(item));
+        }
+        return rows;
+    }
+
+    private void closeFolderBrowser() {
+        if (browserOverlay == null) {
+            return;
+        }
+        Overlays.Overlay closing = browserOverlay;
+        browserOverlay = null;
+        isFolderBrowserOpen = false;
+        browserKind = null;
+        browserRoot = null;
+        browserCurrent = null;
+        browserUser = "";
+        browserPass = "";
+        browserItems.clear();
+        browserItemButtons.clear();
+        browserListContainer = null;
+        browserPathText = null;
+        browserMessage = null;
+        browserMountButton = null;
+        browserBackButton = null;
+        browserCancelButton = null;
+        closing.close();
+    }
+
+    private void loadBrowserEntries(String url) {
+        if (!isFolderBrowserOpen || !url.equals(browserCurrent)) {
+            return;
+        }
+        String kind = browserKind;
+        String username = browserUser;
+        String password = browserPass;
+        runAsync(
+                () -> {
+                    List<BrowseEntry> entries = new ArrayList<>();
+                    if (kind.equals("local")) {
+                        File dir = new File(url);
+                        File[] children = dir.listFiles(File::isDirectory);
+                        if (children == null) {
+                            throw new IOException("该目录无法读取。");
+                        }
+                        for (File child : children) {
+                            String name = child.getName();
+                            if (name.startsWith(".") || name.startsWith("_")) {
+                                continue;
+                            }
+                            entries.add(new BrowseEntry(name, child.getAbsolutePath(), true));
+                        }
+                    } else if (kind.equals("webdav")) {
+                        WebDavClient client = new WebDavClient(url, new WebDavClient.Credential(username, password));
+                        for (WebDavClient.Entry entry : client.list(url)) {
+                            // The first PROPFIND response is the listed directory itself.
+                            if (!entry.isCollection || entry.name.isEmpty()
+                                    || sameDirectoryUrl(entry.href, url)) {
+                                continue;
+                            }
+                            entries.add(new BrowseEntry(entry.name, entry.href, true));
+                        }
+                    } else {
+                        SmbClient client = new SmbClient(url, username, password);
+                        List<BrowseEntry> children = isSmbShareLevel(url)
+                                ? client.listShares(url) : client.list(url);
+                        for (BrowseEntry entry : children) {
+                            if (entry.directory) {
+                                entries.add(entry);
+                            }
+                        }
+                    }
+                    Collections.sort(entries);
+                    return entries;
+                },
+                entries -> {
+                    if (!isFolderBrowserOpen || !url.equals(browserCurrent)) {
+                        return;
+                    }
+                    browserItems.clear();
+                    browserItems.addAll(entries);
+                    renderBrowserItems();
+                },
+                error -> {
+                    if (!isFolderBrowserOpen || !url.equals(browserCurrent)) {
+                        return;
+                    }
+                    browserItems.clear();
+                    renderBrowserItems();
+                    browserMessage.setText("读取失败：" + friendlyLoginError(error));
+                });
+    }
+
+    private void renderBrowserItems() {
+        if (!isFolderBrowserOpen || browserListContainer == null) {
+            return;
+        }
+        browserListContainer.removeAllViews();
+        browserItemButtons.clear();
+        if (browserPathText != null) {
+            browserPathText.setText(displayPathForBrowser(browserCurrent));
+        }
+        boolean atRoot = browserIsAtRoot();
+        if (!atRoot) {
+            Button up = browserItemButton("..  返回上级目录");
+            up.setOnClickListener(view -> browserNavigateUp());
+            browserListContainer.addView(up, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, sdp(52)));
+            browserItemButtons.add(up);
+        }
+        for (BrowseEntry item : browserItems) {
+            Button button = browserItemButton(item.name);
+            button.setOnClickListener(view -> browserNavigateInto(item));
+            browserListContainer.addView(button, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, sdp(56)));
+            browserItemButtons.add(button);
+        }
+        if (browserItems.isEmpty()) {
+            String currentMessage = browserMessage.getText().toString();
+            browserMessage.setText(currentMessage.isEmpty() ? "（该目录下没有子目录）" : currentMessage);
+        } else if (browserMessage != null && !browserMessage.getText().toString().startsWith("读取失败")) {
+            browserMessage.setText("");
+        }
+        if (browserMountButton != null) {
+            browserMountButton.setEnabled(browserKind.equals("local") || !isSmbShareLevel(browserCurrent));
+        }
+        if (browserBackButton != null) {
+            browserBackButton.setEnabled(!atRoot);
+        }
+        rebuildBrowserDpadGrid();
+        View focused = getCurrentFocus();
+        if (focused == null || !isDescendant(browserOverlay.body, focused)) {
+            // The rows were just rebuilt, so the old focus is gone: land back on 「选择此目录」,
+            // which is where the panel opens too. A disabled button cannot take focus (an SMB
+            // share root still needs a subfolder), so fall back to the first folder / 取消.
+            View target = browserMountButton != null && browserMountButton.isEnabled()
+                    ? browserMountButton
+                    : (browserItemButtons.isEmpty() ? browserCancelButton : browserItemButtons.get(0));
+            target.requestFocus();
+            FocusGrid.scrollToVisible(target);
+        }
+    }
+
+    private Button browserItemButton(String label) {
+        Button row = widgets.listRow(label, null);
+        row.setMaxLines(1);
+        row.setEllipsize(TextUtils.TruncateAt.END);
+        return row;
+    }
+
+    private void rebuildBrowserDpadGrid() {
+        if (browserOverlay != null) {
+            browserOverlay.redeclare(browserFocusRows());
+        }
+    }
+
+    /** Enter a listed folder; the entry already carries the exact URL to list next. */
+    private void browserNavigateInto(BrowseEntry entry) {
+        String next = browserKind.equals("local") ? entry.url : trimTrailingSlash(entry.url);
+        if (next.isEmpty()) {
+            return;
+        }
+        browserCurrent = next;
+        loadBrowserEntries(next);
+    }
+
+    private void browserNavigateUp() {
+        String parent = browserParentOf(browserCurrent);
+        if (parent != null) {
+            browserCurrent = parent;
+            loadBrowserEntries(parent);
+        }
+    }
+
+    private String browserParentOf(String url) {
+        if (browserKind.equals("local")) {
+            File parent = new File(url).getParentFile();
+            return parent == null ? null : parent.getAbsolutePath();
+        }
+        String trimmed = trimTrailingSlash(url);
+        if (browserKind.equals("webdav")) {
+            String root = trimTrailingSlash(browserRoot);
+            int schemeEnd = trimmed.indexOf("://");
+            int lastSlash = trimmed.lastIndexOf('/');
+            if (lastSlash <= schemeEnd + 2) {
+                return null;
+            }
+            String parent = trimmed.substring(0, lastSlash);
+            // The mounted root is the top of this picker; never walk above it.
+            return parent.startsWith(root) ? parent : root;
+        }
+        String normalized = SmbClient.normalize(url);
+        int schemeEnd = normalized.indexOf("://") + 3;
+        String[] segments = normalized.substring(schemeEnd).split("/");
+        if (segments.length <= 1) {
+            return null;
+        }
+        if (segments.length == 2) {
+            return "smb://" + segments[0];
+        }
+        return "smb://" + segments[0] + "/" + segments[1];
+    }
+
+    private boolean browserIsAtRoot() {
+        if (browserKind.equals("local")) {
+            return browserParentOf(browserCurrent) == null
+                    || browserCurrent.equals("/");
+        }
+        if (browserKind.equals("webdav")) {
+            return trimTrailingSlash(browserCurrent).equals(trimTrailingSlash(browserRoot));
+        }
+        return isSmbShareLevel(browserCurrent);
+    }
+
+    private static String trimTrailingSlash(String value) {
+        String result = value == null ? "" : value;
+        while (result.length() > 1 && result.endsWith("/")) {
+            result = result.substring(0, result.length() - 1);
+        }
+        return result;
+    }
+
+    /** Directory urls can differ by trailing slash or percent-encoding; compare them anyway. */
+    private static boolean sameDirectoryUrl(String left, String right) {
+        String a = trimTrailingSlash(left);
+        String b = trimTrailingSlash(right);
+        if (a.equalsIgnoreCase(b)) {
+            return true;
+        }
+        return decodeForDisplay(a).equalsIgnoreCase(decodeForDisplay(b));
+    }
+
+    private static String decodeForDisplay(String value) {
+        return UrlLabels.displayPath(value);
+    }
+
+    /** 媒体源行上的路径：只有 WebDAV 存的是编码过的 URL，本地与 SMB 原样显示。 */
+    private static String displaySourcePath(String kind, String path) {
+        return "webdav".equals(kind) ? UrlLabels.displayPath(path) : path;
+    }
+
+    /** 目录浏览器顶部那行路径：WebDAV 的 href 是编码过的，本地路径原样显示。 */
+    private static String displayPathForBrowser(String url) {
+        return url != null && url.startsWith("http") ? UrlLabels.displayPath(url) : url;
+    }
+
+    private static boolean isSmbShareLevel(String url) {
+        String normalized = SmbClient.normalize(url);
+        int schemeEnd = normalized.indexOf("://");
+        if (schemeEnd < 0) {
             return false;
         }
-        byte[] bytes = address.getAddress();
-        int first = bytes[0] & 0xff;
-        int second = bytes[1] & 0xff;
-        return address.isSiteLocalAddress()
-                || first == 100 && second >= 64 && second <= 127
-                || first == 169 && second == 254;
+        return !normalized.substring(schemeEnd + 3).contains("/");
     }
 
-    private static String formatIPv4(long value) {
-        return ((value >> 24) & 0xff) + "."
-                + ((value >> 16) & 0xff) + "."
-                + ((value >> 8) & 0xff) + "."
-                + (value & 0xff);
+    private void confirmMediaSource() {
+        String kind = browserKind;
+        String path = browserCurrent;
+        String username = browserUser;
+        String password = browserPass;
+        String label = loginDialogLabel;
+        closeFolderBrowser();
+        mountMediaSource(kind, path, username, password, label);
+    }
+
+    /** Save the source, remember it for next time, and start the scan. */
+    private void mountMediaSource(String kind, String path, String username, String password, String label) {
+        if (kind.equals("local") && !new File(path).isDirectory()) {
+            showSetup("本地目录不存在或不可读。");
+            return;
+        }
+        api.engine().saveSource(kind, "", path, username, password);
+        if (savedConnections != null && !kind.equals("local")) {
+            savedConnections.recordMount(kind, path, label, username, password);
+        }
+        showLoading("正在扫描媒体源");
+        runAsync(
+                () -> api.engine().scanAll(null),
+                report -> {
+                    if (report.success) {
+                        showHome();
+                    } else {
+                        showSetup("媒体源已保存，但扫描失败：" + report.message + " 可稍后在设置中重新扫描。");
+                    }
+                },
+                error -> showSetup("扫描失败：" + error.getMessage()));
     }
 
     private void showHome() {
         screen = Screen.HOME;
+        applyImmersiveMode(false);
         boolean returningFromDetail = currentDetail != null;
         currentDetail = null;
         selectedSeasonId = "";
         homeScrollY = 0;
-        restoreHomeScroll = false;
         destroyPlayer();
         boolean hasVisibleLibrary = !libraryItems.isEmpty();
         if (!hasVisibleLibrary) {
@@ -574,6 +1507,7 @@ public final class MainActivity extends Activity {
         if (!returningFromDetail || !hasVisibleLibrary) {
             refreshHomeLibrary(!hasVisibleLibrary);
         }
+        startStartupSync();
     }
 
     private void refreshHomeLibrary(boolean showErrorScreen) {
@@ -593,12 +1527,51 @@ public final class MainActivity extends Activity {
                 });
     }
 
+    /**
+     * Draws the library screen. The toolbar, status line and scroll container are built once
+     * and kept; sorting and searching only rebuild the rows below them, which is what
+     * lets the page keep its scroll offset, its focus and its already-loaded posters.
+     */
+    /**
+     * Tears every panel down before a screen takes the whole window, so no dialog can survive
+     * the view tree it was added to (and keep eating the back key from the new screen).
+     */
+    private void closeAllOverlays() {
+        settingsOverlay = null;
+        sourcesOverlay = null;
+        loginOverlay = null;
+        browserOverlay = null;
+        phoneInputOverlay = null;
+        textInputOverlay = null;
+        isSettingsOpen = false;
+        isSourcesOpen = false;
+        isNetworkLoginOpen = false;
+        isFolderBrowserOpen = false;
+        isPhoneInputOpen = false;
+        if (phoneInput != null) {
+            phoneInput.clearSession();
+        }
+        overlays.closeAll();
+        focusGrid.clear();
+    }
+
     private void renderHomeContent() {
         screen = Screen.HOME;
+        if (homeScrollView == null || homeScrollView.getParent() != root) {
+            buildHomeShell();
+        }
+        refreshHomeControls();
+        refreshHomeBody();
+    }
+
+    private void buildHomeShell() {
+        closeAllOverlays();
         root.removeAllViews();
         applyAppBackground();
 
         ScrollView scroll = new ScrollView(this);
+        scroll.setFocusable(false);
+        scroll.setFocusableInTouchMode(false);
         homeScrollView = scroll;
         scroll.setFillViewport(false);
         scroll.setClipChildren(false);
@@ -613,84 +1586,100 @@ public final class MainActivity extends Activity {
         page.setClipChildren(false);
         page.setClipToPadding(false);
         scroll.addView(page, matchWidth());
-
-        View firstFocusable = null;
-        List<Models.LibraryItem> continueItems = continueItems(libraryItems);
         int headerInset = homePosterVisualLeftInsetPx();
 
-        LinearLayout continueHeader = new LinearLayout(this);
-        continueHeader.setGravity(Gravity.CENTER_VERTICAL);
-        continueHeader.setClipChildren(false);
-        continueHeader.setClipToPadding(false);
-        continueHeader.setPadding(headerInset, 0, headerInset, 0);
-        page.addView(continueHeader, margin(matchWidth(), 0, continueItems.isEmpty() ? sdp(12) : 0, 0, sdp(12)));
-        TextView continueTitle = sectionTitle("继续播放");
-        continueTitle.setPadding(0, 0, 0, 0);
-        continueHeader.addView(continueTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Button settings = compactButton("设置");
-        continueHeader.addView(settings, new LinearLayout.LayoutParams(sdp(82), sdp(42)));
-        settings.setOnClickListener(view -> {
-            openSettingsOverlay();
-        });
+        LinearLayout toolbar = new LinearLayout(this);
+        toolbar.setGravity(Gravity.CENTER_VERTICAL);
+        toolbar.setClipChildren(false);
+        toolbar.setClipToPadding(false);
+        toolbar.setPadding(headerInset, 0, headerInset, 0);
+        page.addView(toolbar, margin(matchWidth(), 0, sdp(4), 0, sdp(14)));
+        TextView brand = widgets.text("觅影 OmniPlay", theme.ssp(Widgets.TEXT_TITLE), Typeface.BOLD, COLOR_TEXT);
+        toolbar.addView(brand, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        if (continueItems.isEmpty()) {
-            TextView emptyContinue = emptyText("暂无继续播放");
-            emptyContinue.setPadding(headerInset, 0, 0, sdp(20));
-            page.addView(emptyContinue);
-        } else {
-            GridLayout continueGrid = posterGrid();
-            page.addView(continueGrid, margin(matchWidth(), 0, 0, 0, sdp(14)));
-            for (Models.LibraryItem item : continueItems) {
-                View card = posterCard(item, true);
-                if (firstFocusable == null) {
-                    firstFocusable = card;
-                }
-                continueGrid.addView(card);
-            }
-        }
-
-        LinearLayout libraryHeader = new LinearLayout(this);
-        libraryHeader.setGravity(Gravity.CENTER_VERTICAL);
-        libraryHeader.setClipChildren(false);
-        libraryHeader.setClipToPadding(false);
-        libraryHeader.setPadding(headerInset, 0, headerInset, 0);
-        page.addView(libraryHeader, margin(matchWidth(), 0, continueItems.isEmpty() ? sdp(12) : 0, 0, sdp(10)));
-
-        TextView libraryTitle = sectionTitle("所有影视");
-        libraryTitle.setPadding(0, 0, 0, 0);
-        libraryHeader.addView(libraryTitle, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        Button search = compactButton("搜索");
-        libraryHeader.addView(search, margin(new LinearLayout.LayoutParams(sdp(78), sdp(42)), sdp(18), 0, 0, 0));
-        search.setOnClickListener(view -> {
+        homeSearchToggle = widgets.toolbarButton("搜索");
+        toolbar.addView(homeSearchToggle, new LinearLayout.LayoutParams(sdp(112), sdp(Widgets.HEIGHT_COMPACT)));
+        homeSearchToggle.setOnClickListener(view -> {
             isSearchOpen = !isSearchOpen;
-            renderHomeContentKeepingPosition();
+            if (!isSearchOpen) {
+                searchText = "";
+            }
+            refreshHomeControls();
+            refreshHomeBody();
+            if (isSearchOpen && homeSearchInput != null) {
+                homeSearchInput.requestFocus();
+            } else {
+                homeSearchToggle.requestFocus();
+            }
         });
 
-        Button sort = compactButton("排序");
-        libraryHeader.addView(sort, margin(new LinearLayout.LayoutParams(sdp(78), sdp(42)), sdp(9), 0, 0, 0));
-        sort.setOnClickListener(view -> {
+        homeSortToggle = widgets.toolbarButton("排序");
+        toolbar.addView(homeSortToggle, margin(new LinearLayout.LayoutParams(sdp(96), sdp(Widgets.HEIGHT_COMPACT)), sdp(9), 0, 0, 0));
+        homeSortToggle.setOnClickListener(view -> {
             isSortOpen = !isSortOpen;
-            renderHomeContentKeepingPosition();
+            refreshHomeControls();
+            homeSortToggle.requestFocus();
         });
 
-        Button direction = compactButton(sortDescending ? "降序" : "升序");
-        libraryHeader.addView(direction, margin(new LinearLayout.LayoutParams(sdp(78), sdp(42)), sdp(9), 0, 0, 0));
-        direction.setOnClickListener(view -> {
+        homeDirectionToggle = widgets.toolbarButton(sortDescending ? "降序" : "升序");
+        toolbar.addView(homeDirectionToggle, margin(new LinearLayout.LayoutParams(sdp(96), sdp(Widgets.HEIGHT_COMPACT)), sdp(9), 0, 0, 0));
+        homeDirectionToggle.setOnClickListener(view -> {
             sortDescending = !sortDescending;
-            renderHomeContentKeepingPosition();
+            homeDirectionToggle.setText(sortDescending ? "降序" : "升序");
+            refreshHomeBody();
         });
 
-        EditText searchInput = null;
+        homeSourcesToggle = widgets.toolbarButton("媒体源");
+        toolbar.addView(homeSourcesToggle, margin(new LinearLayout.LayoutParams(sdp(104), sdp(Widgets.HEIGHT_COMPACT)), sdp(9), 0, 0, 0));
+        homeSourcesToggle.setOnClickListener(view -> openSourcesOverlay());
+
+        homeSettingsToggle = widgets.toolbarButton("设置");
+        toolbar.addView(homeSettingsToggle, margin(new LinearLayout.LayoutParams(sdp(96), sdp(Widgets.HEIGHT_COMPACT)), sdp(9), 0, 0, 0));
+        homeSettingsToggle.setOnClickListener(view -> openSettingsOverlay());
+
+        homeStatusView = widgets.caption("", COLOR_SUBTLE);
+        homeStatusView.setMaxLines(2);
+        homeStatusView.setEllipsize(TextUtils.TruncateAt.END);
+        homeStatusView.setPadding(headerInset, 0, headerInset, 0);
+        page.addView(homeStatusView, margin(matchWidth(), 0, 0, 0, sdp(8)));
+        homeStatusView.setVisibility(View.GONE);
+        refreshHomeStatusText();
+
+        homeControls = new LinearLayout(this);
+        homeControls.setOrientation(LinearLayout.VERTICAL);
+        homeControls.setClipChildren(false);
+        homeControls.setClipToPadding(false);
+        page.addView(homeControls, matchWidth());
+
+        homeBody = new LinearLayout(this);
+        homeBody.setOrientation(LinearLayout.VERTICAL);
+        homeBody.setClipChildren(false);
+        homeBody.setClipToPadding(false);
+        page.addView(homeBody, matchWidth());
+
+        // 冷启动后画面里一个焦点都没有，遥控器第一下会被「建立焦点」吃掉；这里主动落一个。
+        root.post(this::requestFirstHomeFocus);
+    }
+
+    /** Sort / search rows: the only part of the header that ever changes. */
+    private void refreshHomeControls() {
+        if (homeControls == null) {
+            return;
+        }
+        homeSearchInput = null;
+        homeControls.removeAllViews();
+        int headerInset = homePosterVisualLeftInsetPx();
+
         if (isSearchOpen) {
             LinearLayout searchRow = new LinearLayout(this);
             searchRow.setGravity(Gravity.CENTER_VERTICAL);
             searchRow.setClipChildren(false);
             searchRow.setClipToPadding(false);
-            page.addView(searchRow, margin(matchWidth(), 0, 0, 0, sdp(16)));
-            searchInput = input("搜索", searchText);
-            searchInput.setSelection(searchInput.getText().length());
-            searchInput.addTextChangedListener(new TextWatcher() {
+            searchRow.setPadding(headerInset, 0, headerInset, 0);
+            homeControls.addView(searchRow, margin(matchWidth(), 0, 0, 0, sdp(14)));
+            homeSearchInput = input("搜索", searchText);
+            homeSearchInput.setSelection(homeSearchInput.getText().length());
+            homeSearchInput.addTextChangedListener(new TextWatcher() {
                 @Override
                 public void beforeTextChanged(CharSequence value, int start, int count, int after) {
                 }
@@ -705,23 +1694,23 @@ public final class MainActivity extends Activity {
                     if (pendingSearchRender != null) {
                         main.removeCallbacks(pendingSearchRender);
                     }
+                    // Typing only re-runs the query; the field itself must not be rebuilt.
                     pendingSearchRender = () -> {
                         pendingSearchRender = null;
                         if (screen == Screen.HOME && isSearchOpen) {
-                            renderHomeContentKeepingPosition();
+                            refreshHomeBody();
                         }
                     };
                     main.postDelayed(pendingSearchRender, 220);
                 }
             });
-            searchRow.addView(searchInput, new LinearLayout.LayoutParams(0, sdp(58), 1f));
-
-            EditText finalSearchInput = searchInput;
-            Button apply = compactButton("确定");
+            searchRow.addView(homeSearchInput, new LinearLayout.LayoutParams(0, sdp(Widgets.HEIGHT_INPUT), 1f));
+            Button apply = widgets.toolbarButton("确定");
             searchRow.addView(apply, margin(new LinearLayout.LayoutParams(sdp(106), sdp(50)), sdp(14), sdp(4), 0, sdp(4)));
             apply.setOnClickListener(view -> {
-                searchText = finalSearchInput.getText().toString();
-                renderHomeContentKeepingPosition();
+                searchText = homeSearchInput.getText().toString();
+                refreshHomeBody();
+                homeSearchInput.requestFocus();
             });
         }
 
@@ -730,45 +1719,108 @@ public final class MainActivity extends Activity {
             sortRow.setGravity(Gravity.CENTER_VERTICAL);
             sortRow.setClipChildren(false);
             sortRow.setClipToPadding(false);
-            page.addView(sortRow, margin(matchWidth(), 0, 0, 0, sdp(18)));
+            sortRow.setPadding(headerInset, 0, headerInset, 0);
+            homeControls.addView(sortRow, margin(matchWidth(), 0, 0, 0, sdp(14)));
             addSortButton(sortRow, "名称", SortKey.TITLE);
             addSortButton(sortRow, "评分", SortKey.RATING);
             addSortButton(sortRow, "上映年份", SortKey.YEAR);
         }
 
-        List<Models.LibraryItem> displayedItems = displayedItems();
-        GridLayout grid = posterGrid();
-        page.addView(grid);
-        for (Models.LibraryItem item : displayedItems) {
-            View card = posterCard(item, false);
-            if (firstFocusable == null) {
-                firstFocusable = card;
-            }
-            grid.addView(card);
-        }
+    }
 
-        if (displayedItems.isEmpty()) {
-            page.addView(emptyText(libraryItems.isEmpty() ? "媒体库为空" : "没有匹配结果"));
+    /** Continue-watching rail and the poster wall: rebuilt whenever the list or the search term changes. */
+    private void refreshHomeBody() {
+        if (homeBody == null) {
+            return;
         }
+        int scrollY = homeScrollView == null ? 0 : homeScrollView.getScrollY();
+        String focusedItemId = focusedPosterItemId();
+        homeBody.removeAllViews();
+        homePosterViews.clear();
+        refreshHomeStatusText();
+        int headerInset = homePosterVisualLeftInsetPx();
+        List<Models.LibraryItem> continueItems = continueItems(libraryItems);
 
-        if (restoreHomeScroll) {
-            int targetScrollY = homeScrollY;
-            restoreHomeScroll = false;
-            main.post(() -> scroll.scrollTo(0, targetScrollY));
+        LinearLayout continueHeader = new LinearLayout(this);
+        continueHeader.setGravity(Gravity.CENTER_VERTICAL);
+        continueHeader.setClipChildren(false);
+        continueHeader.setClipToPadding(false);
+        continueHeader.setPadding(headerInset, 0, headerInset, 0);
+        homeBody.addView(continueHeader, margin(matchWidth(), 0, continueItems.isEmpty() ? sdp(12) : 0, 0, sdp(12)));
+        TextView continueTitle = sectionTitle("继续播放");
+        continueTitle.setPadding(0, 0, 0, 0);
+        continueHeader.addView(continueTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        if (continueItems.isEmpty()) {
+            continueHeader.setVisibility(View.GONE);
         } else {
-            if (searchInput != null && isSearchOpen) {
-                searchInput.requestFocus();
-            } else if (firstFocusable != null) {
-                firstFocusable.requestFocus();
-            } else {
-                search.requestFocus();
+            HorizontalScrollView continueScroll = new HorizontalScrollView(this);
+            continueScroll.setFocusable(false);
+            continueScroll.setFocusableInTouchMode(false);
+            continueScroll.setClipChildren(false);
+            continueScroll.setClipToPadding(false);
+            continueScroll.setHorizontalScrollBarEnabled(false);
+            continueScroll.setPadding(headerInset, 0, headerInset, 0);
+            homeBody.addView(continueScroll, margin(matchWidth(), 0, 0, 0, sdp(14)));
+            LinearLayout continueRow = new LinearLayout(this);
+            continueRow.setOrientation(LinearLayout.HORIZONTAL);
+            continueRow.setClipChildren(false);
+            continueRow.setClipToPadding(false);
+            continueScroll.addView(continueRow, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            int continueCardWidth = homePosterCardWidthPx();
+            for (Models.LibraryItem item : continueItems) {
+                View card = posterCard(item, true);
+                LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(continueCardWidth,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+                cardParams.setMargins(sdp(HOME_POSTER_CARD_MARGIN_DP), sdp(5),
+                        sdp(HOME_POSTER_CARD_MARGIN_DP), 0);
+                card.setLayoutParams(cardParams);
+                continueRow.addView(card);
             }
-            main.post(() -> scroll.scrollTo(0, 0));
         }
 
-        if (isSettingsOpen) {
-            renderSettingsOverlay();
+        LinearLayout libraryHeader = new LinearLayout(this);
+        libraryHeader.setGravity(Gravity.CENTER_VERTICAL);
+        libraryHeader.setClipChildren(false);
+        libraryHeader.setClipToPadding(false);
+        libraryHeader.setPadding(headerInset, 0, headerInset, 0);
+        homeBody.addView(libraryHeader, margin(matchWidth(), 0, continueItems.isEmpty() ? sdp(12) : 0, 0, sdp(10)));
+        TextView libraryTitle = sectionTitle("所有影视");
+        libraryTitle.setPadding(0, 0, 0, 0);
+        libraryHeader.addView(libraryTitle, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        libraryHeader.addView(widgets.caption(libraryItems.size() + " 部", COLOR_SUBTLE),
+                margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT), sdp(12), sdp(4), 0, 0));
+
+        List<Models.LibraryItem> items = displayedItems();
+        GridLayout grid = posterGrid();
+        homeBody.addView(grid);
+        for (Models.LibraryItem item : items) {
+            grid.addView(posterCard(item, false));
         }
+        if (items.isEmpty()) {
+            homeBody.addView(emptyText(libraryItems.isEmpty() ? "媒体库为空" : "没有匹配结果"));
+        }
+
+        if (homeScrollView != null) {
+            homeScrollView.scrollTo(0, scrollY);
+        }
+        restorePosterFocus(focusedItemId);
+    }
+
+    /** 重建之后焦点从名单里补回来，别让刷新把用户丢回页面顶上。 */
+    private void restorePosterFocus(String itemId) {
+        View focused = getCurrentFocus();
+        if (itemId == null || (focused != null && focused.isAttachedToWindow())) {
+            return;
+        }
+        List<PosterViews> holders = homePosterViews.get(itemId);
+        if (holders == null || holders.isEmpty()) {
+            return;
+        }
+        FocusGrid.grab(holders.get(0).card);
     }
 
     private void addSortButton(LinearLayout row, String label, SortKey key) {
@@ -777,197 +1829,373 @@ public final class MainActivity extends Activity {
         option.setOnClickListener(view -> {
             sortKey = key;
             isSortOpen = false;
-            renderHomeContentKeepingPosition();
+            refreshHomeControls();
+            refreshHomeBody();
+            homeSortToggle.requestFocus();
         });
     }
 
+    /** Kept for call sites that used the old full-page rebuild; the page now keeps its own offset. */
     private void renderHomeContentKeepingPosition() {
         if (homeScrollView != null) {
             homeScrollY = homeScrollView.getScrollY();
-            restoreHomeScroll = true;
         }
-        renderHomeContent();
+        refreshHomeControls();
+        refreshHomeBody();
+        if (homeScrollView != null) {
+            homeScrollView.scrollTo(0, homeScrollY);
+        }
+    }
+
+    /** Rows used when the page needs somewhere safe to put focus: the wall first, then the toolbar. */
+    private List<List<View>> homeFocusRows() {
+        List<List<View>> rows = new ArrayList<>();
+        List<View> cards = new ArrayList<>();
+        if (homeBody != null) {
+            collectFocusables(homeBody, cards);
+        }
+        if (!cards.isEmpty()) {
+            rows.add(cards);
+        }
+        if (homeSortToggle != null) {
+            rows.add(Arrays.asList(homeSearchToggle, homeSortToggle, homeDirectionToggle,
+                    homeSourcesToggle, homeSettingsToggle));
+        }
+        return rows;
+    }
+
+    private static void collectFocusables(View view, List<View> out) {
+        if (view == null || view.getVisibility() == View.INVISIBLE || view.getVisibility() == View.GONE) {
+            return;
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int index = 0; index < group.getChildCount(); index++) {
+                collectFocusables(group.getChildAt(index), out);
+            }
+            // Scroll containers are traversal wrappers, not controls: without this they become the
+            // view a panel opens on, which shows no focus ring at all.
+            if (group.isFocusable() && !(group instanceof ScrollView)
+                    && !(group instanceof HorizontalScrollView)) {
+                out.add(group);
+            }
+            return;
+        }
+        if (view.isFocusable()) {
+            out.add(view);
+        }
     }
 
     private void openSettingsOverlay() {
-        if (isSettingsOpen) {
+        if (settingsOverlay != null) {
             return;
         }
+        settingsRestoreFocus = getCurrentFocus();
         isSettingsOpen = true;
         renderSettingsOverlay();
     }
 
     private void closeSettingsOverlay() {
+        if (settingsOverlay == null) {
+            return;
+        }
+        Overlays.Overlay closing = settingsOverlay;
+        settingsOverlay = null;
         isSettingsOpen = false;
-        if (settingsPanel != null) {
-            root.removeView(settingsPanel);
-            settingsPanel = null;
-        }
-        settingsInitialFocus = null;
-        if (settingsDim != null) {
-            root.removeView(settingsDim);
-            settingsDim = null;
-        }
+        closing.close();
     }
 
     private void renderSettingsOverlay() {
-        if (settingsPanel != null || settingsDim != null) {
+        if (settingsOverlay != null) {
             return;
         }
-        FrameLayout dim = new FrameLayout(this);
-        dim.setBackgroundColor(Color.argb(76, 15, 23, 42));
-        dim.setFocusable(false);
-        root.addView(dim, match());
-        dim.setOnClickListener(view -> {
-            closeSettingsOverlay();
-        });
-        settingsDim = dim;
-
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(18), dp(18), dp(18), dp(18));
-        panel.setClipChildren(false);
-        panel.setClipToPadding(false);
-        panel.setBackground(rounded(COLOR_SURFACE, COLOR_BORDER, dp(2), dp(12)));
-        panel.setElevation(dp(18));
-        panel.setFocusable(true);
-        FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(dp(340), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.RIGHT);
-        panelParams.setMargins(0, dp(84), dp(44), 0);
-        root.addView(panel, panelParams);
-        settingsPanel = panel;
-
-        TextView title = text("设置", 24, Typeface.BOLD, COLOR_TEXT);
-        panel.addView(title, margin(matchWidth(), 0, 0, 0, dp(18)));
-
-        TextView version = text("版本 1.6", 14, Typeface.BOLD, COLOR_SUBTLE);
-        panel.addView(version, margin(matchWidth(), 0, 0, 0, dp(14)));
-
-        panel.addView(text("NAS 服务器", 14, Typeface.BOLD, COLOR_MUTED));
-        TextView server = text(api.serverUrl(), 13, Typeface.NORMAL, COLOR_SUBTLE);
-        server.setSingleLine(true);
-        server.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-        panel.addView(server, margin(matchWidth(), 0, dp(6), 0, dp(16)));
-
-        panel.addView(text("Lucky STUN 穿透地址", 14, Typeface.BOLD, COLOR_MUTED), margin(matchWidth(), 0, 0, 0, dp(8)));
-        panel.addView(text("管理地址", 12, Typeface.BOLD, COLOR_MUTED), margin(matchWidth(), 0, 0, 0, dp(3)));
-        EditText luckyUrl = input("例如 http://192.168.1.1:16601", api.luckyStunManagementUrl());
-        panel.addView(luckyUrl, margin(matchWidth(), 0, dp(8), 0, 0));
-        panel.addView(text("账号", 12, Typeface.BOLD, COLOR_MUTED), margin(matchWidth(), 0, 0, 0, dp(3)));
-        EditText luckyUsername = input("Lucky 管理账号", api.luckyStunUsername());
-        panel.addView(luckyUsername, margin(matchWidth(), 0, dp(8), 0, 0));
-        panel.addView(text("密码", 12, Typeface.BOLD, COLOR_MUTED), margin(matchWidth(), 0, 0, 0, dp(3)));
-        EditText luckyPassword = input("Lucky 管理密码", api.luckyStunPassword());
-        luckyPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        panel.addView(luckyPassword, margin(matchWidth(), 0, dp(8), 0, 0));
-        ArrayList<String> luckyRuleIds = new ArrayList<>();
-        ArrayList<String> luckyRuleNames = new ArrayList<>();
-        ArrayList<String> luckyRuleLabels = new ArrayList<>();
-        Spinner luckyRuleSpinner = new Spinner(this);
-        ArrayAdapter<String> luckyRuleAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, luckyRuleLabels);
-        luckyRuleAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        luckyRuleSpinner.setAdapter(luckyRuleAdapter);
-        panel.addView(luckyRuleSpinner, margin(matchWidth(), 0, dp(8), 0, 0));
-        TextView luckyRuleList = text("登录后将在此显示规则列表。", 11, Typeface.NORMAL, COLOR_SUBTLE);
-        luckyRuleList.setMaxLines(6);
-        luckyRuleList.setEllipsize(TextUtils.TruncateAt.END);
-        panel.addView(luckyRuleList, margin(matchWidth(), 0, dp(8), 0, 0));
-        CheckBox luckyAutoUpdate = new CheckBox(this);
-        luckyAutoUpdate.setText("定期自动更新 Lucky STUN 地址");
-        luckyAutoUpdate.setTextColor(COLOR_TEXT);
-        luckyAutoUpdate.setChecked(api.luckyStunAutoUpdate());
-        panel.addView(luckyAutoUpdate, margin(matchWidth(), 0, dp(4), 0, 0));
-        EditText luckyInterval = input("更新周期（分钟，至少 5）", String.valueOf(api.luckyStunUpdateIntervalMinutes()));
-        luckyInterval.setInputType(InputType.TYPE_CLASS_NUMBER);
-        panel.addView(luckyInterval, margin(matchWidth(), 0, dp(8), 0, 0));
-        Button luckyUpdate = compactButton("登录检测并更新");
-        panel.addView(luckyUpdate, margin(matchWidth(), 0, dp(4), 0, 0));
-        TextView luckyStatus = text("选择规则后点击按钮同步 Docker 地址。", 12, Typeface.NORMAL, COLOR_SUBTLE);
-        luckyStatus.setMaxLines(3);
-        luckyStatus.setEllipsize(TextUtils.TruncateAt.END);
-        panel.addView(luckyStatus, margin(matchWidth(), 0, dp(14), 0, 0));
-        luckyUpdate.setOnClickListener(view -> {
-            int selectedIndex = luckyRuleSpinner.getSelectedItemPosition();
-            String selectedId = selectedIndex >= 0 && selectedIndex < luckyRuleIds.size() ? luckyRuleIds.get(selectedIndex) : api.luckyStunRuleId();
-            String selectedName = selectedIndex >= 0 && selectedIndex < luckyRuleNames.size() ? luckyRuleNames.get(selectedIndex) : "";
-            int interval;
-            try {
-                interval = Math.max(5, Math.min(1440, Integer.parseInt(luckyInterval.getText().toString().trim())));
-            } catch (NumberFormatException error) {
-                interval = 30;
+        Overlays.Options options = new Overlays.Options();
+        options.title = "设置";
+        options.widthDp = 460;
+        options.sideSheet = true;
+        options.restoreFocus = settingsRestoreFocus;
+        Overlays.Overlay overlay = overlays.open(options);
+        overlay.onClose = () -> {
+            if (settingsOverlay == overlay) {
+                settingsOverlay = null;
+                isSettingsOpen = false;
             }
-            luckyUpdate.setEnabled(false);
-            luckyStatus.setText("正在登录并读取 Lucky STUN 规则...");
-            api.saveLuckyStunSettings(luckyUrl.getText().toString(), luckyUsername.getText().toString(), luckyPassword.getText().toString(), selectedId, selectedName, luckyAutoUpdate.isChecked(), interval);
-            runAsync(
-                    () -> api.refreshLuckyStun(luckyUrl.getText().toString(), luckyUsername.getText().toString(), luckyPassword.getText().toString(), selectedId, selectedName),
-                    result -> {
-                        luckyRuleIds.clear();
-                        luckyRuleNames.clear();
-                        luckyRuleLabels.clear();
-                        for (LuckyStunClient.Rule rule : result.rules) {
-                            luckyRuleIds.add(rule.id);
-                            luckyRuleNames.add(rule.name);
-                            luckyRuleLabels.add(rule.name + " · " + rule.address);
-                        }
-                        luckyRuleAdapter.notifyDataSetChanged();
-                        StringBuilder ruleSummary = new StringBuilder("已登录规则：\n");
-                        for (LuckyStunClient.Rule rule : result.rules) {
-                            ruleSummary.append("• ").append(rule.name).append("：").append(rule.address).append("\n");
-                        }
-                        luckyRuleList.setText(ruleSummary.toString().trim());
-                        if (result.selectedRule != null) {
-                            int index = luckyRuleIds.indexOf(result.selectedRule.id);
-                            if (index >= 0) {
-                                luckyRuleSpinner.setSelection(index);
-                            }
-                        }
-                        server.setText(api.serverUrl());
-                        luckyStatus.setText(result.message + "\n当前服务端：" + api.serverUrl());
-                        luckyUpdate.setEnabled(true);
-                    },
-                    error -> {
-                        luckyStatus.setText("Lucky STUN 更新失败：" + error.getMessage());
-                        luckyUpdate.setEnabled(true);
-                    });
+        };
+        settingsOverlay = overlay;
+        isSettingsOpen = true;
+        LinearLayout panel = settingsOverlay.body;
+        TvSettings prefs = api.engine().settings();
+        String versionName = "1.17";
+        try {
+            versionName = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception ignored) {
+        }
+        // 保存 / 验证的反馈共用一条只在有内容时占位的状态行，卡片高度不会因此跳动。
+        TextView settingsStatus = new Overlays.StatusText(this, COLOR_MUTED,
+                ssp(Widgets.TEXT_CAPTION), theme);
+        settingsStatus.setMaxLines(3);
+        settingsStatus.setEllipsize(TextUtils.TruncateAt.END);
+        panel.addView(settingsStatus, margin(matchWidth(), 0, sdp(4), 0, 0));
+
+        // ---------------------------------------------------------------- TMDB
+        panel.addView(widgets.sectionCaption("TMDB 刮削"), margin(matchWidth(), 0, 0, 0, 0));
+        LinearLayout tmdbCard = widgets.settingsCard();
+        panel.addView(tmdbCard, margin(matchWidth(), 0, 0, 0, 0));
+        EditText tmdbKeyInput = input("填写 API Key；留空则改用下面的反代地址",
+                api.engine().tmdb().apiKey());
+        widgets.addCardRow(tmdbCard, labelledRow("TMDB API Key", tmdbKeyInput));
+        EditText tmdbProxyInput = input("https://tmdb.example.com/tmdb0512，留空直连官方 API",
+                api.engine().tmdb().proxyUrl());
+        widgets.addCardRow(tmdbCard, labelledRow("反向代理地址（可选）", tmdbProxyInput));
+        Button saveTmdb = compactButton("保存配置");
+        Button verifyTmdb = compactButton("验证连接");
+        widgets.addCardRow(tmdbCard, widgets.cardButtonRow(saveTmdb, verifyTmdb));
+        Button tmdbPhoneInput = compactButton("用手机输入 TMDB 配置");
+        widgets.addCardRow(tmdbCard, tmdbPhoneInput);
+        panel.addView(widgets.caption("API Key 与 v4 Read Access Token 都能直接粘进来，自动识别；"
+                        + "反代只转发请求，钥匙仍要填。反代地址填根地址就行，/3 会自动补。",
+                        COLOR_SUBTLE), margin(matchWidth(), sdp(4), sdp(4), 0, sdp(2)));
+        saveTmdb.setOnClickListener(view -> {
+            api.engine().tmdb().setApiKey(tmdbKeyInput.getText().toString().trim());
+            api.engine().tmdb().setProxyUrl(tmdbProxyInput.getText().toString().trim());
+            settingsStatus.setText(api.engine().tmdb().isConfigured()
+                    ? api.engine().tmdbStatusMessage()
+                    : "请填写 API Key 或反代地址。");
+        });
+        tmdbPhoneInput.setOnClickListener(view -> openPhoneInputOverlay("填写 TMDB 配置",
+                "填入后请点“保存配置”。",
+                Arrays.asList(
+                        boundField("tmdb_key", "TMDB API Key / v4 Token", () -> tmdbKeyInput, false),
+                        boundField("tmdb_proxy", "反向代理地址（留空直连官方 API）",
+                                () -> tmdbProxyInput, false)),
+                true));
+        verifyTmdb.setOnClickListener(view -> {
+            settingsStatus.setText("正在检测 TMDB…");
+            runAsync(() -> api.engine().tmdb().checkConnectionDetailed().message,
+                    settingsStatus::setText,
+                    error -> settingsStatus.setText("检测失败：" + error.getMessage()));
         });
 
-        panel.addView(text("4K DV/HDR播放模式", 14, Typeface.BOLD, COLOR_MUTED), margin(matchWidth(), 0, 0, 0, dp(8)));
-        LinearLayout playbackModeRow = new LinearLayout(this);
-        playbackModeRow.setOrientation(LinearLayout.VERTICAL);
-        playbackModeRow.setClipChildren(false);
-        playbackModeRow.setClipToPadding(false);
-        panel.addView(playbackModeRow, margin(matchWidth(), 0, 0, 0, dp(8)));
-        Button compatibleSubtitle = settingsOptionButton("兼容字幕播放", !highPerformanceDirectPlayback);
-        compatibleSubtitle.setId(View.generateViewId());
-        playbackModeRow.addView(compatibleSubtitle, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)));
-        compatibleSubtitle.setOnClickListener(view -> update4kDvHdrPlaybackMode(false));
-        Button highPerformanceDirect = settingsOptionButton("高性能直出", highPerformanceDirectPlayback);
-        highPerformanceDirect.setId(View.generateViewId());
-        playbackModeRow.addView(highPerformanceDirect, margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)), 0, dp(8), 0, 0));
-        highPerformanceDirect.setOnClickListener(view -> update4kDvHdrPlaybackMode(true));
-        TextView playbackModeHint = text("兼容字幕播放模式字幕兼容性更好，但是资源要求更高，如果卡顿请切换至高性能直出模式。高性能直出模式资源要求低，但是可能无法直接烧录字幕，需要docker端开启字幕预缓存将字幕格式提前转为WebVTT格式并保存。", 12, Typeface.NORMAL, COLOR_SUBTLE);
-        playbackModeHint.setLineSpacing(dp(2), 1f);
-        panel.addView(playbackModeHint, margin(matchWidth(), 0, 0, 0, dp(18)));
+        // ---------------------------------------------------------------- 外观主题
+        panel.addView(widgets.sectionCaption("外观主题"), margin(matchWidth(), 0, 0, 0, 0));
+        LinearLayout themeCard = widgets.settingsCard();
+        panel.addView(themeCard, margin(matchWidth(), 0, 0, 0, 0));
+        List<Theme.Variant> variants = Theme.VARIANTS;
+        Button[] themePills = new Button[Math.max(1, (variants.size() + 1) / 2)];
+        for (int start = 0; start < variants.size(); start += 2) {
+            Button left = themePill(variants.get(start), prefs);
+            if (start == 0) {
+                themePills[0] = left;
+            }
+            Button right = start + 1 < variants.size()
+                    ? themePill(variants.get(start + 1), prefs) : spacerPill();
+            widgets.addCardRow(themeCard, widgets.cardButtonRow(left, right));
+        }
+        panel.addView(widgets.caption("浅色主题与 macOS 版一致；深色主题适合关灯观影，切换后立即生效。",
+                        COLOR_SUBTLE), margin(matchWidth(), sdp(4), sdp(4), 0, sdp(2)));
 
-        Button update = compactButton("软件更新");
-        update.setId(View.generateViewId());
-        panel.addView(update, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
-        TextView updateStatus = text("", 13, Typeface.BOLD, COLOR_SUBTLE);
-        panel.addView(updateStatus, margin(matchWidth(), 0, dp(10), 0, 0));
-        update.setOnClickListener(view -> startUpdateInstall(update, updateStatus));
+        // ---------------------------------------------------------------- 刮削与播放偏好
+        panel.addView(widgets.sectionCaption("刮削与播放偏好"), margin(matchWidth(), 0, 0, 0, 0));
+        LinearLayout preferenceCard = widgets.settingsCard();
+        panel.addView(preferenceCard, margin(matchWidth(), 0, 0, 0, 0));
+        Widgets.Segment scrapeLanguage = widgets.segment(
+                Arrays.asList("简体中文", "English"),
+                "en-US".equals(prefs.scrapeLanguage()) ? 1 : 0,
+                index -> prefs.setScrapeLanguage(index == 1 ? "en-US" : "zh-CN"));
+        widgets.addCardRow(preferenceCard, labelledRow("刮削语言", scrapeLanguage.view));
+        String[] audioOptions = {"smart", "zh", "en", "ja"};
+        Widgets.Segment audio = widgets.segment(
+                Arrays.asList("智能", "中文", "英语", "日语"),
+                indexOfValue(audioOptions, prefs.defaultAudioLanguage()),
+                index -> prefs.setDefaultAudioLanguage(audioOptions[index]));
+        widgets.addCardRow(preferenceCard, labelledRow("音频轨道", audio.view));
+        String[] subtitleOptions = {"zh", "en", "no"};
+        Widgets.Segment subtitles = widgets.segment(
+                Arrays.asList("中文优先", "英文优先", "关闭字幕"),
+                indexOfValue(subtitleOptions, prefs.defaultSubtitleLanguage()),
+                index -> prefs.setDefaultSubtitleLanguage(subtitleOptions[index]));
+        widgets.addCardRow(preferenceCard, labelledRow("字幕轨道", subtitles.view));
+        String[] qualityOptions = {TvSettings.QUALITY_SMOOTH, TvSettings.QUALITY_BALANCED,
+                TvSettings.QUALITY_HIGH};
+        Widgets.Segment quality = widgets.segment(
+                Arrays.asList("流畅优先", "平衡", "画质优先"),
+                indexOfValue(qualityOptions, prefs.playbackQualityMode()),
+                index -> prefs.setPlaybackQualityMode(qualityOptions[index]));
+        widgets.addCardRow(preferenceCard, labelledRow("网络缓冲", quality.view));
+        Widgets.SwitchRow episodeDetailsRow = widgets.switchRow("详情页显示分集简介与进度",
+                prefs.showEpisodeDetails());
+        episodeDetailsRow.view.setOnClickListener(view -> {
+            boolean next = !prefs.showEpisodeDetails();
+            prefs.setShowEpisodeDetails(next);
+            showEpisodeDetails = next;
+            episodeDetailsRow.setOn(next);
+        });
+        widgets.addCardRow(preferenceCard, episodeDetailsRow.view);
+        panel.addView(widgets.caption("智能 = 按制片国家语言选音轨；缓冲模式只调整 mpv 预读策略，"
+                        + "画质优先高码率更稳。", COLOR_SUBTLE),
+                margin(matchWidth(), sdp(4), sdp(4), 0, sdp(2)));
 
+        // ---------------------------------------------------------------- 基础设置
+        panel.addView(widgets.sectionCaption("基础设置"), margin(matchWidth(), 0, 0, 0, 0));
+        LinearLayout basicCard = widgets.settingsCard();
+        panel.addView(basicCard, margin(matchWidth(), 0, 0, 0, 0));
+        Widgets.SwitchRow autoScan = widgets.switchRow("启动时自动扫描并同步",
+                prefs.autoScanOnStartup());
+        autoScan.view.setOnClickListener(view -> {
+            boolean next = !prefs.autoScanOnStartup();
+            prefs.setAutoScanOnStartup(next);
+            autoScan.setOn(next);
+        });
+        widgets.addCardRow(basicCard, autoScan.view);
+        Widgets.SwitchRow autoScrape = widgets.switchRow("扫描后自动刮削海报",
+                prefs.autoScrapeAfterScan());
+        autoScrape.view.setOnClickListener(view -> {
+            boolean next = !prefs.autoScrapeAfterScan();
+            prefs.setAutoScrapeAfterScan(next);
+            autoScrape.setOn(next);
+        });
+        widgets.addCardRow(basicCard, autoScrape.view);
+        Widgets.SwitchRow realPath = widgets.switchRow("媒体源显示真实路径",
+                prefs.showRealSourcePath());
+        realPath.view.setOnClickListener(view -> {
+            boolean next = !prefs.showRealSourcePath();
+            prefs.setShowRealSourcePath(next);
+            realPath.setOn(next);
+        });
+        widgets.addCardRow(basicCard, realPath.view);
+
+        // ---------------------------------------------------------------- 4K DV/HDR
+        panel.addView(widgets.sectionCaption("4K DV/HDR 播放模式"),
+                margin(matchWidth(), 0, 0, 0, 0));
+        LinearLayout playbackCard = widgets.settingsCard();
+        panel.addView(playbackCard, margin(matchWidth(), 0, 0, 0, 0));
+        Widgets.Segment playbackMode = widgets.segment(
+                Arrays.asList("兼容字幕播放", "高性能直出"),
+                highPerformanceDirectPlayback ? 1 : 0,
+                index -> update4kDvHdrPlaybackMode(index == 1));
+        widgets.addCardRow(playbackCard, playbackMode.view);
+        panel.addView(widgets.caption("兼容字幕播放的字幕兼容性更好但更吃性能，卡顿就换高性能直出；"
+                        + "高性能直出资源要求低，但可能无法直接烧录字幕。", COLOR_SUBTLE),
+                margin(matchWidth(), sdp(4), sdp(4), 0, sdp(2)));
+
+        // ---------------------------------------------------------------- 关于与更新
+        panel.addView(widgets.sectionCaption("关于与更新"), margin(matchWidth(), 0, 0, 0, 0));
+        LinearLayout aboutCard = widgets.settingsCard();
+        panel.addView(aboutCard, margin(matchWidth(), 0, 0, 0, 0));
+        Button update = compactButton("检查软件更新");
+        widgets.addCardRow(aboutCard, update);
+        TextView updateStatus = new Overlays.StatusText(this, COLOR_MUTED,
+                ssp(Widgets.TEXT_CAPTION), theme);
+        widgets.addCardRow(aboutCard, updateStatus);
         Button disconnect = compactButton("退出连接");
-        disconnect.setId(View.generateViewId());
-        panel.addView(disconnect, margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)), 0, dp(12), 0, 0));
         disconnect.setTextColor(COLOR_DANGER);
+        widgets.addCardRow(aboutCard, disconnect);
         disconnect.setOnClickListener(view -> disconnectFromServer());
+        update.setOnClickListener(view -> startUpdateInstall(update, updateStatus));
+        TextView about = widgets.caption("版本 " + versionName
+                        + " · 播放器内核 libmpv + FFmpeg；SMB 客户端 jcifs-ng + BouncyCastle；"
+                        + "媒体库为本机 SQLite。以上组件按其开源许可证分发。",
+                COLOR_SUBTLE);
+        about.setPadding(sdp(12), sdp(6), sdp(12), 0);
+        widgets.addCardRow(aboutCard, about);
 
-        trapSettingsFocus(compatibleSubtitle, highPerformanceDirect, luckyUpdate, update, disconnect);
-        panel.bringToFront();
-        settingsInitialFocus = compatibleSubtitle;
-        compatibleSubtitle.requestFocus();
+        // 打开设置先停在 TMDB 卡片底部那颗按钮：面板从顶开始、焦点框可见，也不会顺手弹起软键盘。
+        declarePanelRows(settingsOverlay, panel, saveTmdb);
     }
 
+    /** 主题卡片里的一颗胶囊：色板 + 名称，当前主题描边高亮。 */
+    private Button themePill(Theme.Variant variant, TvSettings prefs) {
+        boolean selected = variant.id.equals(prefs.themeId());
+        Button option = widgets.button(selected ? "\u2713 " + variant.name : variant.name, selected);
+        option.setTextSize(ssp(Widgets.TEXT_LABEL));
+        option.setCompoundDrawables(themeSwatch(variant), null, null, null);
+        option.setCompoundDrawablePadding(sdp(8));
+        option.setOnClickListener(view -> {
+            prefs.setThemeId(variant.id);
+            Theme.apply(variant.id);
+            syncThemeColors();
+            applyThemeChange();
+        });
+        return option;
+    }
+
+    /** 奇数个主题时补齐半行，保证每颗胶囊一样宽。 */
+    private Button spacerPill() {
+        Button filler = new Button(this);
+        filler.setText("");
+        filler.setBackground(null);
+        filler.setFocusable(false);
+        filler.setClickable(false);
+        return filler;
+    }
+
+    /** 卡片里的一小段带标题的控件：说明文字在上，控件在下。 */
+    private LinearLayout labelledRow(String label, View control) {
+        LinearLayout wrapper = new LinearLayout(this);
+        wrapper.setOrientation(LinearLayout.VERTICAL);
+        wrapper.setClipChildren(false);
+        wrapper.setClipToPadding(false);
+        TextView caption = widgets.caption(label, COLOR_MUTED);
+        caption.setPadding(sdp(12), 0, sdp(12), sdp(5));
+        wrapper.addView(caption, matchWidth());
+        wrapper.addView(control, matchWidth());
+        return wrapper;
+    }
+
+    private static int indexOfValue(String[] values, String value) {
+        for (int index = 0; index < values.length; index++) {
+            if (values[index].equals(value)) {
+                return index;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Declares the sheet's D-pad rows from the panel itself, so the arrow keys always walk the
+     * sheet in the order the user sees: a hand-maintained row list drifts the moment a control is
+     * inserted in the middle. Before layout there are no coordinates to group by, so the rows are
+     * re-declared once the panel has really been measured.
+     */
+    private void declarePanelRows(Overlays.Overlay overlay, LinearLayout panel, View initial) {
+        overlay.focus(FocusGrid.rowsFrom(panel), initial);
+        FocusGrid.afterLayout(panel, () -> {
+            if (overlay.isOpen()) {
+                overlay.redeclare(FocusGrid.rowsFrom(panel));
+            }
+        });
+    }
+
+    /**
+     * Rebuilds the settings panel in place after a preference changes, and puts focus back on
+     * the same option: a TV user should not have to walk back down a long list after every
+     * toggle, which is what the mac version's instant checkbox feels like by comparison.
+     */
+    /**
+     * 换肤之后必须整屏重建：外壳里的标题、工具条和面板都是按旧调色板画出来的，
+     * 只刷新列表会留下「一半新一半旧」的界面。
+     */
+    private void applyThemeChange() {
+        int keepScroll = homeScrollView == null ? 0 : homeScrollView.getScrollY();
+        boolean reopenSettings = settingsOverlay != null;
+        boolean reopenSources = sourcesOverlay != null;
+        closeSettingsOverlay();
+        closeSourcesOverlay();
+        homeScrollView = null;
+        renderHomeContent();
+        settingsRestoreFocus = homeSettingsToggle;
+        sourcesRestoreFocus = homeSourcesToggle;
+        if (reopenSettings) {
+            renderSettingsOverlay();
+        } else if (reopenSources) {
+            renderSourcesOverlay();
+        }
+        if (homeScrollView != null) {
+            homeScrollView.scrollTo(0, keepScroll);
+        }
+    }
+
+    /** 分段控件自己会重画选中态，这里只需要记偏好，不用重建设置面板。 */
     private void update4kDvHdrPlaybackMode(boolean highPerformanceDirect) {
         highPerformanceDirectPlayback = highPerformanceDirect;
         uiPreferences.edit()
@@ -975,48 +2203,237 @@ public final class MainActivity extends Activity {
                         KEY_4K_DV_HDR_PLAYBACK_MODE,
                         highPerformanceDirect ? PLAYBACK_MODE_HIGH_PERFORMANCE_DIRECT : PLAYBACK_MODE_COMPATIBLE_SUBTITLE)
                 .apply();
-        closeSettingsOverlay();
-        renderHomeContentKeepingPosition();
-        openSettingsOverlay();
     }
 
-    private void trapSettingsFocus(Button compatibleSubtitle, Button highPerformanceDirect, Button luckyUpdate, Button update, Button disconnect) {
-        compatibleSubtitle.setNextFocusLeftId(compatibleSubtitle.getId());
-        compatibleSubtitle.setNextFocusRightId(compatibleSubtitle.getId());
-        compatibleSubtitle.setNextFocusUpId(compatibleSubtitle.getId());
-        compatibleSubtitle.setNextFocusDownId(highPerformanceDirect.getId());
+    // ------------------------------------------------------------ 媒体源管理
 
-        highPerformanceDirect.setNextFocusLeftId(highPerformanceDirect.getId());
-        highPerformanceDirect.setNextFocusRightId(highPerformanceDirect.getId());
-        highPerformanceDirect.setNextFocusUpId(compatibleSubtitle.getId());
-        highPerformanceDirect.setNextFocusDownId(luckyUpdate.getId());
+    private void openSourcesOverlay() {
+        if (sourcesOverlay != null) {
+            return;
+        }
+        sourcesRestoreFocus = getCurrentFocus();
+        isSourcesOpen = true;
+        renderSourcesOverlay();
+    }
 
-        luckyUpdate.setNextFocusLeftId(luckyUpdate.getId());
-        luckyUpdate.setNextFocusRightId(luckyUpdate.getId());
-        luckyUpdate.setNextFocusUpId(highPerformanceDirect.getId());
-        luckyUpdate.setNextFocusDownId(update.getId());
+    private void closeSourcesOverlay() {
+        if (sourcesOverlay == null) {
+            return;
+        }
+        Overlays.Overlay closing = sourcesOverlay;
+        sourcesOverlay = null;
+        isSourcesOpen = false;
+        closing.close();
+    }
 
-        update.setNextFocusLeftId(update.getId());
-        update.setNextFocusRightId(update.getId());
-        update.setNextFocusUpId(luckyUpdate.getId());
-        update.setNextFocusDownId(disconnect.getId());
+    /**
+     * Source manager ported from the mac app: enable / rename / remove per source plus
+     * scan, scrape and add. Every control sits one D-pad step away.
+     */
+    private void renderSourcesOverlay() {
+        if (sourcesOverlay != null) {
+            // Called again after enable / rename / remove: the list has to be redrawn in place.
+            Overlays.Overlay closing = sourcesOverlay;
+            sourcesOverlay = null;
+            closing.close();
+        }
+        Overlays.Options options = new Overlays.Options();
+        options.title = "媒体源管理";
+        options.subtitle = "停用后该目录不再扫描入库；移除只清理索引与进度，不会改动共享文件。";
+        options.widthDp = 430;
+        options.sideSheet = true;
+        options.restoreFocus = sourcesRestoreFocus;
+        Overlays.Overlay overlay = overlays.open(options);
+        overlay.onClose = () -> {
+            if (sourcesOverlay == overlay) {
+                sourcesOverlay = null;
+                isSourcesOpen = false;
+            }
+        };
+        sourcesOverlay = overlay;
+        isSourcesOpen = true;
+        LinearLayout panel = sourcesOverlay.body;
 
-        disconnect.setNextFocusLeftId(disconnect.getId());
-        disconnect.setNextFocusRightId(disconnect.getId());
-        disconnect.setNextFocusUpId(update.getId());
-        disconnect.setNextFocusDownId(disconnect.getId());
+        List<LocalEngine.Source> sources = api.engine().sources();
+        List<List<View>> rows = new ArrayList<>();
+        TextView status = sourcesOverlay.statusLine();
+
+        if (sources.isEmpty()) {
+            panel.addView(emptyText("暂无媒体源。"), margin(matchWidth(), 0, 0, 0, dp(12)));
+        }
+        boolean showPaths = api.engine().settings().showRealSourcePath();
+        for (LocalEngine.Source source : sources) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.VERTICAL);
+            row.setClipChildren(false);
+            row.setClipToPadding(false);
+            row.setBackground(rounded(COLOR_SURFACE_ALT, COLOR_BORDER, dp(1), dp(10)));
+            row.setPadding(dp(12), dp(10), dp(12), dp(10));
+            panel.addView(row, margin(matchWidth(), 0, 0, 0, dp(10)));
+
+            TextView title = text((source.enabled ? "" : "已停用 · ")
+                            + kindLabel(source.kind) + "：" + source.name,
+                            14, Typeface.BOLD, source.enabled ? COLOR_TEXT : COLOR_SUBTLE);
+            title.setMaxLines(1);
+            title.setEllipsize(TextUtils.TruncateAt.END);
+            row.addView(title, matchWidth());
+            if (showPaths) {
+                TextView path = text(displaySourcePath(source.kind, source.path),
+                        11, Typeface.NORMAL, COLOR_SUBTLE);
+                path.setMaxLines(2);
+                path.setEllipsize(TextUtils.TruncateAt.END);
+                row.addView(path, margin(matchWidth(), 0, dp(3), 0, dp(9)));
+            }
+
+            LinearLayout actions = new LinearLayout(this);
+            actions.setClipChildren(false);
+            actions.setClipToPadding(false);
+            row.addView(actions, matchWidth());
+            Button toggle = compactButton(source.enabled ? "停用" : "启用");
+            Button rename = compactButton("重命名");
+            Button remove = compactButton("移除");
+            remove.setTextColor(COLOR_DANGER);
+            actions.addView(toggle, margin(new LinearLayout.LayoutParams(0, dp(46), 1f), 0, 0, dp(6), 0));
+            actions.addView(rename, margin(new LinearLayout.LayoutParams(0, dp(46), 1f), 0, 0, dp(6), 0));
+            actions.addView(remove, new LinearLayout.LayoutParams(0, dp(46), 1f));
+
+            toggle.setOnClickListener(view -> {
+                api.engine().setSourceEnabled(source.id, !source.enabled);
+                renderSourcesOverlay();
+            });
+            rename.setOnClickListener(view -> openRenameSourceDialog(source, panel, status));
+            remove.setOnClickListener(view -> {
+                api.engine().removeSource(source.id);
+                renderSourcesOverlay();
+                refreshHomeLibrary(false);
+            });
+            rows.add(Arrays.asList(toggle, rename, remove));
+        }
+
+        Button add = compactButton("添加媒体源");
+        Button rescan = compactButton("重新扫描并刮削");
+        Button wipe = compactButton("清空媒体库索引");
+        wipe.setTextColor(COLOR_DANGER);
+        panel.addView(add, margin(matchWidth(), 0, dp(4), 0, 0));
+        panel.addView(rescan, margin(matchWidth(), 0, dp(6), 0, 0));
+        panel.addView(wipe, margin(matchWidth(), 0, dp(6), 0, 0));
+        for (View action : Arrays.asList(add, rescan, wipe)) {
+            ((LinearLayout.LayoutParams) action.getLayoutParams()).height = dp(52);
+        }
+        rows.add(Arrays.asList(add, rescan, wipe));
+
+        add.setOnClickListener(view -> {
+            closeSourcesOverlay();
+            showSetup(null);
+        });
+        rescan.setOnClickListener(view -> {
+            status.setText("正在扫描并刮削…");
+            runAsync(() -> api.engine().scanAndScrape(message -> {
+                        if (isSourcesOpen) {
+                            main.post(() -> status.setText(message));
+                        }
+                        // 刮削一张海报就上墙，不用等整轮跑完才看到封面。
+                        scheduleScrapePosterRefresh();
+                    }),
+                    report -> {
+                        if (!isSourcesOpen) {
+                            return;
+                        }
+                        status.setText(report.message + " 待刮削 " + api.engine().scrapeQueueCount() + "。");
+                        refreshHomeLibrary(false);
+                    },
+                    error -> status.setText("扫描失败：" + error.getMessage()));
+        });
+        wipe.setOnClickListener(view -> {
+            api.wipeLibrary();
+            renderSourcesOverlay();
+            refreshHomeLibrary(false);
+        });
+
+        declarePanelRows(sourcesOverlay, panel, rows.isEmpty() ? add : rows.get(0).get(0));
+    }
+
+    /** Inline rename field for one source row. */
+    private void openRenameSourceDialog(LocalEngine.Source source, LinearLayout panel, TextView status) {
+        EditText field = input("媒体源名称", source.name);
+        panel.addView(field, margin(matchWidth(), 0, dp(6), 0, dp(6)));
+        Button save = compactButton("保存名称");
+        panel.addView(save, margin(matchWidth(), 0, 0, 0, dp(6)));
+        save.setOnClickListener(view -> {
+            String value = field.getText().toString().trim();
+            if (value.isEmpty()) {
+                status.setText("名称不能为空。");
+                return;
+            }
+            api.engine().renameSource(source.id, value);
+            renderSourcesOverlay();
+        });
+        if (sourcesOverlay != null) {
+            Overlays.Overlay opened = sourcesOverlay;
+            FocusGrid.afterLayout(panel, () -> {
+                if (sourcesOverlay == opened) {
+                    opened.redeclare(FocusGrid.rowsFrom(panel));
+                    FocusGrid.grab(field);
+                    FocusGrid.scrollToVisible(field);
+                }
+            });
+        }
+    }
+
+    // ------------------------------------------------------------ 首页状态条
+
+    private void refreshHomeStatusText() {
+        if (homeStatusView == null) {
+            return;
+        }
+        String message = api.engine().scrapeStatus();
+        int pending = api.engine().scrapeQueueCount();
+        StringBuilder builder = new StringBuilder();
+        if (message != null && !message.isEmpty()) {
+            builder.append(message);
+        }
+        if (pending > 0) {
+            if (builder.length() > 0) {
+                builder.append(" · ");
+            }
+            builder.append("待刮削 ").append(pending).append(" 个条目");
+        }
+        if (builder.length() == 0) {
+            homeStatusView.setVisibility(View.GONE);
+            return;
+        }
+        homeStatusView.setText(builder);
+        homeStatusView.setVisibility(View.VISIBLE);
+    }
+
+    /** 启动时自动扫描并同步 + 刮削，与 mac 版一致；状态显示在首页顶部。 */
+    private void startStartupSync() {
+        if (startupSyncStarted) {
+            refreshHomeStatusText();
+            return;
+        }
+        startupSyncStarted = true;
+        if (!api.engine().settings().autoScanOnStartup() || api.engine().sources().isEmpty()) {
+            refreshHomeStatusText();
+            return;
+        }
+        runAsync(() -> api.engine().scanAndScrape(message -> main.post(() -> {
+                    refreshHomeStatusText();
+                    scheduleScrapePosterRefresh();
+                })),
+                report -> {
+                    refreshHomeStatusText();
+                    if (screen == Screen.HOME) {
+                        refreshHomeLibrary(false);
+                    }
+                },
+                error -> refreshHomeStatusText());
     }
 
     private void disconnectFromServer() {
+        closeSourcesOverlay();
         closeSettingsOverlay();
-        showLoading("正在退出连接");
-        runAsync(
-                () -> {
-                    api.disconnect();
-                    return null;
-                },
-                ignored -> showSetup(null),
-                error -> showSetup(null));
+        showSetup(null);
     }
 
     private void startUpdateInstall(Button updateButton, TextView updateStatus) {
@@ -1176,16 +2593,23 @@ public final class MainActivity extends Activity {
         return builder.toString();
     }
 
+    /**
+     * 海报卡片。卡片的数据都收在 {@link PosterViews} 里，刮削过程中可以就地换图换字：
+     * 整面墙重建会把焦点和滚动位置一起丢掉，用户看到的就是「闪一下又回到顶上」。
+     */
     private View posterCard(Models.LibraryItem item, boolean showProgress) {
         int cardWidth = homePosterCardWidthPx();
         int cardInnerWidth = Math.max(dp(1), cardWidth - sdp(16));
         int posterHeight = Math.round(cardInnerWidth * 1.5f);
+        final PosterViews views = new PosterViews(cardInnerWidth, posterHeight, showProgress);
         LinearLayout card = new LinearLayout(this);
+        views.card = card;
         card.setOrientation(LinearLayout.VERTICAL);
         card.setFocusable(true);
         card.setClickable(true);
         card.setPadding(sdp(8), sdp(8), sdp(8), sdp(10));
         card.setBackground(rounded(Color.TRANSPARENT, Color.TRANSPARENT, 0, sdp(8)));
+        card.setTag(item.id);
         GridLayout.LayoutParams params = new GridLayout.LayoutParams();
         params.width = cardWidth;
         params.height = ViewGroup.LayoutParams.WRAP_CONTENT;
@@ -1197,13 +2621,20 @@ public final class MainActivity extends Activity {
         posterFrame.setClipToOutline(true);
         posterFrame.setBackground(rounded(COLOR_SURFACE_ALT, COLOR_BORDER, dp(1), sdp(12)));
         card.addView(posterFrame, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, posterHeight));
-        applyPosterCardFocus(card, posterFrame, () -> scheduleDetailPrefetch(item.id, card));
+        applyPosterCardFocus(card, posterFrame, () -> scheduleDetailPrefetch(views.item.id, card));
 
         ImageView poster = new ImageView(this);
         poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
         poster.setClipToOutline(true);
         posterFrame.addView(poster, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        loadPoster(poster, item.posterAssetId, cardInnerWidth, posterHeight);
+        views.poster = poster;
+
+        TextView artFallback = text("", ssp(40), Typeface.BOLD, Theme.withAlpha(COLOR_MUTED, 130));
+        artFallback.setGravity(Gravity.CENTER);
+        artFallback.setIncludeFontPadding(false);
+        artFallback.setVisibility(View.GONE);
+        posterFrame.addView(artFallback, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        views.artFallback = artFallback;
 
         LinearLayout badges = new LinearLayout(this);
         badges.setGravity(Gravity.CENTER_VERTICAL);
@@ -1211,46 +2642,189 @@ public final class MainActivity extends Activity {
         FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.LEFT | Gravity.BOTTOM);
         badgeParams.setMargins(sdp(10), 0, sdp(10), sdp(10));
         posterFrame.addView(badges, badgeParams);
+        views.badges = badges;
 
-        String rating = ratingText(item.voteAverage);
-        if (rating != null) {
-            badges.addView(badge(rating, Color.rgb(217, 119, 6)));
-        }
-        String doubanRating = ratingText(item.doubanRating);
-        if (doubanRating != null) {
-            badges.addView(badge(doubanRating, Color.rgb(0, 166, 41)), margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, sdp(30)), sdp(5), 0, 0, 0));
-        }
+        FrameLayout progressSlot = new FrameLayout(this);
+        progressSlot.setClipChildren(false);
+        progressSlot.setClipToPadding(false);
+        card.addView(progressSlot, matchWidth());
+        views.progress = progressSlot;
 
-        if (showProgress) {
-            int progress = item.progressPercent();
-            if (progress > 0 && progress < 95) {
-                card.addView(progressBar(progress, cardInnerWidth, sdp(5)), margin(new LinearLayout.LayoutParams(cardInnerWidth, sdp(5)), 0, sdp(9), 0, 0));
-            }
-        }
-
-        TextView name = text(item.title, ssp(16), Typeface.BOLD, COLOR_TEXT);
+        TextView name = text("", ssp(16), Typeface.BOLD, COLOR_TEXT);
         name.setMaxLines(2);
         name.setEllipsize(TextUtils.TruncateAt.END);
         card.addView(name, margin(matchWidth(), 0, sdp(11), 0, 0));
+        views.name = name;
 
         LinearLayout yearRow = new LinearLayout(this);
         yearRow.setGravity(Gravity.CENTER_VERTICAL);
         card.addView(yearRow, margin(matchWidth(), 0, sdp(2), 0, 0));
-        String year = releaseYearText(item.releaseDate);
-        yearRow.addView(text(year == null ? "" : year, ssp(13), Typeface.NORMAL, COLOR_SUBTLE), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        TextView watched = text(item.isWatched ? "✓" : "○", ssp(17), Typeface.BOLD, item.isWatched ? COLOR_FOCUS : COLOR_SUBTLE);
+        TextView year = text("", ssp(13), Typeface.NORMAL, COLOR_SUBTLE);
+        yearRow.addView(year, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        views.year = year;
+        TextView watched = text("", ssp(13), Typeface.BOLD, COLOR_SUBTLE);
         watched.setGravity(Gravity.CENTER);
-        watched.setPadding(0, 0, 0, 0);
+        watched.setPadding(sdp(8), 0, sdp(8), 0);
         watched.setMinHeight(sdp(28));
         watched.setFocusable(true);
         watched.setClickable(true);
         watched.setBackgroundColor(Color.TRANSPARENT);
-        watched.setOnClickListener(view -> toggleLibraryItemWatched(item));
+        watched.setOnClickListener(view -> toggleLibraryItemWatched(views.item));
         applyWatchedIconFocus(watched, item.isWatched);
-        yearRow.addView(watched, new LinearLayout.LayoutParams(sdp(30), sdp(28)));
+        yearRow.addView(watched, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, sdp(30)));
+        views.watched = watched;
 
-        card.setOnClickListener(view -> showDetail(item.id));
+        card.setOnClickListener(view -> showDetail(views.item.id));
+        bindPosterCard(views, item);
+        registerPosterViews(views);
         return card;
+    }
+
+    /** Refreshes a card that is already on screen with freshly scraped data. */
+    private void bindPosterCard(PosterViews views, Models.LibraryItem item) {
+        views.item = item;
+        loadPoster(views.poster, item.posterAssetId, views.cardInnerWidth, views.posterHeight);
+        String prettyTitle = prettifyMediaTitle(item.title);
+        boolean missingArt = item.posterAssetId == null || item.posterAssetId.isEmpty();
+        views.artFallback.setVisibility(missingArt ? View.VISIBLE : View.GONE);
+        views.artFallback.setText(missingArt ? artworkFallbackLetter(prettyTitle) : "");
+        views.name.setText(prettyTitle);
+        String year = releaseYearText(item.releaseDate);
+        views.year.setText(year == null ? "" : year);
+        views.watched.setText(item.isWatched ? "\u2713 已看" : "\u25cb 未看");
+        views.watched.setTextColor(item.isWatched ? COLOR_FOCUS : COLOR_SUBTLE);
+        applyWatchedIconFocus(views.watched, item.isWatched);
+        views.badges.removeAllViews();
+        String rating = ratingText(item.voteAverage);
+        if (rating != null) {
+            views.badges.addView(badge(rating, Theme.RATING));
+        }
+        String doubanRating = ratingText(item.doubanRating);
+        if (doubanRating != null) {
+            views.badges.addView(badge(doubanRating, Theme.RATING_DOUBAN),
+                    margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, sdp(30)), sdp(5), 0, 0, 0));
+        }
+        views.progress.removeAllViews();
+        if (views.showProgress) {
+            int progress = item.progressPercent();
+            if (progress > 0 && progress < 95) {
+                FrameLayout.LayoutParams barParams =
+                        new FrameLayout.LayoutParams(views.cardInnerWidth, sdp(5));
+                barParams.topMargin = sdp(9);
+                views.progress.addView(progressBar(progress, views.cardInnerWidth, sdp(5)), barParams);
+            }
+        }
+    }
+
+    /** What a poster card needs in order to redraw itself in place. */
+    private static final class PosterViews {
+        TextView artFallback;
+        final int cardInnerWidth;
+        final int posterHeight;
+        final boolean showProgress;
+        LinearLayout card;
+        ImageView poster;
+        LinearLayout badges;
+        TextView name;
+        TextView year;
+        TextView watched;
+        FrameLayout progress;
+        Models.LibraryItem item;
+
+        PosterViews(int cardInnerWidth, int posterHeight, boolean showProgress) {
+            this.cardInnerWidth = cardInnerWidth;
+            this.posterHeight = posterHeight;
+            this.showProgress = showProgress;
+        }
+    }
+
+    /** 空海报上的那个字：取片名里第一个字母或汉字，跳过引号和括号。 */
+    private static String artworkFallbackLetter(String title) {
+        if (title == null) {
+            return "";
+        }
+        for (int index = 0; index < title.length(); index++) {
+            char c = title.charAt(index);
+            if (Character.isLetterOrDigit(c)) {
+                return String.valueOf(Character.toUpperCase(c));
+            }
+        }
+        return "";
+    }
+
+    private void registerPosterViews(PosterViews views) {
+        List<PosterViews> holders = homePosterViews.get(views.item.id);
+        if (holders == null) {
+            holders = new ArrayList<>();
+            homePosterViews.put(views.item.id, holders);
+        }
+        holders.add(views);
+    }
+
+    private String focusedPosterItemId() {
+        View focused = getCurrentFocus();
+        while (focused != null) {
+            Object tag = focused.getTag();
+            if (tag instanceof String && homePosterViews.containsKey(tag)) {
+                return (String) tag;
+            }
+            ViewParent parent = focused.getParent();
+            focused = parent instanceof View ? (View) parent : null;
+        }
+        return null;
+    }
+
+    /**
+     * 刮削进度回调很密，这里按秒限流刷新海报：条目没变就只补数据，条目增减了才重建，
+     * 重建时把滚动位置和焦点都补回来。
+     */
+    private void scheduleScrapePosterRefresh() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (libraryPatchInFlight || now - lastLibraryPatchAt < 1200) {
+            return;
+        }
+        lastLibraryPatchAt = now;
+        libraryPatchInFlight = true;
+        runAsync(() -> api.getLibraryItems(), items -> {
+            libraryPatchInFlight = false;
+            if (screen != Screen.HOME || items == null || items.isEmpty()) {
+                return;
+            }
+            patchLibraryViews(new ArrayList<>(items));
+        }, error -> libraryPatchInFlight = false);
+    }
+
+    private void patchLibraryViews(List<Models.LibraryItem> items) {
+        Map<String, Models.LibraryItem> byId = new HashMap<>();
+        for (Models.LibraryItem item : items) {
+            byId.put(item.id, item);
+        }
+        if (byId.size() != distinctLibraryIds(libraryItems).size()) {
+            libraryItems = items;
+            refreshHomeBody();
+            android.util.Log.d("OmniPlayLibrary", "刮削中刷新：条目增减，重建海报墙");
+            return;
+        }
+        for (Map.Entry<String, List<PosterViews>> entry : homePosterViews.entrySet()) {
+            Models.LibraryItem fresh = byId.get(entry.getKey());
+            if (fresh == null) {
+                continue;
+            }
+            for (PosterViews views : entry.getValue()) {
+                bindPosterCard(views, fresh);
+            }
+        }
+        libraryItems = items;
+        refreshHomeStatusText();
+        android.util.Log.d("OmniPlayLibrary", "刮削中刷新：就地更新 " + homePosterViews.size() + " 张海报");
+    }
+
+    private static java.util.Set<String> distinctLibraryIds(List<Models.LibraryItem> items) {
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        for (Models.LibraryItem item : items) {
+            ids.add(item.id);
+        }
+        return ids;
     }
 
     private void showDetail(String itemId) {
@@ -1260,6 +2834,7 @@ public final class MainActivity extends Activity {
 
     private void loadDetail(String itemId) {
         screen = Screen.DETAIL;
+        applyImmersiveMode(false);
         requestedDetailItemId = itemId;
         Models.LibraryDetail cached = detailCache.get(itemId);
         if (cached != null) {
@@ -1276,6 +2851,9 @@ public final class MainActivity extends Activity {
         runAsync(
                 () -> api.getLibraryItemDetail(itemId),
                 detail -> {
+                    if (detail == null) {
+                        return;
+                    }
                     detailCache.put(itemId, detail);
                     refreshPlaybackSettingsForDetail(detail);
                     if (screen == Screen.DETAIL && itemId.equals(requestedDetailItemId)) {
@@ -1327,16 +2905,21 @@ public final class MainActivity extends Activity {
                 () -> api.getLibraryItemDetail(itemId),
                 detail -> {
                     pendingDetailPrefetches.remove(itemId);
-                    detailCache.put(itemId, detail);
+                    if (detail != null) {
+                        detailCache.put(itemId, detail);
+                    }
                 },
                 error -> pendingDetailPrefetches.remove(itemId));
     }
 
     private void renderDetail(Models.LibraryDetail detail) {
         screen = Screen.DETAIL;
+        applyImmersiveMode(false);
         currentDetail = detail;
+        closeAllOverlays();
         root.removeAllViews();
         applyAppBackground();
+        addDetailBackdrop(detail.posterAssetId);
 
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
@@ -1346,6 +2929,8 @@ public final class MainActivity extends Activity {
         root.addView(page, match());
 
         ScrollView scroll = new ScrollView(this);
+        scroll.setFocusable(false);
+        scroll.setFocusableInTouchMode(false);
         scroll.setClipChildren(false);
         scroll.setClipToPadding(false);
         page.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -1386,34 +2971,55 @@ public final class MainActivity extends Activity {
         info.setClipChildren(false);
         info.setClipToPadding(false);
         hero.addView(info, margin(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f), sdp(34), 0, 0, 0));
-        info.addView(text(detail.title, ssp(34), Typeface.BOLD, COLOR_TEXT));
 
+        TextView heading = text(prettifyMediaTitle(detail.title), ssp(38), Typeface.BOLD, COLOR_TEXT);
+        heading.setLineSpacing(sdp(2), 1f);
+        info.addView(heading);
+
+        // 元信息行：年份、TMDB / 豆瓣评分、类型与制片地区，顺序与 mac 版一致。
         LinearLayout facts = new LinearLayout(this);
         facts.setGravity(Gravity.CENTER_VERTICAL);
-        info.addView(facts, margin(matchWidth(), 0, sdp(10), 0, sdp(18)));
-        String year = releaseYearText(detail.releaseDate);
+        info.addView(facts, margin(matchWidth(), 0, sdp(14), 0, 0));
+        String year = preferredReleaseYear(detail);
         if (year != null) {
             facts.addView(metaPill(year));
         }
         String rating = ratingText(detail.voteAverage);
         if (rating != null) {
-            facts.addView(metaPill("★ " + rating, Color.rgb(217, 119, 6)), margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, sdp(34)), sdp(9), 0, 0, 0));
+            facts.addView(ratingPill("TMDB \u2605 " + rating, Theme.RATING));
         }
         String doubanRating = ratingText(detail.doubanRating);
         if (doubanRating != null) {
-            facts.addView(metaPill("★ " + doubanRating, Color.rgb(0, 166, 41)), margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, sdp(34)), sdp(9), 0, 0, 0));
+            facts.addView(ratingPill("\u8c46\u74e3 \u2605 " + doubanRating, Theme.RATING_DOUBAN));
         }
-        for (String part : doubanMetadataParts(detail.douban)) {
+        for (String part : detailMetadataParts(detail)) {
             facts.addView(metaPill(part), margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, sdp(34)), sdp(9), 0, 0, 0));
         }
 
+        LinearLayout credits = new LinearLayout(this);
+        credits.setOrientation(LinearLayout.VERTICAL);
+        credits.setClipChildren(false);
+        credits.setClipToPadding(false);
+        info.addView(credits, margin(matchWidth(), 0, sdp(12), 0, 0));
+        addCreditRow(credits, "\u5bfc\u6f14", joinNames(detail.directors));
+        addCreditRow(credits, "\u4e3b\u6f14", joinNames(detail.casts.size() > 6
+                ? detail.casts.subList(0, 6) : detail.casts));
+
         String overviewText = detailOverviewText(detail);
-        if (!overviewText.isEmpty()) {
-            TextView overview = text(overviewText, ssp(17), Typeface.NORMAL, COLOR_TEXT);
-            overview.setLineSpacing(sdp(3), 1f);
-            overview.setMaxLines(7);
-            overview.setEllipsize(TextUtils.TruncateAt.END);
-            info.addView(overview, margin(matchWidth(), 0, 0, 0, sdp(26)));
+        TextView overview = text(overviewText.isEmpty() ? "\u6682\u65e0\u7b80\u4ecb" : overviewText,
+                ssp(16), Typeface.NORMAL, overviewText.isEmpty() ? COLOR_SUBTLE : COLOR_TEXT);
+        overview.setLineSpacing(sdp(4), 1f);
+        overview.setMaxLines(5);
+        overview.setEllipsize(TextUtils.TruncateAt.END);
+        info.addView(overview, margin(matchWidth(), 0, sdp(16), 0, 0));
+        if (overviewText.length() > 96) {
+            Button toggleOverview = compactButton("\u5c55\u5f00\u7b80\u4ecb");
+            toggleOverview.setOnClickListener(view -> {
+                boolean expanded = overview.getMaxLines() == Integer.MAX_VALUE;
+                overview.setMaxLines(expanded ? 5 : Integer.MAX_VALUE);
+                toggleOverview.setText(expanded ? "\u5c55\u5f00\u7b80\u4ecb" : "\u6536\u8d77\u7b80\u4ecb");
+            });
+            info.addView(toggleOverview, margin(new LinearLayout.LayoutParams(sdp(160), sdp(48)), 0, sdp(10), 0, 0));
         }
 
         Models.VideoFile mainFile = resolveMainFile(detail);
@@ -1423,19 +3029,12 @@ public final class MainActivity extends Activity {
             actions.setGravity(Gravity.CENTER_VERTICAL);
             actions.setClipChildren(false);
             actions.setClipToPadding(false);
-            info.addView(actions, margin(matchWidth(), 0, 0, 0, sdp(10)));
+            info.addView(actions, margin(matchWidth(), 0, sdp(22), 0, 0));
 
-            LinearLayout playColumn = new LinearLayout(this);
-            playColumn.setOrientation(LinearLayout.VERTICAL);
-            playColumn.setGravity(Gravity.CENTER_HORIZONTAL);
-            playColumn.setClipChildren(false);
-            playColumn.setClipToPadding(false);
-            actions.addView(playColumn, new LinearLayout.LayoutParams(sdp(236), ViewGroup.LayoutParams.WRAP_CONTENT));
-
-            Button play = button(playButtonText(mainFile));
+            Button play = button(playButtonText(mainFile, "tv".equals(detail.itemKind)));
             playButton = play;
             play.setTag(mainFile);
-            playColumn.addView(play, new LinearLayout.LayoutParams(sdp(236), sdp(58)));
+            actions.addView(play, new LinearLayout.LayoutParams(sdp(252), sdp(58)));
             play.setOnClickListener(view -> {
                 Object file = view.getTag();
                 if (file instanceof Models.VideoFile) {
@@ -1445,17 +3044,21 @@ public final class MainActivity extends Activity {
             play.requestFocus();
 
             Button watchStatus = button(watchedStatusLabel(mainFile), isEffectivelyWatched(mainFile));
-            actions.addView(watchStatus, margin(new LinearLayout.LayoutParams(sdp(116), sdp(48)), sdp(16), 0, 0, 0));
+            actions.addView(watchStatus, margin(new LinearLayout.LayoutParams(sdp(150), sdp(52)), sdp(12), 0, 0, 0));
             watchStatus.setOnClickListener(view -> toggleVideoWatched(mainFile));
 
+            Button edit = button("\u7f16\u8f91");
+            actions.addView(edit, margin(new LinearLayout.LayoutParams(sdp(112), sdp(52)), sdp(12), 0, 0, 0));
+            edit.setOnClickListener(view -> openDetailEditor(detail, mainFile));
+
+            // \u5df2\u64ad\u65f6\u957f / \u603b\u65f6\u957f\uff1amac \u7248\u628a\u5b83\u653e\u5728\u6309\u94ae\u4e0b\u65b9\uff0c\u8fd9\u91cc\u540c\u4e00\u4f4d\u7f6e\u3002
             LinearLayout timelineColumn = new LinearLayout(this);
             timelineColumn.setOrientation(LinearLayout.VERTICAL);
             timelineColumn.setClipChildren(false);
             timelineColumn.setClipToPadding(false);
-            actions.addView(timelineColumn, margin(new LinearLayout.LayoutParams(sdp(438), ViewGroup.LayoutParams.WRAP_CONTENT), sdp(18), 0, 0, 0));
-
-            LinearLayout timeline = timeline(detail, mainFile);
-            timelineColumn.addView(timeline, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, sdp(48)));
+            info.addView(timelineColumn, margin(matchWidth(), 0, sdp(16), 0, 0));
+            timelineColumn.addView(timeline(detail, mainFile),
+                    new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, sdp(40)));
 
             refreshSubtitleCacheStatus(detail, mainFile);
 
@@ -1484,13 +3087,18 @@ public final class MainActivity extends Activity {
             return;
         }
 
+        Models.VideoFile mainFile = resolveMainFile(detail);
         TextView heading = text("版本 / 文件（" + files.size() + "）", ssp(20), Typeface.BOLD, COLOR_TEXT);
-        content.addView(heading, margin(matchWidth(), 0, sdp(14), 0, sdp(18)));
+        content.addView(heading, margin(matchWidth(), 0, sdp(24), 0, sdp(12)));
         for (int index = 0; index < files.size(); index++) {
             Models.VideoFile file = files.get(index);
-            Button version = button((files.size() > 1 ? "版本 " + (index + 1) + " · " : "正片 · ") + file.fileName);
+            boolean selected = mainFile != null && mainFile.id.equals(file.id);
+            Button version = button((selected ? "\u2713 " : "") + "版本 " + (index + 1) + " \u00b7 "
+                    + (file.fileName == null || file.fileName.isEmpty() ? file.relativePath : file.fileName));
             version.setAllCaps(false);
             version.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+            version.setSingleLine(true);
+            version.setEllipsize(TextUtils.TruncateAt.END);
             version.setTag(file);
             version.setOnClickListener(view -> {
                 Object tag = view.getTag();
@@ -1499,13 +3107,10 @@ public final class MainActivity extends Activity {
                 }
             });
             content.addView(version, margin(matchWidth(), 0, sdp(8), 0, 0));
-
-            TextView metadata = text((file.relativePath == null ? "" : file.relativePath) +
-                    (file.mediaSummary().isEmpty() ? "" : " · " + file.mediaSummary()) +
-                    " · " + fileProgressPercent(file) + "% 已播放", ssp(13), Typeface.NORMAL, COLOR_SUBTLE);
-            metadata.setMaxLines(2);
-            metadata.setEllipsize(TextUtils.TruncateAt.END);
-            content.addView(metadata, margin(matchWidth(), 0, sdp(16), 0, sdp(2)));
+            content.addView(text(versionPathLine(file), ssp(13), Typeface.NORMAL, COLOR_SUBTLE),
+                    margin(matchWidth(), 0, sdp(16), 0, sdp(2)));
+            content.addView(text(versionTimingLine(file), ssp(13), Typeface.NORMAL, COLOR_SUBTLE),
+                    margin(matchWidth(), 0, sdp(16), 0, sdp(6)));
         }
     }
 
@@ -1527,12 +3132,14 @@ public final class MainActivity extends Activity {
 
         for (Models.Season season : detail.seasons) {
             Button seasonButton = button(seasonDisplayLabel(season), season.id.equals(selectedSeason.id));
-            seasonHeader.addView(seasonButton, margin(new LinearLayout.LayoutParams(sdp(132), sdp(48)), 0, 0, sdp(12), 0));
+            seasonHeader.addView(seasonButton, margin(new LinearLayout.LayoutParams(sdp(136), sdp(52)), 0, 0, sdp(12), 0));
             seasonButton.setOnClickListener(view -> {
                 selectedSeasonId = season.id;
                 renderDetail(detail);
             });
         }
+
+        maybeScrapeEpisodeMetadata(detail, selectedSeason);
 
         GridLayout episodeGrid = new GridLayout(this);
         episodeGrid.setColumnCount(detailEpisodeColumnCount());
@@ -1542,6 +3149,339 @@ public final class MainActivity extends Activity {
 
         for (Models.Episode episode : selectedSeason.episodes) {
             episodeGrid.addView(episodeCard(episode, detail.posterAssetId, playButton));
+        }
+    }
+
+    /** 评分胶囊：和 mac 版一样只用颜色区分 TMDB 与豆瓣。 */
+    private TextView ratingPill(String value, int color) {
+        TextView pill = widgets.metaPill(value, color);
+        pill.setTypeface(Typeface.DEFAULT_BOLD);
+        return pill;
+    }
+
+    /** 豆瓣年份优先，其次 TMDB 上映日，和 mac 版的 preferredYear 一致。 */
+    private String preferredReleaseYear(Models.LibraryDetail detail) {
+        if (detail == null) {
+            return null;
+        }
+        if (detail.douban != null && detail.douban.year != null && !detail.douban.year.trim().isEmpty()) {
+            return detail.douban.year.trim();
+        }
+        return releaseYearText(detail.releaseDate);
+    }
+
+    /** 类型 / 制片地区：优先 TMDB 的 genres，缺失时回落到豆瓣元数据。 */
+    private List<String> detailMetadataParts(Models.LibraryDetail detail) {
+        ArrayList<String> parts = new ArrayList<>();
+        if (detail != null && detail.genres != null) {
+            for (String genre : detail.genres) {
+                if (parts.size() >= 3) {
+                    break;
+                }
+                if (genre != null && !genre.trim().isEmpty()) {
+                    parts.add(genre.trim());
+                }
+            }
+        }
+        for (String part : doubanMetadataParts(detail == null ? null : detail.douban)) {
+            if (parts.size() >= 5 || parts.contains(part)) {
+                continue;
+            }
+            parts.add(part);
+        }
+        return parts;
+    }
+
+    private String joinNames(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return "";
+        }
+        ArrayList<String> cleaned = new ArrayList<>();
+        for (String value : values) {
+            if (value != null && !value.trim().isEmpty()) {
+                cleaned.add(value.trim());
+            }
+        }
+        return join(cleaned, "、");
+    }
+
+    /** 导演 / 主演 一行：左侧固定标签列，右侧取值，与 mac 版同构。 */
+    private void addCreditRow(LinearLayout parent, String label, String value) {
+        if (value == null || value.isEmpty()) {
+            return;
+        }
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.TOP);
+        parent.addView(row, margin(matchWidth(), 0, sdp(6), 0, 0));
+        row.addView(text(label, ssp(14), Typeface.BOLD, COLOR_SUBTLE),
+                new LinearLayout.LayoutParams(sdp(46), ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView valueView = text(value, ssp(15), Typeface.NORMAL, COLOR_TEXT);
+        valueView.setMaxLines(2);
+        valueView.setEllipsize(TextUtils.TruncateAt.END);
+        valueView.setLineSpacing(sdp(2), 1f);
+        row.addView(valueView, matchWidth());
+    }
+
+    /**
+     * mac 版详情页的海报底图是毛玻璃。Android 12+ 有 RenderEffect，直接虚化海报；
+     * 更早的系统没有便宜的实时虚化，退化成一层与主题同色的柔和底。
+     */
+    private void addDetailBackdrop(String posterAssetId) {
+        if (Build.VERSION.SDK_INT >= 31 && posterAssetId != null) {
+            ImageView backdrop = new ImageView(this);
+            backdrop.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            root.addView(backdrop, match());
+            loadPoster(backdrop, posterAssetId,
+                    getResources().getDisplayMetrics().widthPixels / 2,
+                    getResources().getDisplayMetrics().heightPixels / 2);
+            backdrop.setRenderEffect(android.graphics.RenderEffect.createBlurEffect(
+                    dp(48), dp(48), android.graphics.Shader.TileMode.CLAMP));
+            backdrop.setAlpha(Theme.DARK ? 0.5f : 0.62f);
+        }
+        View wash = new View(this);
+        wash.setBackgroundColor(Theme.withAlpha(Theme.BACKGROUND, Theme.DARK ? 170 : 148));
+        root.addView(wash, match());
+    }
+
+    /** 版本行第二行：相对路径 + 封装 / 编码摘要。 */
+    private String versionPathLine(Models.VideoFile file) {
+        String path = file.relativePath == null || file.relativePath.isEmpty()
+                ? "\u672a\u77e5\u8def\u5f84" : file.relativePath;
+        String summary = file.mediaSummary();
+        return summary.isEmpty() ? path : path + " \u00b7 " + summary;
+    }
+
+    /** 版本行第三行：已播时间 / 总时长，加一个播放状态词。 */
+    private String versionTimingLine(Models.VideoFile file) {
+        String total = file.durationSeconds > 0 ? formatPlaybackTime(file.durationSeconds) : "--:--";
+        return formatPlaybackTime(Math.max(0, file.positionSeconds)) + " / " + total
+                + " \u00b7 " + (isEffectivelyWatched(file) ? "\u5df2\u64ad\u5b8c"
+                : file.positionSeconds > 5 ? "\u7ee7\u7eed\u64ad\u653e" : "\u672a\u64ad\u653e");
+    }
+
+    /** Loads TMDB episode entries for the opened season so stills and blurbs appear. */
+    private void maybeScrapeEpisodeMetadata(Models.LibraryDetail detail, Models.Season season) {
+        if (detail == null || season == null || !"tv".equals(detail.itemKind)) {
+            return;
+        }
+        final String key = detail.id + "#" + season.seasonNumber;
+        if (episodeMetaAttempts.contains(key) || !api.engine().needsEpisodeMetadata(detail.id, season.seasonNumber)) {
+            return;
+        }
+        episodeMetaAttempts.add(key);
+        runAsync(() -> api.engine().scrapeEpisodeMetadata(detail.id, season.seasonNumber, null),
+                message -> {
+                    if (screen == Screen.DETAIL && currentDetail != null && currentDetail.id.equals(detail.id)) {
+                        detailCache.remove(detail.id);
+                        refreshDetail(detail.id, false);
+                    }
+                },
+                error -> episodeMetaAttempts.remove(key));
+    }
+
+    // ---- 手机输入：遥控器打字太慢时让手机浏览器代填 ----
+
+    /**
+     * Shows the pairing QR + URL and registers these fields as the current submit targets.
+     * Calling it again while the panel is visible only swaps the registered fields, so any
+     * overlay can offer the same entry point.
+     */
+    private void openPhoneInputOverlay(String title, String subtitle,
+                                       List<PhoneInputServer.Field> fields, boolean allowNote) {
+        if (phoneInput == null) {
+            phoneInput = PhoneInputServer.shared(api.engine().settings());
+        }
+        phoneInput.start();
+        if (!phoneInput.isRunning()) {
+            showToast("本机输入服务启动失败，请重试。");
+            return;
+        }
+        if (phoneInputOverlay == null) {
+            isPhoneInputOpen = true;
+            Overlays.Options options = new Overlays.Options();
+            options.title = title;
+            options.subtitle = subtitle == null ? "" : subtitle;
+            options.widthDp = 470;
+            options.scrollable = false;
+            options.restoreFocus = getCurrentFocus();
+            Overlays.Overlay overlay = overlays.open(options);
+            overlay.onClose = () -> {
+                if (phoneInputOverlay == overlay) {
+                    phoneInputOverlay = null;
+                    isPhoneInputOpen = false;
+                }
+            };
+            phoneInputOverlay = overlay;
+            LinearLayout panel = phoneInputOverlay.body;
+
+            phoneInputQr = new ImageView(this);
+            phoneInputQr.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            phoneInputQr.setBackgroundColor(Color.WHITE);
+            phoneInputQr.setPadding(dp(10), dp(10), dp(10), dp(10));
+            LinearLayout.LayoutParams qrParams = new LinearLayout.LayoutParams(dp(320), dp(320));
+            qrParams.gravity = Gravity.CENTER_HORIZONTAL;
+            panel.addView(phoneInputQr, qrParams);
+
+            phoneInputUrl = text("", ssp(Widgets.TEXT_LABEL), Typeface.BOLD, COLOR_FOCUS);
+            phoneInputUrl.setGravity(Gravity.CENTER);
+            phoneInputUrl.setTypeface(Typeface.MONOSPACE);
+            panel.addView(phoneInputUrl, margin(matchWidth(), 0, sdp(10), 0, 0));
+
+            phoneInputStatus = widgets.caption("", COLOR_MUTED);
+            phoneInputStatus.setGravity(Gravity.CENTER);
+            panel.addView(phoneInputStatus, margin(matchWidth(), 0, sdp(6), 0, sdp(10)));
+
+            phoneInputCloseButton = button("关闭");
+            phoneInputCloseButton.setOnClickListener(view -> closePhoneInputOverlay());
+            panel.addView(phoneInputCloseButton, margin(matchWidth(), 0, sdp(2), 0, 0));
+
+            phoneInputOverlay.focus(phoneInputCloseButton);
+        }
+        phoneInput.setSession(new PhoneInputServer.Session(title, subtitle, fields, allowNote),
+                (applied, from) -> {
+                    TextView status = phoneInputStatus;
+                    if (!isPhoneInputOpen || status == null) {
+                        return;
+                    }
+                    status.setText(applied > 0
+                            ? "已填入 " + applied + " 项（来自 " + from + "），可以回电视继续。"
+                            : "手机提交了空内容，没有改动任何输入框。");
+                });
+        refreshPhoneInputTarget();
+    }
+
+    /** Refreshes the QR + URL and explains it when the box has no LAN address yet. */
+    private void refreshPhoneInputTarget() {
+        if (phoneInputQr == null || phoneInputUrl == null || phoneInputStatus == null) {
+            return;
+        }
+        String url = phoneInput == null ? null : phoneInput.pageUrl();
+        if (url == null) {
+            phoneInputQr.setImageDrawable(null);
+            phoneInputUrl.setText("电视当前没有局域网地址");
+            phoneInputStatus.setText("请先让电视连上网络，手机与电视需在同一个局域网。");
+            return;
+        }
+        phoneInputQr.setImageBitmap(QrCode.render(url, dp(300)));
+        phoneInputUrl.setText(url);
+        phoneInputStatus.setText("手机与电视需连同一个局域网：扫码或直接输入上面的地址，提交后电视上的输入框立即更新。");
+    }
+
+    private void closePhoneInputOverlay() {
+        if (phoneInputOverlay == null) {
+            return;
+        }
+        Overlays.Overlay closing = phoneInputOverlay;
+        phoneInputOverlay = null;
+        isPhoneInputOpen = false;
+        if (phoneInput != null) {
+            phoneInput.clearSession();
+        }
+        phoneInputQr = null;
+        phoneInputUrl = null;
+        phoneInputStatus = null;
+        phoneInputCloseButton = null;
+        closing.close();
+    }
+
+    /** Current text of an input, tolerating a dialog that was already torn down. */
+    private static String currentValue(EditText target) {
+        return target == null ? "" : target.getText().toString();
+    }
+
+    /**
+     * Field for the phone page bound to a TV input by reference, so a panel rebuilt in the
+     * meantime still receives the submitted text.
+     */
+    private static PhoneInputServer.Field boundField(String key, String label,
+                                                    Supplier<EditText> getter, boolean secret) {
+        return new PhoneInputServer.Field(key, label, currentValue(getter.get()), secret, value -> {
+            EditText target = getter.get();
+            if (target != null) {
+                target.setText(value);
+            }
+        });
+    }
+
+    /** Small text editor overlay used by 编辑片名、分集副标题 and 缓存目录. */
+    /** Small text editor overlay used by 编辑片名、分集副标题 and 缓存目录. */
+    private void openTextInputOverlay(String heading, String initial, Success<String> onConfirm) {
+        Overlays.Options options = new Overlays.Options();
+        options.title = heading;
+        options.widthDp = 460;
+        options.scrollable = false;
+        options.restoreFocus = getCurrentFocus();
+        Overlays.Overlay opened = overlays.open(options);
+        opened.onClose = () -> {
+            if (textInputOverlay == opened) {
+                textInputOverlay = null;
+            }
+        };
+        textInputOverlay = opened;
+        LinearLayout panel = textInputOverlay.body;
+
+        EditText field = input(heading, initial == null ? "" : initial);
+        panel.addView(field, margin(matchWidth(), 0, sdp(2), 0, 0));
+
+        Button save = button("保存");
+        Button phone = button("手机输入");
+        phone.setOnClickListener(view -> openPhoneInputOverlay(heading,
+                "长串内容可以粘贴在“补充内容”里整段发送。",
+                Collections.singletonList(new PhoneInputServer.Field("value", heading,
+                        currentValue(field), false, value -> field.setText(value))), true));
+        Button cancel = button("取消");
+        overlays.footer(panel, save, phone, cancel);
+        Overlays.Overlay overlay = textInputOverlay;
+        cancel.setOnClickListener(view -> {
+            if (textInputOverlay == overlay) {
+                textInputOverlay = null;
+            }
+            overlay.close();
+        });
+        save.setOnClickListener(view -> {
+            String value = field.getText().toString();
+            if (textInputOverlay == overlay) {
+                textInputOverlay = null;
+            }
+            overlay.close();
+            onConfirm.accept(value);
+        });
+
+        textInputOverlay.focus(Arrays.asList(Collections.singletonList(field),
+                Arrays.asList(save, phone, cancel)), field);
+    }
+
+    /** 编辑：改片名（并锁定，避免下次扫描被覆盖）或按新名字重新刮削。 */
+    private void openDetailEditor(Models.LibraryDetail detail, Models.VideoFile mainFile) {
+        openTextInputOverlay("片名（保存后锁定，可填新名字再重新刮削）", detail.title, value -> {
+            String trimmed = value == null ? "" : value.trim();
+            if (trimmed.isEmpty()) {
+                return;
+            }
+            runAsync(() -> {
+                api.engine().library().renameEntity(detail.itemKind, entityIdOf(detail.id), trimmed);
+                String mediaType = detail.itemKind;
+                int season = mainFile == null || mainFile.seasonNumber == null ? 0 : mainFile.seasonNumber;
+                api.engine().library().requeueScrape(mediaType, entityIdOf(detail.id), trimmed, "", "", season);
+                api.engine().scrapePending(null);
+                return Boolean.TRUE;
+            }, ignored -> {
+                detailCache.remove(detail.id);
+                if (screen == Screen.DETAIL) {
+                    refreshDetail(detail.id, false);
+                } else {
+                    refreshHomeLibrary(false);
+                }
+            }, error -> refreshHomeLibrary(false));
+        });
+    }
+
+    private static long entityIdOf(String itemId) {
+        int colon = itemId.indexOf(':');
+        try {
+            return Long.parseLong(itemId.substring(colon + 1));
+        } catch (RuntimeException ignored) {
+            return 0;
         }
     }
 
@@ -1587,7 +3527,9 @@ public final class MainActivity extends Activity {
         title.setGravity(Gravity.CENTER);
         card.addView(title, margin(matchWidth(), 0, sdp(12), 0, 0));
 
-        String facts = episodeFacts(episode);
+        String facts = episodeFacts(episode,
+                !episodeTitleDisplay(episode, showDetails).contains(
+                        episodeDisplayLabel(episode.seasonNumber, episode.episodeNumber)));
         if (showDetails && !facts.isEmpty()) {
             TextView factView = text(facts, ssp(13), Typeface.NORMAL, COLOR_SUBTLE);
             factView.setSingleLine(true);
@@ -1610,6 +3552,28 @@ public final class MainActivity extends Activity {
                 card.addView(progressBar(progress, progressWidth, sdp(4)), margin(new LinearLayout.LayoutParams(progressWidth, sdp(4)), 0, sdp(12), 0, 0));
             }
             card.setOnClickListener(view -> playFile(playbackFile));
+        }
+
+        if (playbackFile != null) {
+            LinearLayout episodeActions = new LinearLayout(this);
+            episodeActions.setClipChildren(false);
+            episodeActions.setClipToPadding(false);
+            card.addView(episodeActions, margin(matchWidth(), 0, sdp(6), 0, 0));
+            Button episodeSubtitle = compactButton("改副标题");
+            episodeActions.addView(episodeSubtitle, new LinearLayout.LayoutParams(0, sdp(44), 1f));
+            episodeSubtitle.setOnClickListener(view -> openTextInputOverlay("分集副标题（留空则显示 TMDB 集名）",
+                    episode.subtitleOverride == null ? "" : episode.subtitleOverride, value -> {
+                        runAsync(() -> {
+                            api.engine().library().setEpisodeSubtitle(playbackFile.id, value);
+                            return Boolean.TRUE;
+                        }, ignored -> {
+                            if (currentDetail != null && screen == Screen.DETAIL) {
+                                detailCache.remove(currentDetail.id);
+                                refreshDetail(currentDetail.id, false);
+                            }
+                        }, error -> {
+                        });
+                    }));
         }
 
         List<Models.VideoFile> versions = episodeVideoFiles(episode);
@@ -1643,6 +3607,7 @@ public final class MainActivity extends Activity {
 
     private void playFile(Models.VideoFile file, List<Models.VideoFile> queue, int queueIndex) {
         screen = Screen.PLAYER;
+        closeAllOverlays();
         root.removeAllViews();
         root.setBackgroundColor(Color.BLACK);
         root.setFocusable(true);
@@ -1730,6 +3695,10 @@ public final class MainActivity extends Activity {
         activePlaybackQueue = queue == null || queue.isEmpty() ? Collections.singletonList(file) : new ArrayList<>(queue);
         activePlaybackIndex = Math.max(0, Math.min(queueIndex, activePlaybackQueue.size() - 1));
         advancingPlaybackPart = false;
+        if (file.playbackUrl == null || file.playbackUrl.isEmpty()) {
+            renderPlayerError("播放地址未配置，请重新扫描媒体源。");
+            return;
+        }
         runAsync(
                 () -> resolvePlayback(file),
                 playback -> startResolvedPlayback(file, playback, status),
@@ -1740,34 +3709,23 @@ public final class MainActivity extends Activity {
     }
 
     private ResolvedPlayback resolvePlayback(Models.VideoFile file) throws Exception {
-        String videoFileId = file.id;
+        String playbackUrl = file.playbackUrl;
+        if (playbackUrl == null || playbackUrl.isEmpty()) {
+            return null;
+        }
         Models.AppSettings settings;
         try {
             settings = api.getSettings();
         } catch (Exception ignored) {
             settings = Models.AppSettings.defaults();
         }
-
-        Models.PlaybackFileStreams streams = resolvePlaybackStreams(videoFileId);
-
-        try {
-            String ticket = api.createPlaybackTicket(videoFileId);
-            if (ticket != null && !ticket.isEmpty()) {
-                String streamUrl = api.streamUrl(videoFileId, ticket);
-                String playbackUrl = isIsoFile(file) ? resolveIsoPlaybackUrl(streamUrl, "") : streamUrl;
-                return new ResolvedPlayback(playbackUrl, ticket, "", settings, streams, "", "", isIsoFile(file) && playbackUrl.equals(streamUrl));
-            }
-        } catch (IOException error) {
-            if (error.getMessage() == null || !error.getMessage().contains("404")) {
-                throw error;
-            }
+        Models.PlaybackFileStreams streams = null;
+        boolean iso = isIsoFile(file);
+        String finalUrl = playbackUrl;
+        if (playbackUrl.startsWith("smb://")) {
+            finalUrl = SmbStreamServer.shared().prepare(api.engine().smbClientForUrl(playbackUrl), playbackUrl);
         }
-
-        String streamUrl = api.streamUrl(videoFileId);
-        String cookieHeader = api.cookieHeader();
-        String playbackUrl = isIsoFile(file) ? resolveIsoPlaybackUrl(streamUrl, cookieHeader) : streamUrl;
-        String playbackCookieHeader = playbackUrl.equals(streamUrl) ? cookieHeader : "";
-        return new ResolvedPlayback(playbackUrl, "", playbackCookieHeader, settings, streams, "", "", isIsoFile(file) && playbackUrl.equals(streamUrl));
+        return new ResolvedPlayback(finalUrl, "", "", settings, streams, "", "", iso && playbackUrl.startsWith("file://"));
     }
 
     private String resolveIsoPlaybackUrl(String streamUrl, String cookieHeader) throws IOException {
@@ -1795,7 +3753,7 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        if (playback.url == null || playback.url.isEmpty()) {
+        if (playback == null || playback.url == null || playback.url.isEmpty()) {
             renderPlayerError("播放地址为空。");
             return;
         }
@@ -1925,7 +3883,8 @@ public final class MainActivity extends Activity {
         panel.setPadding(sdp(24), sdp(14), sdp(24), sdp(16));
         panel.setClipChildren(false);
         panel.setClipToPadding(false);
-        panel.setBackground(rounded(Color.argb(176, 9, 13, 21), Color.argb(82, 255, 255, 255), dp(1), sdp(18)));
+        panel.setBackground(rounded(Theme.withAlpha(theme.isDark() ? COLOR_SURFACE : Color.BLACK, 176),
+                Color.argb(82, 255, 255, 255), dp(1), sdp(18)));
 
         FrameLayout buttonRow = new FrameLayout(this);
         buttonRow.setClipChildren(false);
@@ -2022,6 +3981,7 @@ public final class MainActivity extends Activity {
         double position = resolvePlayerPosition(file, duration);
         PlaybackTimeline timeline = livePlaybackTimeline(file, position, duration);
         rememberPlaybackPosition(file, position, duration);
+        syncKeepScreenOn();
 
         if (playerCurrentTime != null) {
             playerCurrentTime.setText(formatPlaybackTime(timeline.positionSeconds));
@@ -2935,6 +4895,9 @@ public final class MainActivity extends Activity {
 
     private void applyDefaultPlaybackTracks(Models.VideoFile file, Models.AppSettings settings) {
         Models.PlaybackSettings playback = settings == null ? Models.PlaybackSettings.defaults() : settings.playback;
+        if (playerView != null) {
+            playerView.setQualityProfile(api.engine().settings().playbackQualityMode());
+        }
         if (isActiveHlsPlayback()) {
             selectedAudioTrackOrdinal = file.audioTracks.isEmpty() ? -1 : 0;
             selectedRuntimeAudioId = null;
@@ -3163,6 +5126,11 @@ public final class MainActivity extends Activity {
     }
 
     private void loadDefaultSubtitle(Models.VideoFile file, String languagePreference) {
+        if ("no".equals(languagePreference) || "off".equals(languagePreference)) {
+            // 关闭字幕: leave the overlay empty until the user picks a track.
+            clearSubtitleOverlay();
+            return;
+        }
         if (!hasSubtitleSelection()) {
             List<SubtitleCandidate> embeddedCandidates = defaultSubtitleCandidates(file, Collections.emptyList(), languagePreference);
             selectDefaultSubtitleCandidate(file, embeddedCandidates, 0);
@@ -3394,6 +5362,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showLoading(String message) {
+        closeAllOverlays();
         root.removeAllViews();
         applyAppBackground();
         TextView view = text(message, 24, Typeface.BOLD, COLOR_TEXT);
@@ -3401,7 +5370,16 @@ public final class MainActivity extends Activity {
         root.addView(view, match());
     }
 
+    /** Short-lived message for actions taken from the detail page (cache queue errors). */
+    private void showToast(String message) {
+        if (message == null || message.isEmpty()) {
+            return;
+        }
+        main.post(() -> android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show());
+    }
+
     private void renderError(String message, Runnable backAction) {
+        closeAllOverlays();
         root.removeAllViews();
         applyAppBackground();
         LinearLayout page = new LinearLayout(this);
@@ -3418,12 +5396,15 @@ public final class MainActivity extends Activity {
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
-        if (screen == Screen.PLAYER && playerView != null) {
-            if (handlePlayerKeyEvent(event)) {
-                return true;
-            }
+        if (screen == Screen.PLAYER && playerView != null && handlePlayerKeyEvent(event)) {
+            return true;
         }
-        if (screen == Screen.HOME && !isSettingsOpen && handleHomeDpadKeyEvent(event)) {
+        // Whatever screen or panel declared a grid owns the arrow keys, including EditTexts,
+        // which would otherwise swallow them or hand them to the wrong neighbour.
+        if (handleDpadChain(event)) {
+            return true;
+        }
+        if (screen == Screen.HOME && !overlays.hasOpen() && handleHomeDpadKeyEvent(event)) {
             return true;
         }
         return super.dispatchKeyEvent(event);
@@ -3431,84 +5412,133 @@ public final class MainActivity extends Activity {
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE) {
-            if (isSettingsOpen) {
-                closeSettingsOverlay();
-                return true;
-            }
-            if (screen == Screen.HOME && (isSearchOpen || isSortOpen)) {
-                isSearchOpen = false;
-                isSortOpen = false;
-                renderHomeContentKeepingPosition();
-                return true;
-            }
-            if (screen == Screen.PLAYER) {
-                if (playerMenuPanel != null) {
-                    closePlayerMenu(playerPlayPauseButton);
-                    return true;
-                }
-                closePlayer();
-                return true;
-            }
-            if (screen == Screen.DETAIL) {
-                showHome();
-                return true;
-            }
-        }
-
-        if (isSettingsOpen && isDpadNavigationKey(keyCode) && settingsPanel != null && !isDescendant(settingsPanel, getCurrentFocus())) {
-            if (settingsInitialFocus != null) {
-                settingsInitialFocus.requestFocus();
-            } else {
-                settingsPanel.requestFocus();
-            }
+        if ((keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE)
+                && closeTopmostLayer()) {
             return true;
         }
-
+        if (isDpadNavigationKey(keyCode) && rescueFocusIntoTopPanel()) {
+            return true;
+        }
         return super.onKeyDown(keyCode, event);
     }
 
     @Override
     public void onBackPressed() {
-        if (isSettingsOpen) {
-            closeSettingsOverlay();
-            return;
-        }
-        if (screen == Screen.HOME && (isSearchOpen || isSortOpen)) {
-            isSearchOpen = false;
-            isSortOpen = false;
-            renderHomeContentKeepingPosition();
-            return;
-        }
-        if (screen == Screen.PLAYER) {
-            if (playerMenuPanel != null) {
-                closePlayerMenu(playerPlayPauseButton);
-                return;
-            }
-            closePlayer();
-            return;
-        }
-        if (screen == Screen.DETAIL) {
-            showHome();
+        if (closeTopmostLayer()) {
             return;
         }
         super.onBackPressed();
     }
 
+    /**
+     * The one back-key path: leave the topmost thing the user can leave. Panels unwind through
+     * {@link Overlays#closeTop()}, so a dialog opened from a dialog can never be skipped and a
+     * panel cannot be closed twice by the two back entry points.
+     */
+    private boolean closeTopmostLayer() {
+        if (screen == Screen.PLAYER && playerMenuPanel != null) {
+            closePlayerMenu(playerPlayPauseButton);
+            return true;
+        }
+        if (overlays.closeTop()) {
+            return true;
+        }
+        if (screen == Screen.PLAYER) {
+            closePlayer();
+            return true;
+        }
+        if (screen == Screen.HOME && (isSearchOpen || isSortOpen)) {
+            isSearchOpen = false;
+            isSortOpen = false;
+            renderHomeContentKeepingPosition();
+            // The rows that held focus (the search field, the option buttons) are gone.
+            if (homeSearchToggle != null) {
+                homeSearchToggle.requestFocus();
+            }
+            return true;
+        }
+        if (screen == Screen.DETAIL) {
+            showHome();
+            return true;
+        }
+        if (screen == Screen.SETUP && api.hasServerUrl()) {
+            showHome();
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Focus can land on a container after a list rebuilds itself; with a panel open the arrow
+     * keys must not start driving the screen underneath it, so pull focus back in.
+     */
+    private boolean rescueFocusIntoTopPanel() {
+        Overlays.Overlay top = overlays.top();
+        if (top == null) {
+            return false;
+        }
+        View focused = getCurrentFocus();
+        if (focused != null && isDescendant(top.body, focused)) {
+            return false;
+        }
+        focusGrid.focusFirst();
+        return true;
+    }
+
     private boolean isDpadNavigationKey(int keyCode) {
-        return keyCode == KeyEvent.KEYCODE_DPAD_UP ||
-                keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
-                keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
-                keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
-                keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
-                keyCode == KeyEvent.KEYCODE_ENTER;
+        return keyCode == KeyEvent.KEYCODE_DPAD_UP
+                || keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                || keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+                || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                || keyCode == KeyEvent.KEYCODE_DPAD_CENTER
+                || keyCode == KeyEvent.KEYCODE_ENTER;
     }
 
     private boolean isDpadArrowKey(int keyCode) {
-        return keyCode == KeyEvent.KEYCODE_DPAD_UP ||
-                keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
-                keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
-                keyCode == KeyEvent.KEYCODE_DPAD_RIGHT;
+        return keyCode == KeyEvent.KEYCODE_DPAD_UP
+                || keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                || keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+                || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT;
+    }
+
+    private boolean handleHomeDpadKeyEvent(KeyEvent event) {
+        if (event == null || event.getAction() != KeyEvent.ACTION_DOWN
+                || !isDpadArrowKey(event.getKeyCode())) {
+            return false;
+        }
+        View current = getCurrentFocus();
+        if (current instanceof EditText) {
+            return false;
+        }
+        if (current == null || !isDescendant(root, current)) {
+            requestFirstHomeFocus();
+            return true;
+        }
+        View next = current.focusSearch(focusDirectionForKey(event.getKeyCode()));
+        if (next == null || !isDescendant(root, next) || !next.isFocusable()) {
+            return true;
+        }
+        next.requestFocus();
+        FocusGrid.scrollToVisible(next);
+        return true;
+    }
+
+    private void requestFirstHomeFocus() {
+        View target = FocusGrid.firstButton(homeFocusRows());
+        if (target != null) {
+            FocusGrid.grab(target);
+            return;
+        }
+        ArrayList<View> focusables = root == null ? new ArrayList<>() : root.getFocusables(View.FOCUS_FORWARD);
+        for (View focusable : focusables) {
+            if (focusable != null && focusable.isShown() && focusable.isFocusable()) {
+                focusable.requestFocus();
+                return;
+            }
+        }
+        if (root != null) {
+            root.requestFocus();
+        }
     }
 
     private int focusDirectionForKey(int keyCode) {
@@ -3522,43 +5552,6 @@ public final class MainActivity extends Activity {
             return View.FOCUS_LEFT;
         }
         return View.FOCUS_RIGHT;
-    }
-
-    private boolean handleHomeDpadKeyEvent(KeyEvent event) {
-        if (event == null || event.getAction() != KeyEvent.ACTION_DOWN || !isDpadArrowKey(event.getKeyCode())) {
-            return false;
-        }
-
-        View current = getCurrentFocus();
-        if (current instanceof EditText) {
-            return false;
-        }
-
-        if (current == null || !isDescendant(root, current)) {
-            requestFirstHomeFocus();
-            return true;
-        }
-
-        View next = current.focusSearch(focusDirectionForKey(event.getKeyCode()));
-        if (next == null || !isDescendant(root, next) || !next.isFocusable()) {
-            return true;
-        }
-
-        next.requestFocus();
-        return true;
-    }
-
-    private void requestFirstHomeFocus() {
-        ArrayList<View> focusables = root == null ? new ArrayList<>() : root.getFocusables(View.FOCUS_FORWARD);
-        for (View focusable : focusables) {
-            if (focusable != null && focusable.isShown() && focusable.isFocusable()) {
-                focusable.requestFocus();
-                return;
-            }
-        }
-        if (root != null) {
-            root.requestFocus();
-        }
     }
 
     private boolean isDescendant(View parent, View child) {
@@ -3889,6 +5882,23 @@ public final class MainActivity extends Activity {
         playerView.togglePaused();
         playerPaused = !playerPaused;
         updatePlayerPlayPauseIcon();
+        syncKeepScreenOn();
+    }
+
+    /**
+     * 只有播放器真正在播放时才保持屏幕常亮；暂停或播放结束后清掉
+     * FLAG_KEEP_SCREEN_ON，让系统按正常策略息屏。
+     */
+    private void syncKeepScreenOn() {
+        if (screen != Screen.PLAYER || playerView == null) {
+            return;
+        }
+        boolean keepOn = playerView.isPlaying();
+        if (keepOn) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
     }
 
     private void updatePlayerPlayPauseIcon() {
@@ -3984,6 +5994,7 @@ public final class MainActivity extends Activity {
         stopSmoothPlayerSeek();
         stopActiveHlsSession();
         RemoteIsoStreamServer.shared().clear();
+        SmbStreamServer.shared().clear();
         if (playerView != null) {
             closePlayerMenu(null);
             stopPlayerUiUpdates();
@@ -4057,6 +6068,9 @@ public final class MainActivity extends Activity {
     protected void onDestroy() {
         destroyPlayer();
         io.shutdownNow();
+        if (phoneInput != null) {
+            phoneInput.stop();
+        }
         super.onDestroy();
     }
 
@@ -4073,13 +6087,13 @@ public final class MainActivity extends Activity {
         return result;
     }
 
+    /** 首页名单：只按搜索词过滤再排序，不再有类型 / 观看状态筛选。 */
     private List<Models.LibraryItem> displayedItems() {
         String normalizedSearch = searchText == null ? "" : searchText.trim().toLowerCase(Locale.ROOT);
-        ArrayList<Models.LibraryItem> result = new ArrayList<>();
-        for (Models.LibraryItem item : libraryItems) {
-            if (normalizedSearch.isEmpty() || item.title.toLowerCase(Locale.ROOT).contains(normalizedSearch)) {
-                result.add(item);
-            }
+        ArrayList<Models.LibraryItem> result = new ArrayList<>(libraryItems);
+        if (!normalizedSearch.isEmpty()) {
+            result.removeIf(item -> item.title == null
+                    || !item.title.toLowerCase(Locale.ROOT).contains(normalizedSearch));
         }
         result.sort(libraryComparator());
         return result;
@@ -4413,19 +6427,25 @@ public final class MainActivity extends Activity {
         return remembered == null ? Math.max(0, file.durationSeconds) : Math.max(file.durationSeconds, remembered.durationSeconds);
     }
 
+    /** 三态文案，与 mac 版 PlaybackWatchState.statusLabel 一一对应。 */
     private String watchedStatusLabel(Models.VideoFile file) {
         if (file == null) {
-            return "未播";
+            return "未观看";
         }
         if (isEffectivelyWatched(file)) {
-            return "已播";
+            return "已观看";
         }
-        return file.positionSeconds > 5 ? "未播完" : "未播";
+        return file.positionSeconds > 5 ? "观看中" : "未观看";
     }
 
     private String playButtonText(Models.VideoFile file) {
+        return playButtonText(file, true);
+    }
+
+    /** 电影页不带集号；剧集页标出点下去会播的那一集。 */
+    private String playButtonText(Models.VideoFile file, boolean includeEpisodeLabel) {
         String action = isEffectivelyWatched(file) ? "重新播放" : (file.positionSeconds > 5 ? "继续播放" : "开始播放");
-        if (file.seasonNumber != null && file.episodeNumber != null) {
+        if (includeEpisodeLabel && file.seasonNumber != null && file.episodeNumber != null) {
             return action + " " + episodeDisplayLabel(file.seasonNumber, file.episodeNumber);
         }
         return action;
@@ -4477,9 +6497,12 @@ public final class MainActivity extends Activity {
         return subtitle.isEmpty() ? label : label + "·" + subtitle;
     }
 
-    private String episodeFacts(Models.Episode episode) {
+    /** 集号 + 首播日期；集号已经出现在标题里时只留日期，免得同一行读两遍。 */
+    private String episodeFacts(Models.Episode episode, boolean includeLabel) {
         ArrayList<String> facts = new ArrayList<>();
-        facts.add(episodeDisplayLabel(episode.seasonNumber, episode.episodeNumber));
+        if (includeLabel) {
+            facts.add(episodeDisplayLabel(episode.seasonNumber, episode.episodeNumber));
+        }
         if (episode.airDate != null && !episode.airDate.isEmpty()) {
             facts.add(episode.airDate);
         }
@@ -5187,6 +7210,29 @@ public final class MainActivity extends Activity {
         return releaseDate == null || releaseDate.length() < 4 ? null : releaseDate.substring(0, 4);
     }
 
+    /**
+     * 未刮削条目的展示名：「The.Last.of.Us.2023.1080p」这类无空格的场景命名改成可读标题；
+     * 已带空格的正式片名原样保留。
+     */
+    static String prettifyMediaTitle(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String value = raw.trim();
+        long dots = 0;
+        for (int index = 0; index < value.length(); index++) {
+            if (value.charAt(index) == '.') {
+                dots++;
+            }
+        }
+        if (value.isEmpty() || value.indexOf(' ') >= 0 || (dots < 2 && value.indexOf('_') < 0)) {
+            return value;
+        }
+        String cleaned = value.replace('[', ' ').replace(']', ' ')
+                .replace('.', ' ').replace('_', ' ').replaceAll(" {2,}", " ").trim();
+        return cleaned.isEmpty() ? value : cleaned;
+    }
+
     private String ratingText(Double voteAverage) {
         return voteAverage != null && voteAverage > 0 && Double.isFinite(voteAverage) ? String.format(Locale.CHINA, "%.1f", voteAverage) : null;
     }
@@ -5280,7 +7326,9 @@ public final class MainActivity extends Activity {
         runAsync(
                 () -> api.getSubtitleCacheStatus(file.id),
                 status -> {
-                    subtitleCacheStatusCache.put(file.id, status);
+                    // 本地目录没有字幕记录，接口会返回 null；ConcurrentHashMap 不允许 null 值。
+                    subtitleCacheStatusCache.put(file.id, status == null
+                            ? Models.SubtitleCacheStatus.fromJson(null) : status);
                     if (screen == Screen.DETAIL && currentDetail != null && currentDetail.id.equals(detail.id)) {
                         renderDetail(currentDetail);
                     }
@@ -5369,12 +7417,7 @@ public final class MainActivity extends Activity {
     }
 
     private FrameLayout progressBar(int percent, int width, int height) {
-        FrameLayout track = new FrameLayout(this);
-        track.setBackground(rounded(Color.rgb(229, 231, 235), Color.TRANSPARENT, 0, height / 2));
-        View fill = new View(this);
-        fill.setBackground(rounded(COLOR_FOCUS, Color.TRANSPARENT, 0, height / 2));
-        track.addView(fill, new FrameLayout.LayoutParams(percent <= 0 ? 0 : Math.max(dp(2), Math.round(width * percent / 100f)), ViewGroup.LayoutParams.MATCH_PARENT));
-        return track;
+        return widgets.progressBar(percent, width, height);
     }
 
     private GridLayout posterGrid() {
@@ -5433,37 +7476,56 @@ public final class MainActivity extends Activity {
 
     private <T> void runAsync(Task<T> task, Success<T> success, Failure failure) {
         io.execute(() -> {
+            T result = null;
+            Throwable raised = null;
             try {
-                T result = task.run();
-                main.post(() -> success.accept(result));
-            } catch (Exception error) {
-                main.post(() -> failure.accept(error));
+                result = task.run();
+            } catch (Throwable error) {
+                // Errors (missing class, linkage problems, OOM) used to escape here and take the
+                // whole app down, which on a TV looks like a random restart.
+                CrashLog.record(this, "后台任务", error);
+                raised = error;
             }
+            final T value = result;
+            final Throwable raisedError = raised;
+            main.post(() -> {
+                try {
+                    if (raisedError == null) {
+                        success.accept(value);
+                    } else {
+                        failure.accept(raisedError);
+                    }
+                } catch (Throwable callbackBroke) {
+                    // A broken callback on the main thread is what a "闪退" usually is.
+                    CrashLog.record(this, "界面回调", callbackBroke);
+                    showToast(CrashLog.summarize(callbackBroke));
+                }
+            });
         });
     }
 
     private EditText input(String hint, String value) {
-        EditText editText = new EditText(this);
-        editText.setText(value);
-        editText.setHint(hint);
-        editText.setSingleLine(true);
-        editText.setTextSize(18);
-        editText.setTextColor(COLOR_TEXT);
-        editText.setHintTextColor(COLOR_SUBTLE);
-        editText.setPadding(dp(18), 0, dp(18), 0);
-        editText.setSelectAllOnFocus(false);
-        editText.setBackground(rounded(COLOR_SURFACE, COLOR_BORDER, dp(2), dp(8)));
-        editText.setMinHeight(dp(58));
-        editText.setFocusable(true);
-        editText.setFocusableInTouchMode(true);
-        applyInputFocus(editText);
-        return editText;
+        return widgets.input(hint, value);
+    }
+
+    /** The two-tone chip in front of a theme name: panel colour on the right, accent on the left. */
+    private Drawable themeSwatch(Theme.Variant variant) {
+        GradientDrawable base = new GradientDrawable();
+        base.setColor(variant.surface);
+        base.setCornerRadius(dp(3));
+        base.setStroke(dp(1), Theme.blend(variant.surface,
+                variant.dark ? Color.WHITE : Color.BLACK, 0.24f));
+        GradientDrawable accent = new GradientDrawable();
+        accent.setColor(variant.accent);
+        accent.setCornerRadius(dp(2));
+        LayerDrawable layer = new LayerDrawable(new Drawable[]{base, accent});
+        layer.setLayerInset(1, dp(3), dp(3), Math.round(dp(30) * 0.55f), dp(3));
+        layer.setBounds(0, 0, dp(30), dp(18));
+        return layer;
     }
 
     private Button compactButton(String label) {
-        Button button = button(label);
-        button.setTextSize(ssp(15));
-        return button;
+        return widgets.toolbarButton(label);
     }
 
     private Button playerButton(String label) {
@@ -5485,12 +7547,7 @@ public final class MainActivity extends Activity {
         button.setBackground(rounded(Color.argb(70, 255, 255, 255), Color.argb(86, 255, 255, 255), FOCUS_STROKE_PX, sdp(24)));
         button.setFocusable(true);
         button.setFocusableInTouchMode(false);
-        button.setOnFocusChangeListener((focusedView, hasFocus) -> {
-            animateFocusScale(focusedView, hasFocus);
-            button.setTextColor(hasFocus ? COLOR_FOCUS : Color.WHITE);
-            focusedView.setBackground(rounded(Color.argb(hasFocus ? 224 : 70, 255, 255, 255), Color.argb(hasFocus ? 224 : 86, 255, 255, 255), FOCUS_STROKE_PX, sdp(24)));
-            focusedView.setElevation(0);
-        });
+        theme.stylePlayerButtonFocus(button);
         return button;
     }
 
@@ -5506,12 +7563,7 @@ public final class MainActivity extends Activity {
         button.setBackground(rounded(Color.argb(26, 255, 255, 255), Color.argb(136, 255, 255, 255), FOCUS_STROKE_PX, sdp(24)));
         button.setFocusable(true);
         button.setFocusableInTouchMode(false);
-        button.setOnFocusChangeListener((focusedView, hasFocus) -> {
-            animateFocusScale(focusedView, hasFocus);
-            button.setColorFilter(hasFocus ? COLOR_FOCUS : Color.WHITE);
-            focusedView.setBackground(rounded(hasFocus ? Color.argb(222, 255, 255, 255) : Color.argb(26, 255, 255, 255), Color.argb(hasFocus ? 232 : 136, 255, 255, 255), FOCUS_STROKE_PX, sdp(24)));
-            focusedView.setElevation(0);
-        });
+        theme.stylePlayerIconFocus(button);
         return button;
     }
 
@@ -5536,242 +7588,99 @@ public final class MainActivity extends Activity {
         button.setBackground(rounded(Color.argb(selected ? 44 : 18, 255, 255, 255), Color.argb(112, 255, 255, 255), FOCUS_STROKE_PX, sdp(10)));
         button.setFocusable(true);
         button.setFocusableInTouchMode(false);
-        button.setOnFocusChangeListener((focusedView, hasFocus) -> {
-            animateFocusScale(focusedView, hasFocus);
-            button.setTextColor(hasFocus ? COLOR_FOCUS : (selected ? COLOR_ACCENT : Color.WHITE));
-            focusedView.setBackground(rounded(hasFocus ? Color.argb(226, 255, 255, 255) : Color.argb(selected ? 44 : 18, 255, 255, 255), Color.argb(hasFocus ? 226 : 112, 255, 255, 255), FOCUS_STROKE_PX, sdp(10)));
-            focusedView.setElevation(0);
-        });
+        theme.stylePlayerMenuFocus(button, selected);
         return button;
     }
 
+    // ---- shared controls: every button/label in this app comes from ui/Widgets ----
+
     private Button button(String label) {
-        return button(label, false);
+        return widgets.button(label);
     }
 
     private Button button(String label, boolean active) {
-        Button button = new Button(this);
-        button.setText(label);
-        button.setTextSize(ssp(17));
-        button.setAllCaps(false);
-        button.setTextColor(active ? COLOR_FOCUS : COLOR_TEXT);
-        button.setGravity(Gravity.CENTER);
-        button.setPadding(sdp(14), 0, sdp(14), 0);
-        button.setMinWidth(0);
-        button.setMinHeight(0);
-        button.setMinimumWidth(0);
-        button.setMinimumHeight(0);
-        button.setIncludeFontPadding(false);
-        button.setBackgroundTintList(null);
-        button.setStateListAnimator(null);
-        button.setClipToOutline(true);
-        button.setBackground(rounded(active ? COLOR_FOCUS_SOFT : Color.argb(238, 255, 255, 255), active ? COLOR_FOCUS : COLOR_BORDER, FOCUS_STROKE_PX, sdp(9)));
-        button.setFocusable(true);
-        button.setFocusableInTouchMode(false);
-        applyButtonFocus(button, active);
-        return button;
-    }
-
-    private Button settingsOptionButton(String label, boolean selected) {
-        Button button = button((selected ? "✓ " : "  ") + label, false);
-        button.setGravity(Gravity.CENTER_VERTICAL);
-        button.setTextColor(COLOR_TEXT);
-        applySettingsOptionFocus(button);
-        return button;
+        return widgets.button(label, active);
     }
 
     private TextView title(String value) {
-        TextView title = text(value, ssp(32), Typeface.BOLD, COLOR_TEXT);
-        title.setLineSpacing(sdp(3), 1f);
-        return title;
+        return widgets.display(value);
     }
 
     private TextView sectionTitle(String value) {
-        TextView title = text(value, ssp(24), Typeface.BOLD, COLOR_TEXT);
-        title.setPadding(0, sdp(12), 0, sdp(14));
-        title.setLineSpacing(sdp(2), 1f);
-        return title;
+        return widgets.sectionTitle(value);
     }
 
     private TextView body(String value) {
-        TextView text = text(value, ssp(16), Typeface.NORMAL, COLOR_MUTED);
-        text.setLineSpacing(sdp(3), 1f);
-        text.setPadding(0, sdp(8), 0, sdp(18));
-        return text;
+        return widgets.body(value);
     }
 
     private TextView emptyText(String value) {
-        TextView text = text(value, ssp(16), Typeface.NORMAL, COLOR_SUBTLE);
-        text.setPadding(0, 0, 0, sdp(28));
-        return text;
+        return widgets.empty(value);
     }
 
     private TextView metaPill(String value) {
-        return metaPill(value, COLOR_MUTED);
+        return widgets.metaPill(value);
     }
 
     private TextView metaPill(String value, int textColor) {
-        TextView pill = text(value, ssp(14), Typeface.BOLD, textColor);
-        pill.setGravity(Gravity.CENTER);
-        pill.setPadding(sdp(13), 0, sdp(13), 0);
-        pill.setBackground(rounded(Color.argb(184, 255, 255, 255), COLOR_BORDER, dp(1), sdp(999)));
-        pill.setMinHeight(sdp(32));
-        return pill;
+        return widgets.metaPill(value, textColor);
     }
 
     private TextView badge(String value) {
-        return badge(value, COLOR_TEXT);
+        return widgets.badge(value, COLOR_TEXT);
     }
 
     private TextView badge(String value, int textColor) {
-        TextView badge = text(value, ssp(13), Typeface.BOLD, textColor);
-        badge.setGravity(Gravity.CENTER);
-        badge.setPadding(sdp(8), 0, sdp(8), 0);
-        badge.setMinHeight(sdp(30));
-        badge.setBackground(rounded(Color.argb(230, 255, 255, 255), Color.TRANSPARENT, 0, sdp(7)));
-        return badge;
+        return widgets.badge(value, textColor);
     }
 
     private TextView text(String value, int sp, int style, int color) {
-        TextView textView = new TextView(this);
-        textView.setText(value == null ? "" : value);
-        textView.setTextSize(sp);
-        textView.setTypeface(Typeface.DEFAULT, style);
-        textView.setTextColor(color);
-        textView.setIncludeFontPadding(false);
-        textView.setFontFeatureSettings("kern");
-        textView.setPaintFlags(textView.getPaintFlags() | Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG | Paint.LINEAR_TEXT_FLAG);
-        return textView;
+        return widgets.text(value, sp, style, color);
     }
 
-    private void applyButtonFocus(Button button, boolean active) {
-        button.setOnFocusChangeListener((focusedView, hasFocus) -> {
-            animateFocusScale(focusedView, hasFocus);
-            button.setTextColor(hasFocus || active ? COLOR_FOCUS : COLOR_TEXT);
-            focusedView.setBackground(rounded(hasFocus || active ? Color.argb(248, 255, 255, 255) : Color.argb(238, 255, 255, 255), COLOR_BORDER, FOCUS_STROKE_PX, sdp(9)));
-            focusedView.setElevation(0);
-        });
-    }
-
-    private void applySettingsOptionFocus(Button button) {
-        button.setOnFocusChangeListener((focusedView, hasFocus) -> {
-            animateFocusScale(focusedView, hasFocus);
-            button.setTextColor(COLOR_TEXT);
-            focusedView.setBackground(rounded(hasFocus ? Color.argb(248, 255, 255, 255) : Color.argb(238, 255, 255, 255), COLOR_BORDER, FOCUS_STROKE_PX, sdp(9)));
-            focusedView.setElevation(0);
-        });
-    }
-
-    private void applyInputFocus(EditText editText) {
-        editText.setOnFocusChangeListener((focusedView, hasFocus) -> {
-            focusedView.setBackground(rounded(COLOR_SURFACE, COLOR_BORDER, dp(2), sdp(8)));
-            focusedView.setElevation(0);
-        });
-    }
-
-    private void applyCardFocus(View view) {
-        applyCardFocus(view, null);
-    }
-
-    private void applyCardFocus(View view, Runnable onFocused) {
-        view.setOnFocusChangeListener((focusedView, hasFocus) -> {
-            animateFocusScale(focusedView, hasFocus);
-            focusedView.setBackground(rounded(Color.TRANSPARENT, Color.TRANSPARENT, 0, sdp(8)));
-            focusedView.setElevation(hasFocus ? sdp(10) : 0);
-            if (hasFocus && onFocused != null) {
-                onFocused.run();
-            }
-        });
-    }
+    // ---- focus styles: ui/Theme owns them so a card cannot look different per screen ----
 
     private void applyPosterCardFocus(View card, FrameLayout posterFrame, Runnable onFocused) {
-        card.setOnFocusChangeListener((focusedView, hasFocus) -> {
-            animateFocusScale(focusedView, hasFocus);
-            focusedView.setBackground(rounded(Color.TRANSPARENT, Color.TRANSPARENT, 0, sdp(8)));
-            focusedView.setElevation(hasFocus ? sdp(12) : 0);
-            posterFrame.setBackground(rounded(COLOR_SURFACE_ALT, COLOR_BORDER, dp(1), sdp(12)));
-            posterFrame.setElevation(hasFocus ? sdp(8) : 0);
-            if (hasFocus && onFocused != null) {
-                onFocused.run();
-            }
-        });
+        theme.stylePosterFocus(card, posterFrame, onFocused);
     }
 
+    /** 分集缩略图与海报卡片用同一套焦点样式：一张阴影，背景预先画好，换焦点时只换引用。 */
     private void applyEpisodeStillFocus(View card, FrameLayout stillFrame, boolean showDetails, Button playButton, Models.VideoFile playbackFile) {
-        card.setOnFocusChangeListener((focusedView, hasFocus) -> {
-            focusedView.animate().scaleX(1f).scaleY(1f).setDuration(0).start();
-            animateFocusScale(stillFrame, hasFocus);
-            focusedView.setBackground(rounded(Color.TRANSPARENT, Color.TRANSPARENT, 0, sdp(8)));
-            focusedView.setElevation(hasFocus ? sdp(10) : 0);
-            stillFrame.setBackground(rounded(COLOR_SURFACE_ALT, COLOR_BORDER, FOCUS_STROKE_PX, sdp(12)));
-            stillFrame.setElevation(hasFocus ? sdp(10) : 0);
-            if (hasFocus && playButton != null && playbackFile != null) {
+        applyPosterCardFocus(card, stillFrame, () -> {
+            if (playButton != null && playbackFile != null) {
                 playButton.setText(playButtonText(playbackFile));
                 playButton.setTag(playbackFile);
             }
         });
     }
 
-    private void applyBadgeFocus(TextView badge) {
-        badge.setOnFocusChangeListener((focusedView, hasFocus) -> {
-            animateFocusScale(focusedView, hasFocus);
-            focusedView.setBackground(rounded(Color.argb(235, 255, 255, 255), Color.TRANSPARENT, 0, sdp(7)));
-            focusedView.setElevation(hasFocus ? sdp(8) : 0);
-        });
-    }
-
     private void applyWatchedIconFocus(TextView icon, boolean watched) {
+        icon.setBackgroundColor(Color.TRANSPARENT);
+        icon.setTextColor(watched ? COLOR_FOCUS : COLOR_SUBTLE);
         icon.setOnFocusChangeListener((focusedView, hasFocus) -> {
             animateFocusScale(focusedView, hasFocus);
             icon.setTextColor(hasFocus || watched ? COLOR_FOCUS : COLOR_SUBTLE);
-            focusedView.setBackgroundColor(Color.TRANSPARENT);
-            focusedView.setElevation(0);
         });
     }
 
     private void animateFocusScale(View view, boolean hasFocus) {
-        view.animate()
-                .scaleX(hasFocus ? FOCUS_SCALE : 1f)
-                .scaleY(hasFocus ? FOCUS_SCALE : 1f)
-                .setDuration(FOCUS_ANIMATION_MS)
-                .start();
+        theme.animateFocusScale(view, hasFocus);
     }
 
     private void applyAppBackground() {
-        GradientDrawable background = new GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                new int[]{
-                        Color.rgb(229, 236, 246),
-                        Color.rgb(216, 230, 243),
-                        blend(COLOR_ACCENT, Color.rgb(210, 224, 232), 0.78f)
-                });
-        root.setBackground(background);
+        root.setBackground(theme.appBackground());
     }
 
     private GradientDrawable rounded(int fillColor, int strokeColor, int strokeWidth, int radius) {
-        GradientDrawable drawable = new GradientDrawable();
-        drawable.setColor(fillColor);
-        drawable.setCornerRadius(radius);
-        if (strokeWidth > 0) {
-            drawable.setStroke(strokeWidth, strokeColor);
-        }
-        return drawable;
-    }
-
-    private int blend(int from, int to, float amount) {
-        float clamped = Math.max(0f, Math.min(1f, amount));
-        int red = Math.round(Color.red(from) + (Color.red(to) - Color.red(from)) * clamped);
-        int green = Math.round(Color.green(from) + (Color.green(to) - Color.green(from)) * clamped);
-        int blue = Math.round(Color.blue(from) + (Color.blue(to) - Color.blue(from)) * clamped);
-        return Color.rgb(red, green, blue);
+        return theme.panel(fillColor, strokeColor, strokeWidth, radius);
     }
 
     private FrameLayout.LayoutParams match() {
-        return new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+        return Widgets.fill();
     }
 
     private LinearLayout.LayoutParams matchWidth() {
-        return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        return Widgets.column();
     }
 
     private LinearLayout.LayoutParams margin(LinearLayout.LayoutParams params, int left, int top, int right, int bottom) {
@@ -5780,37 +7689,15 @@ public final class MainActivity extends Activity {
     }
 
     private int dp(float value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+        return theme.dp(value);
     }
 
     private int sdp(float value) {
-        return Math.round(dp(value) * tvScale());
+        return theme.sdp(value);
     }
 
     private int ssp(int value) {
-        return Math.round(value * textScale());
-    }
-
-    private float tvScale() {
-        int width = getResources().getDisplayMetrics().widthPixels;
-        if (width >= 3600) {
-            return 1.18f;
-        }
-        if (width >= 2500) {
-            return 1.10f;
-        }
-        return 1f;
-    }
-
-    private float textScale() {
-        int width = getResources().getDisplayMetrics().widthPixels;
-        if (width >= 3600) {
-            return 1.12f;
-        }
-        if (width >= 2500) {
-            return 1.06f;
-        }
-        return 1f;
+        return theme.ssp(value);
     }
 
     private String join(List<String> values, String separator) {
@@ -6030,6 +7917,6 @@ public final class MainActivity extends Activity {
     }
 
     private interface Failure {
-        void accept(Exception error);
+        void accept(Throwable error);
     }
 }

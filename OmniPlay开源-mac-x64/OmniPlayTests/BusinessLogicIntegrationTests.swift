@@ -27,11 +27,6 @@ struct BusinessLogicIntegrationTests {
         #expect(MediaSourceProtocol.webdav.webDAVPathValidationError("https://nas.local:5006/dav") != nil)
         #expect(MediaSourceProtocol.webdav.webDAVPathValidationError("https://nas.local:5006/电影") == nil)
 
-        #expect(MediaSourceProtocol.omniplayDocker.normalizedBaseURL("192.168.1.10:45722") == "http://192.168.1.10:45722")
-        #expect(MediaSourceProtocol.omniplayDocker.normalizedBaseURL("http://nas.local:45722/api/health") == "http://nas.local:45722")
-        #expect(MediaSourceProtocol.omniplayDocker.normalizedBaseURL("http://nas.local:45722/omniplay/api/auth/status") == "http://nas.local:45722/omniplay")
-        #expect(MediaSourceProtocol.omniplayDocker.isValidBaseURL("192.168.1.10:45722"))
-
         #expect(MediaSourceProtocol.direct.normalizedBaseURL("/anything") == "/")
         #expect(MediaSourceProtocol.direct.isValidBaseURL("/"))
 
@@ -60,10 +55,19 @@ struct BusinessLogicIntegrationTests {
         #expect(bdmvMetadata.foreignTitle?.localizedCaseInsensitiveContains("Gone with the Wind") == true)
         #expect(!(bdmvMetadata.foreignTitle ?? "").localizedCaseInsensitiveContains("Bonus"))
 
+        let goneWindMovieDisc = "Gone.with.the.Wind.1939.1080p.75th.Anniversary.Edition.Blu-ray.AVC.DTS-HD.MA5.1-DiY@HDHome/Disc 1 - Gone with the Wind - The Movie/BDMV/STREAM/00003.m2ts"
+        let goneWindMovieDiscMetadata = MediaNameParser.extractSearchMetadata(from: goneWindMovieDisc)
+        #expect(goneWindMovieDiscMetadata.foreignTitle == "Gone with the Wind")
+
         let plainDiscSample = "Gone.with.the.Wind.1939/Disc - Gone with the Wind/BDMV/STREAM/00027.m2ts"
         let plainDiscMetadata = MediaNameParser.extractSearchMetadata(from: plainDiscSample)
         #expect(plainDiscMetadata.foreignTitle?.localizedCaseInsensitiveContains("Gone with the Wind") == true)
         #expect(!(plainDiscMetadata.foreignTitle ?? "").localizedCaseInsensitiveContains("Disc"))
+
+        let judgementSample = "Judgement at Nuremberg 1961 GER Blu-ray 1080p AVC DTS-HD MA 5.1-pt520@HDSky/BDMV/STREAM/00004.m2ts"
+        let judgementMetadata = MediaNameParser.extractSearchMetadata(from: judgementSample)
+        #expect(judgementMetadata.foreignTitle == "Judgement at Nuremberg")
+        #expect(judgementMetadata.year == "1961")
 
         let jagtenSample = "/电影/Jagten.AKA.The.Hunt.2012.1080p.USA.Repack.Blu-ray.AVC.DTS-HD.MA.5.1-bb@HDSky.iso"
         let jagtenMetadata = MediaNameParser.extractSearchMetadata(from: jagtenSample)
@@ -107,6 +111,10 @@ struct BusinessLogicIntegrationTests {
         #expect(!(fateMetadata.fullCleanTitle ?? "").contains("剧场版"))
         #expect(!(fateMetadata.fullCleanTitle ?? "").contains("劇場版"))
         #expect(fateMetadata.year == "2019")
+
+        let fateZeroSpecial = "命运之夜前传特典：拜托了！爱因兹贝伦咨询室.Fate ∕ Zero.Einzbern.Counseling.Room.S00.2012.1080p.Blu-ray.Remux.LPCM 2.0-LuckAni/命运之夜前传特典：拜托了！爱因兹贝伦咨询室.Fate ∕ Zero.Einzbern.Counseling.Room.S00E01.2012.1080p.Blu-ray.Remux.LPCM 2.0-LuckAni.mkv"
+        let fateZeroSpecialMetadata = MediaNameParser.extractSearchMetadata(from: fateZeroSpecial)
+        #expect(fateZeroSpecialMetadata.chineseTitle == "命运之夜前传")
 
         let killBillDiscSample = "/电影/杀死比尔.Kill.Bill.Vol.1-2.2003-2004.Blu-ray.1080p.AVC.LPCM5.1-CMCT/VOL_2/BDMV/STREAM/00001.m2ts"
         let killBillDiscMetadata = MediaNameParser.extractSearchMetadata(from: killBillDiscSample)
@@ -162,38 +170,58 @@ struct BusinessLogicIntegrationTests {
         #expect(parsed.isTVShow)
         #expect(parsed.season == 2)
         #expect(parsed.episode == 11)
-        #expect(parsed.detectedSubtitle == nil)
 
-        let partOne = MediaNameParser.parseEpisodeInfo(from: "Variety.Show.S01E01.part1.mkv", fallbackIndex: 0)
-        #expect(partOne.isTVShow)
-        #expect(partOne.season == 1)
-        #expect(partOne.episode == 1)
-        #expect(partOne.detectedSubtitle == "Part 1")
-        #expect(partOne.displayName == "第 1 集 · Part 1")
+        let partDescriptor = MediaNameParser.parseEpisodeDescriptor(from: "Show.S01E01.Part1.2160p.WEB-DL.mkv", fallbackIndex: 0)
+        #expect(partDescriptor.segmentIndex == 1)
+        #expect(partDescriptor.segmentLabel == "Part 1")
+        #expect(partDescriptor.variantTitle == nil)
+        #expect(partDescriptor.displayName == "第 1 季 第 1 集 · Part 1")
 
-        let zeroSeasonPart = MediaNameParser.parseEpisodeInfo(from: "Variety.Show.S0E01.part2.mkv", fallbackIndex: 0)
-        #expect(zeroSeasonPart.season == 1)
-        #expect(zeroSeasonPart.episode == 1)
-        #expect(zeroSeasonPart.detectedSubtitle == "Part 2")
+        let variantDescriptor = MediaNameParser.parseEpisodeDescriptor(from: "Show.S01E01.导师版.1080p.WEB-DL.mkv", fallbackIndex: 0)
+        #expect(variantDescriptor.segmentIndex == nil)
+        #expect(variantDescriptor.variantTitle == "导师版")
+        #expect(variantDescriptor.displayName == "第 1 季 第 1 集 · 导师版")
 
-        let subtitleEpisode = MediaNameParser.parseEpisodeInfo(from: "Variety.Show.S01E01.开场嘉宾.2160p.WEB-DL.mkv", fallbackIndex: 0)
-        #expect(subtitleEpisode.season == 1)
-        #expect(subtitleEpisode.episode == 1)
-        #expect(subtitleEpisode.detectedSubtitle == "开场嘉宾")
-
-        let subtitleMetadata = MediaNameParser.extractSearchMetadata(from: "/TV/Variety.Show/Variety.Show.S01E01.开场嘉宾.2160p.WEB-DL.mkv")
-        #expect(subtitleMetadata.foreignTitle == "Variety Show")
+        let hybridDescriptor = MediaNameParser.parseEpisodeDescriptor(from: "Show.S01E01.初舞台.Part2.2160p.WEB-DL.mkv", fallbackIndex: 0)
+        #expect(hybridDescriptor.segmentIndex == 2)
+        #expect(hybridDescriptor.variantTitle == "初舞台")
+        #expect(hybridDescriptor.displayName == "第 1 季 第 1 集 · 初舞台 · Part 2")
 
         let seasonFromPath = MediaNameParser.parsePreferredSeason(from: "/TV/The Show/Season 03/episode.mkv")
         #expect(seasonFromPath == 3)
         #expect(MediaNameParser.isLikelyTVEpisodePath("/TV/The.Show.S02E11.2160p.mkv"))
 
-        let gintamaPath = "Gintama.S01-11.2006.1080p.Hami.WEB-DL.H264.AAC-HHWEB/Season 11/Gintama.S11E01.2018.1080p.Hami.WEB-DL.H264.AAC-HHWEB.mkv"
+        let gintamaPath = "Gintama.S01-11.2006.1080p.Hami.WEB-DL.H264.AAC-HHWEB/Season 02/Gintama.S02E45.2007.1080p.Hami.WEB-DL.H264.AAC-HHWEB.mkv"
         let resolvedSeason = MediaNameParser.resolvePreferredSeason(
             from: gintamaPath,
-            fileName: "Gintama.S11E01.2018.1080p.Hami.WEB-DL.H264.AAC-HHWEB.mkv"
+            fileName: "Gintama.S02E45.2007.1080p.Hami.WEB-DL.H264.AAC-HHWEB.mkv"
         )
-        #expect(resolvedSeason == 11)
+        #expect(resolvedSeason == 1)
+        let gintamaMetadata = MediaNameParser.extractSearchMetadata(from: gintamaPath)
+        #expect(gintamaMetadata.foreignTitle == "Gintama")
+        #expect(gintamaMetadata.year == "2006")
+        let gintamaSeasonFileMetadata = MediaNameParser.extractSearchMetadata(from: "Gintama.S02E45.2007.1080p.Hami.WEB-DL.H264.AAC-HHWEB.mkv")
+        #expect(gintamaSeasonFileMetadata.year == "2007")
+
+        let orderedNames = [
+            "Show.S01E01.Part1.2160p.WEB-DL.mkv",
+            "Show.S01E01.Part2.2160p.WEB-DL.mkv",
+            "Show.S01E01.mkv",
+            "Show.S01E01.导师版.1080p.WEB-DL.mkv",
+            "Show.S01E02.mkv"
+        ]
+        let shuffled = [
+            orderedNames[3],
+            orderedNames[1],
+            orderedNames[4],
+            orderedNames[0],
+            orderedNames[2]
+        ]
+        let sorted = shuffled.enumerated().sorted {
+            MediaNameParser.episodeSortKey(for: $0.element, fallbackIndex: $0.offset) <
+            MediaNameParser.episodeSortKey(for: $1.element, fallbackIndex: $1.offset)
+        }.map(\.element)
+        #expect(sorted == orderedNames)
     }
 
     @Test("Legacy WebDAV auth config decoder supports JSON and colon formats")
@@ -240,7 +268,7 @@ struct BusinessLogicIntegrationTests {
         #expect(MPVPlayerManager.preferredSubtitleId(defaultSub: "no", subtitleTracks: unknownTracks) == nil)
     }
 
-    @Test("MediaLibraryManager DB integration: fetch filters direct, keeps mounted sources, rematch cleans fake movie")
+    @Test("MediaLibraryManager DB integration: fetch filters direct + rematch cleans fake movie")
     func mediaLibraryManagerDatabaseIntegration() async throws {
         let dbURL = makeTempDBURL()
         defer { cleanupDBFiles(at: dbURL) }
@@ -259,13 +287,8 @@ struct BusinessLogicIntegrationTests {
                     sql: "INSERT INTO mediaSource (id, name, protocolType, baseUrl) VALUES (?, ?, ?, ?)",
                     arguments: [1, "本地源", "local", "/tmp/library"]
                 )
-                try db.execute(
-                    sql: "INSERT INTO mediaSource (id, name, protocolType, baseUrl, isEnabled, disabledAt) VALUES (?, ?, ?, ?, ?, ?)",
-                    arguments: [2, "已关闭源", "local", "/tmp/disabled-library", false, Date().timeIntervalSince1970]
-                )
                 try db.execute(sql: "INSERT INTO movie (id, title, isLocked) VALUES (?, ?, 0)", arguments: [1001, "DirectOnly"])
                 try db.execute(sql: "INSERT INTO movie (id, title, isLocked) VALUES (?, ?, 0)", arguments: [1002, "ScannedMovie"])
-                try db.execute(sql: "INSERT INTO movie (id, title, isLocked) VALUES (?, ?, 0)", arguments: [1003, "DisabledSourceMovie"])
                 try db.execute(sql: "INSERT INTO movie (id, title, isLocked) VALUES (?, ?, 0)", arguments: [-100, "FakeMovie"])
                 try db.execute(sql: "INSERT INTO movie (id, title, isLocked) VALUES (?, ?, 0)", arguments: [2001, "RealMovie"])
                 try db.execute(
@@ -281,13 +304,6 @@ struct BusinessLogicIntegrationTests {
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     arguments: ["vf-movie", 1, "movie.mkv", "movie.mkv", "movie", 1002, 0.0, 0.0]
-                )
-                try db.execute(
-                    sql: """
-                    INSERT INTO videoFile (id, sourceId, relativePath, fileName, mediaType, movieId, playProgress, duration)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    arguments: ["vf-disabled", 2, "disabled.mkv", "disabled.mkv", "movie", 1003, 0.0, 0.0]
                 )
                 try db.execute(
                     sql: """
@@ -313,7 +329,6 @@ struct BusinessLogicIntegrationTests {
         let ids = Set(movies.compactMap(\.id))
         #expect(ids.contains(1002))
         #expect(!ids.contains(1001))
-        #expect(ids.contains(1003))
 
         do {
             try manager.updateVideoFileMatch(fileId: "vf-unmatched", newTMDBMovieId: 2001)
@@ -345,6 +360,63 @@ struct BusinessLogicIntegrationTests {
             return
         }
         #expect(fakeMovie == nil)
+    }
+
+    @Test("Visible library and continue-watching should ignore disabled media sources")
+    func enabledSourceVisibilityFiltering() async throws {
+        let dbURL = makeTempDBURL()
+        defer { cleanupDBFiles(at: dbURL) }
+
+        let dbQueue = try DatabaseQueue(path: dbURL.path)
+        try await prepareTestSchema(on: dbQueue)
+
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO mediaSource (id, name, protocolType, baseUrl, isEnabled, disabledAt)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [1, "启用源", "local", "/tmp/enabled", true, nil]
+            )
+            try db.execute(
+                sql: """
+                INSERT INTO mediaSource (id, name, protocolType, baseUrl, isEnabled, disabledAt)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [2, "停用源", "local", "/tmp/disabled", false, Date().timeIntervalSince1970]
+            )
+            try db.execute(sql: "INSERT INTO movie (id, title, isLocked) VALUES (?, ?, 0)", arguments: [101, "Enabled Movie"])
+            try db.execute(sql: "INSERT INTO movie (id, title, isLocked) VALUES (?, ?, 0)", arguments: [102, "Disabled Movie"])
+            try db.execute(
+                sql: """
+                INSERT INTO videoFile (id, sourceId, relativePath, fileName, mediaType, movieId, playProgress, duration)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                arguments: ["vf-enabled", 1, "enabled.mkv", "enabled.mkv", "movie", 101, 10.0, 100.0]
+            )
+            try db.execute(
+                sql: """
+                INSERT INTO videoFile (id, sourceId, relativePath, fileName, mediaType, movieId, playProgress, duration)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                arguments: ["vf-disabled", 2, "disabled.mkv", "disabled.mkv", "movie", 102, 10.0, 100.0]
+            )
+        }
+
+        let manager = MediaLibraryManager(dbQueue: dbQueue)
+        let movies = try manager.fetchAllMovies()
+        let movieIDs = Set(movies.compactMap(\.id))
+        #expect(movieIDs == Set([101]))
+
+        let visibleContinueWatching = try await dbQueue.read { db in
+            try Movie.fetchVisibleContinueWatching(in: db)
+        }
+        #expect(Set(visibleContinueWatching.compactMap(\.id)) == Set([101]))
+
+        let disabledFiles = try await dbQueue.read { db in
+            try VideoFile.fetchVisibleFiles(movieId: 102, in: db)
+        }
+        #expect(disabledFiles.isEmpty)
     }
 
     @Test("Scan should surface files whose title cannot be extracted after scrape candidates")
@@ -459,6 +531,57 @@ struct BusinessLogicIntegrationTests {
         #expect(files.first?.mediaType == "movie")
     }
 
+    @Test("Expired disabled source cleanup should purge files and keep source row")
+    func expiredDisabledSourceCleanup() async throws {
+        let dbURL = makeTempDBURL()
+        defer { cleanupDBFiles(at: dbURL) }
+
+        let dbQueue = try DatabaseQueue(path: dbURL.path)
+        try await prepareTestSchema(on: dbQueue)
+
+        let expiredTimestamp = Date().timeIntervalSince1970 - 90_000
+        let thumbURL = ThumbnailManager.shared.thumbDirectory.appendingPathComponent("vf-expired.jpg")
+        try? Data("thumb".utf8).write(to: thumbURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: thumbURL) }
+
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO mediaSource (id, name, protocolType, baseUrl, isEnabled, disabledAt)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [11, "已停用源", "local", "/tmp/expired", false, expiredTimestamp]
+            )
+            try db.execute(sql: "INSERT INTO movie (id, title, isLocked) VALUES (?, ?, 0)", arguments: [501, "Expired Movie"])
+            try db.execute(
+                sql: """
+                INSERT INTO videoFile (id, sourceId, relativePath, fileName, mediaType, movieId, playProgress, duration)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                arguments: ["vf-expired", 11, "expired.mkv", "expired.mkv", "movie", 501, 0.0, 0.0]
+            )
+        }
+
+        let manager = MediaLibraryManager(dbQueue: dbQueue)
+        try manager.cleanupExpiredDisabledSources(retention: 60)
+
+        let sourceAfter = try await dbQueue.read { db in
+            try MediaSource.fetchOne(db, key: 11)
+        }
+        let fileAfter = try await dbQueue.read { db in
+            try VideoFile.fetchOne(db, key: "vf-expired")
+        }
+        let movieAfter = try await dbQueue.read { db in
+            try Movie.fetchOne(db, key: 501)
+        }
+
+        #expect(sourceAfter != nil)
+        #expect(sourceAfter?.isEnabled == false)
+        #expect(fileAfter == nil)
+        #expect(movieAfter == nil)
+        #expect(FileManager.default.fileExists(atPath: thumbURL.path) == false)
+    }
+
     private func prepareTestSchema(on dbQueue: DatabaseQueue) async throws {
         try await dbQueue.write { db in
             try db.create(table: "mediaSource") { t in
@@ -478,6 +601,8 @@ struct BusinessLogicIntegrationTests {
                 t.column("posterPath", .text)
                 t.column("voteAverage", .double)
                 t.column("isLocked", .boolean).notNull().defaults(to: false)
+                t.column("directors", .text)
+                t.column("casts", .text)
             }
             try db.create(table: "tvShow") { t in
                 t.primaryKey("id", .integer)
@@ -485,6 +610,22 @@ struct BusinessLogicIntegrationTests {
                 t.column("posterPath", .text)
                 t.column("voteAverage", .double)
                 t.column("isLocked", .boolean).notNull().defaults(to: false)
+            }
+            try db.create(table: "categoryFolder") { t in
+                t.primaryKey("id", .text)
+                t.column("kind", .text).notNull()
+                t.column("name", .text).notNull()
+                t.column("posterPath", .text)
+                t.column("updatedAt", .double)
+            }
+            try db.create(table: "personProfile") { t in
+                t.primaryKey("id", .text)
+                t.column("name", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("tmdbPersonId", .integer)
+                t.column("photoPath", .text)
+                t.column("filmographyJson", .text)
+                t.column("updatedAt", .double)
             }
             try db.create(table: "videoFile") { t in
                 t.primaryKey("id", .text)
@@ -496,7 +637,6 @@ struct BusinessLogicIntegrationTests {
                 t.column("episodeId", .integer).references("tvShow", onDelete: .setNull)
                 t.column("playProgress", .double).notNull().defaults(to: 0.0)
                 t.column("duration", .double).notNull().defaults(to: 0.0)
-                t.column("customSubtitle", .text)
                 t.column("fileSize", .integer).notNull().defaults(to: 0)
                 t.column("lastPlayedAt", .double)
             }

@@ -34,6 +34,7 @@ public static class ServiceRegistration
         services.AddSingleton<ISettingsService, JsonSettingsService>();
         services.AddSingleton<IFolderPickerService, FolderPickerService>();
         services.AddSingleton<IPosterImagePickerService, PosterImagePickerService>();
+        services.AddSingleton<IPowerManagementService, WindowsPowerManagementService>();
         services.AddSingleton<ISubtitlePickerService, SubtitlePickerService>();
         services.AddSingleton(_ =>
         {
@@ -63,11 +64,13 @@ public static class ServiceRegistration
         services.AddSingleton<INetworkShareDiscoveryService, NetworkShareDiscoveryService>();
         services.AddSingleton<IMediaServerDiscoveryClient, MediaServerDiscoveryClient>();
         services.AddSingleton<IMediaServerPreflightService, MediaServerPreflightService>();
-        services.AddSingleton<IOmniPlayDockerClient, OmniPlayDockerClient>();
         services.AddSingleton<ILuckyStunClient, LuckyStunClient>();
         services.AddSingleton<IDoubanMetadataService, DoubanMetadataService>();
         services.AddSingleton<ITmdbMetadataClient, TmdbMetadataClient>();
         services.AddSingleton<ITmdbConnectionTester>(provider => (TmdbMetadataClient)provider.GetRequiredService<ITmdbMetadataClient>());
+        services.AddSingleton<CategoryFolderRepository>();
+        services.AddSingleton<ChineseNameCacheRepository>();
+        services.AddSingleton<ICategoryFolderStore, CategoryFolderStore>();
         services.AddSingleton<ILibraryMetadataEditor, LibraryMetadataEditor>();
         services.AddSingleton<ILocalMetadataSidecarService, LocalMetadataSidecarService>();
         services.AddSingleton<ILibraryMetadataEnricher, LibraryMetadataEnricher>();

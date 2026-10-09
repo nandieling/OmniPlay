@@ -1,6 +1,7 @@
 using Dapper;
 using OmniPlay.Core.Interfaces;
 using OmniPlay.Core.Models;
+using OmniPlay.Core.Models.Library;
 using OmniPlay.Core.Models.Entities;
 using OmniPlay.Core.Settings;
 using OmniPlay.Infrastructure.Data;
@@ -13,6 +14,7 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
     private readonly SqliteDatabase database;
     private readonly ITmdbMetadataClient tmdbMetadataClient;
     private readonly ISettingsService? settingsService;
+    private readonly ICategoryFolderStore? categoryFolderStore;
 
     public LibraryMetadataEditor(SqliteDatabase database, ITmdbMetadataClient tmdbMetadataClient)
         : this(database, tmdbMetadataClient, null)
@@ -22,11 +24,13 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
     public LibraryMetadataEditor(
         SqliteDatabase database,
         ITmdbMetadataClient tmdbMetadataClient,
-        ISettingsService? settingsService)
+        ISettingsService? settingsService,
+        ICategoryFolderStore? categoryFolderStore = null)
     {
         this.database = database;
         this.tmdbMetadataClient = tmdbMetadataClient;
         this.settingsService = settingsService;
+        this.categoryFolderStore = categoryFolderStore;
     }
 
     public async Task<IReadOnlyList<LibraryMetadataSearchCandidate>> SearchMovieMatchesAsync(
@@ -223,6 +227,10 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
                     overview = @Overview,
                     posterPath = @PosterPath,
                     voteAverage = @VoteAverage,
+                    mainCast = @MainCast,
+                    director = @Director,
+                    directors = @Directors,
+                    casts = @Casts,
                     isLocked = @IsLocked
                 WHERE id = @Id
                 """,
@@ -234,6 +242,10 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
                     Overview = NormalizeOptionalText(request.Overview),
                     PosterPath = NormalizeOptionalText(request.PosterPath),
                     VoteAverage = NormalizeVoteAverage(request.VoteAverage),
+                    MainCast = NormalizeOptionalText(request.MainCast),
+                    Director = NormalizeOptionalText(request.Director),
+                    Directors = PeopleColumns.EncodeEdited(request.Director),
+                    Casts = PeopleColumns.EncodeEdited(request.MainCast),
                     IsLocked = request.IsLocked
                 },
                 cancellationToken: cancellationToken));
@@ -265,6 +277,10 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
                     overview = @Overview,
                     posterPath = @PosterPath,
                     voteAverage = @VoteAverage,
+                    mainCast = @MainCast,
+                    director = @Director,
+                    directors = @Directors,
+                    casts = @Casts,
                     isLocked = @IsLocked
                 WHERE id = @Id
                 """,
@@ -276,6 +292,10 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
                     Overview = NormalizeOptionalText(request.Overview),
                     PosterPath = NormalizeOptionalText(request.PosterPath),
                     VoteAverage = NormalizeVoteAverage(request.VoteAverage),
+                    MainCast = NormalizeOptionalText(request.MainCast),
+                    Director = NormalizeOptionalText(request.Director),
+                    Directors = PeopleColumns.EncodeEdited(request.Director),
+                    Casts = PeopleColumns.EncodeEdited(request.MainCast),
                     IsLocked = request.IsLocked
                 },
                 cancellationToken: cancellationToken));
@@ -313,6 +333,18 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
                 cancellationToken: cancellationToken));
     }
 
+    private async Task<TmdbCredits?> TryFetchCreditsAsync(TmdbMetadataMatch match, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await tmdbMetadataClient.FetchCreditsAsync(match.Id, match.MediaType, cancellationToken);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     private static string NormalizeRequiredTitle(string value)
     {
         return value.Trim();
@@ -346,6 +378,8 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
                        movie.productionCountryCodes AS ProductionCountryCodes,
                        movie.originalLanguage AS OriginalLanguage,
                        movie.metadataLanguage AS MetadataLanguage,
+                        movie.director AS Director,
+                        movie.mainCast AS MainCast,
                        (
                            SELECT ms.protocolType
                            FROM videoFile vf
@@ -406,6 +440,8 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
                        tvShow.productionCountryCodes AS ProductionCountryCodes,
                        tvShow.originalLanguage AS OriginalLanguage,
                        tvShow.metadataLanguage AS MetadataLanguage,
+                        tvShow.director AS Director,
+                        tvShow.mainCast AS MainCast,
                        (
                            SELECT ms.protocolType
                            FROM videoFile vf
@@ -463,7 +499,9 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
         {
             var preferredLanguage = await ResolvePreferredLanguageAsync(cancellationToken);
             var posterPath = await ResolvePosterPathAsync(candidate.PosterPath, match, cancellationToken);
-            var result = await UpdateMovieAsync(candidate, match, posterPath, preferredLanguage, cancellationToken);
+            var credits = await TryFetchCreditsAsync(match, cancellationToken);
+            credits = await PeopleColumnFactory.RefreshPeopleAsync(categoryFolderStore, credits, cancellationToken);
+            var result = await UpdateMovieAsync(candidate, match, posterPath, preferredLanguage, credits, cancellationToken);
             return result.Updated
                 ? new LibraryMetadataRefreshResult(
                     FoundMatch: true,
@@ -497,7 +535,9 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
         {
             var preferredLanguage = await ResolvePreferredLanguageAsync(cancellationToken);
             var posterPath = await ResolvePosterPathAsync(candidate.PosterPath, match, cancellationToken);
-            var result = await UpdateTvShowAsync(candidate, match, posterPath, preferredLanguage, cancellationToken);
+            var credits = await TryFetchCreditsAsync(match, cancellationToken);
+            credits = await PeopleColumnFactory.RefreshPeopleAsync(categoryFolderStore, credits, cancellationToken);
+            var result = await UpdateTvShowAsync(candidate, match, posterPath, preferredLanguage, credits, cancellationToken);
             return result.Updated
                 ? new LibraryMetadataRefreshResult(
                     FoundMatch: true,
@@ -539,8 +579,10 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
         TmdbMetadataMatch match,
         string? posterPath,
         string? preferredLanguage,
+        TmdbCredits? credits,
         CancellationToken cancellationToken)
     {
+
         var newTitle = LibraryPreferredTitleResolver.Resolve(
             match.Title,
             candidate.Title,
@@ -555,6 +597,9 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
         var newProductionCountryCodes = PreferMetadataValue(match.ProductionCountryCodes, candidate.ProductionCountryCodes);
         var newOriginalLanguage = PreferMetadataValue(match.OriginalLanguage, candidate.OriginalLanguage);
         var newMetadataLanguage = NormalizeMetadataLanguage(preferredLanguage);
+        var people = PeopleColumns.FromCredits(credits, candidate.Director, candidate.MainCast);
+        var newDirector = people.DirectorText;
+        var newMainCast = people.MainCastText;
 
         var updatedMetadata =
             !string.Equals(newTitle, candidate.Title, StringComparison.Ordinal) ||
@@ -564,7 +609,9 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
             !Nullable.Equals(newVoteAverage, candidate.VoteAverage) ||
             !string.Equals(newProductionCountryCodes, candidate.ProductionCountryCodes, StringComparison.Ordinal) ||
             !string.Equals(newOriginalLanguage, candidate.OriginalLanguage, StringComparison.Ordinal) ||
-            !string.Equals(newMetadataLanguage, candidate.MetadataLanguage, StringComparison.OrdinalIgnoreCase);
+            !string.Equals(newMetadataLanguage, candidate.MetadataLanguage, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(newDirector, candidate.Director, StringComparison.Ordinal) ||
+            !string.Equals(newMainCast, candidate.MainCast, StringComparison.Ordinal);
 
         using var connection = database.OpenConnection();
         using var transaction = connection.BeginTransaction();
@@ -580,6 +627,10 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
                     productionCountryCodes = @ProductionCountryCodes,
                     originalLanguage = @OriginalLanguage,
                     metadataLanguage = @MetadataLanguage,
+                    director = @Director,
+                    mainCast = @MainCast,
+                    directors = @Directors,
+                    casts = @Casts,
                     tmdbId = @TmdbId
                 WHERE id = @Id
                 """,
@@ -594,6 +645,10 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
                     ProductionCountryCodes = newProductionCountryCodes,
                     OriginalLanguage = newOriginalLanguage,
                     MetadataLanguage = newMetadataLanguage,
+                    MainCast = newMainCast,
+                    Director = newDirector,
+                    Directors = people.Directors,
+                    Casts = people.Casts,
                     TmdbId = match.Id
                 },
                 transaction,
@@ -688,6 +743,7 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
         TmdbMetadataMatch match,
         string? posterPath,
         string? preferredLanguage,
+        TmdbCredits? credits,
         CancellationToken cancellationToken)
     {
         var newTitle = LibraryPreferredTitleResolver.Resolve(
@@ -704,6 +760,9 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
         var newProductionCountryCodes = PreferMetadataValue(match.ProductionCountryCodes, candidate.ProductionCountryCodes);
         var newOriginalLanguage = PreferMetadataValue(match.OriginalLanguage, candidate.OriginalLanguage);
         var newMetadataLanguage = NormalizeMetadataLanguage(preferredLanguage);
+        var people = PeopleColumns.FromCredits(credits, candidate.Director, candidate.MainCast);
+        var newDirector = people.DirectorText;
+        var newMainCast = people.MainCastText;
 
         if (string.Equals(newTitle, candidate.Title, StringComparison.Ordinal) &&
             string.Equals(newFirstAirDate, candidate.FirstAirDate, StringComparison.Ordinal) &&
@@ -712,7 +771,9 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
             Nullable.Equals(newVoteAverage, candidate.VoteAverage) &&
             string.Equals(newProductionCountryCodes, candidate.ProductionCountryCodes, StringComparison.Ordinal) &&
             string.Equals(newOriginalLanguage, candidate.OriginalLanguage, StringComparison.Ordinal) &&
-            string.Equals(newMetadataLanguage, candidate.MetadataLanguage, StringComparison.OrdinalIgnoreCase))
+            string.Equals(newMetadataLanguage, candidate.MetadataLanguage, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(newDirector, candidate.Director, StringComparison.Ordinal) &&
+            string.Equals(newMainCast, candidate.MainCast, StringComparison.Ordinal))
         {
             return new UpdateResult(false, false);
         }
@@ -729,7 +790,11 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
                     voteAverage = @VoteAverage,
                     productionCountryCodes = @ProductionCountryCodes,
                     originalLanguage = @OriginalLanguage,
-                    metadataLanguage = @MetadataLanguage
+                    metadataLanguage = @MetadataLanguage,
+                    director = @Director,
+                    mainCast = @MainCast,
+                    directors = @Directors,
+                    casts = @Casts
                 WHERE id = @Id
                 """,
                 new
@@ -742,7 +807,11 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
                     VoteAverage = newVoteAverage,
                     ProductionCountryCodes = newProductionCountryCodes,
                     OriginalLanguage = newOriginalLanguage,
-                    MetadataLanguage = newMetadataLanguage
+                    MetadataLanguage = newMetadataLanguage,
+                    MainCast = newMainCast,
+                    Director = newDirector,
+                    Directors = people.Directors,
+                    Casts = people.Casts,
                 },
                 cancellationToken: cancellationToken));
 
@@ -1187,6 +1256,10 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
 
         public string? MetadataLanguage { get; init; }
 
+        public string? Director { get; init; }
+
+        public string? MainCast { get; init; }
+
         public string? SourceProtocolType { get; init; }
 
         public string? BaseUrl { get; init; }
@@ -1217,6 +1290,10 @@ public sealed class LibraryMetadataEditor : ILibraryMetadataEditor
         public string? OriginalLanguage { get; init; }
 
         public string? MetadataLanguage { get; init; }
+
+        public string? Director { get; init; }
+
+        public string? MainCast { get; init; }
 
         public string? SourceProtocolType { get; init; }
 

@@ -7,6 +7,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using OmniPlay.Core.Interfaces;
 using OmniPlay.Core.Models.Entities;
+using OmniPlay.Core.Models.Network;
 using OmniPlay.Core.Settings;
 
 namespace OmniPlay.Core.ViewModels.Settings;
@@ -58,6 +59,21 @@ public partial class SettingsViewModel : ObservableObject
         new(PlaybackPreferenceSettings.SubtitleEnglish, "英语")
     ];
 
+    private static readonly IReadOnlyList<SettingsOptionItem> LanguageOptionItems =
+    [
+        new(OmniPlay.Core.Runtime.Locale.Chinese, "简体中文"),
+        new(OmniPlay.Core.Runtime.Locale.English, "English")
+    ];
+
+    private static readonly IReadOnlyList<SettingsOptionItem> ThemeOptionItems =
+    [
+        new(AppThemeIds.CloudWhite, "云白 · 默认浅色"),
+        new(AppThemeIds.DeepTeal, "青黛 · 冷调浅色"),
+        new(AppThemeIds.DuskViolet, "暮紫 · 柔和浅色"),
+        new(AppThemeIds.InkNight, "墨夜 · 深色"),
+        new(AppThemeIds.WarmEarth, "暖砂 · 暖调浅色")
+    ];
+
     private readonly ISettingsService settingsService;
     private readonly ITmdbConnectionTester tmdbConnectionTester;
     private readonly IExternalLinkOpener externalLinkOpener;
@@ -68,6 +84,8 @@ public partial class SettingsViewModel : ObservableObject
     private readonly string platformText;
     private readonly string thirdPartyNoticesPath;
     private bool loaded;
+
+    private bool suppressCategoryPersistence;
     private bool suppressOptionSelectionChange;
     private DateTimeOffset? lastUpdateCheckAt;
     private DateTimeOffset? lastLuckyStunUpdatedAt;
@@ -163,6 +181,15 @@ public partial class SettingsViewModel : ObservableObject
 
     public event EventHandler? LuckyStunAddressUpdated;
 
+    public IReadOnlyList<SettingsOptionItem> ThemeOptions => ThemeOptionItems;
+
+    public IReadOnlyList<SettingsOptionItem> LanguageOptions => LanguageOptionItems;
+
+    public event Action<string>? ThemeChanged;
+
+    /// <summary>界面语言切换（UI 层据此替换文案资源）。</summary>
+    public event Action<string>? LanguageChanged;
+
     [ObservableProperty]
     private bool autoScanOnStartup = true;
 
@@ -171,6 +198,12 @@ public partial class SettingsViewModel : ObservableObject
 
     [ObservableProperty]
     private bool showMediaSourceRealPath = true;
+
+    [ObservableProperty]
+    private string homeCategoryMode = "none";
+
+    [ObservableProperty]
+    private Dictionary<string, string> homeFolderPosters = new(StringComparer.OrdinalIgnoreCase);
 
     [ObservableProperty]
     private string librarySortOption = LibraryViewSettings.SortOptionTitle;
@@ -204,6 +237,9 @@ public partial class SettingsViewModel : ObservableObject
 
     [ObservableProperty]
     private string customTmdbAccessToken = string.Empty;
+
+    [ObservableProperty]
+    private string customTmdbProxyUrl = string.Empty;
 
     [ObservableProperty]
     private string tmdbLanguage = DefaultTmdbLanguage;
@@ -248,6 +284,18 @@ public partial class SettingsViewModel : ObservableObject
     private SettingsOptionItem? selectedDefaultSubtitleTrackOption;
 
     [ObservableProperty]
+    private string selectedThemeId = AppThemeIds.CloudWhite;
+
+    [ObservableProperty]
+    private SettingsOptionItem? selectedThemeOption;
+
+    [ObservableProperty]
+    private string appLanguage = OmniPlay.Core.Runtime.Locale.Chinese;
+
+    [ObservableProperty]
+    private SettingsOptionItem? selectedLanguageOption;
+
+    [ObservableProperty]
     private string statusMessage = string.Empty;
 
     [ObservableProperty]
@@ -283,6 +331,10 @@ public partial class SettingsViewModel : ObservableObject
             AutoCheckUpdatesOnStartup = AutoCheckUpdatesOnStartup,
             LastUpdateCheckAt = lastUpdateCheckAt,
             ShowMediaSourceRealPath = ShowMediaSourceRealPath,
+            HomeCategoryMode = NormalizeHomeCategoryMode(HomeCategoryMode),
+            HomeFolderPosters = new Dictionary<string, string>(HomeFolderPosters, StringComparer.OrdinalIgnoreCase),
+            ThemeId = SelectedThemeId,
+            AppLanguage = AppLanguage,
             LibraryView = new LibraryViewSettings
             {
                 SortOption = NormalizeLibrarySortOption(LibrarySortOption),
@@ -341,6 +393,7 @@ public partial class SettingsViewModel : ObservableObject
             EnableEpisodeThumbnailDownloads = true,
             CustomApiKey = normalizedCustomApiKey,
             CustomAccessToken = normalizedCustomAccessToken,
+            ProxyUrl = CustomTmdbProxyUrl.Trim(),
             Language = normalizedLanguage
         };
     }
@@ -393,8 +446,94 @@ public partial class SettingsViewModel : ObservableObject
         bool sortDescending,
         CancellationToken cancellationToken = default)
     {
+        if (!loaded)
+        {
+            await LoadAsync(cancellationToken);
+        }
         LibrarySortOption = NormalizeLibrarySortOption(sortOption);
         LibrarySortDescending = sortDescending;
+        await settingsService.SaveAsync(BuildAppSettings(), cancellationToken);
+        loaded = true;
+    }
+
+
+    public async Task SaveHomeCategoryPreferenceAsync(string mode, CancellationToken cancellationToken = default)
+    {
+        if (!loaded)
+        {
+            await LoadAsync(cancellationToken);
+        }
+        suppressCategoryPersistence = true;
+        try
+        {
+            HomeCategoryMode = NormalizeHomeCategoryMode(mode);
+            await settingsService.SaveAsync(BuildAppSettings(), cancellationToken);
+        }
+        finally
+        {
+            suppressCategoryPersistence = false;
+        }
+        loaded = true;
+    }
+
+    public async Task SaveHomeFolderPosterAsync(string folderKey, string? posterPath, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(folderKey))
+        {
+            return;
+        }
+        if (!loaded)
+        {
+            await LoadAsync(cancellationToken);
+        }
+
+        var next = new Dictionary<string, string>(HomeFolderPosters, StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(posterPath))
+        {
+            next.Remove(folderKey);
+        }
+        else
+        {
+            next[folderKey] = posterPath.Trim();
+        }
+
+        HomeFolderPosters = next;
+        await settingsService.SaveAsync(BuildAppSettings(), cancellationToken);
+        loaded = true;
+    }
+
+    private static string NormalizeHomeCategoryMode(string? mode)
+    {
+        string value = (mode ?? string.Empty).Trim().ToLowerInvariant();
+        return value is "director" or "actor" ? value : "none";
+    }
+
+    /// <summary>
+    /// Persists the Lucky STUN management login (plus the selected rule) without
+    /// touching the rest of the settings. Used by the home-page panel so the login
+    /// survives reopening the panel and application restarts.
+    /// </summary>
+    public async Task SaveLuckyStunCredentialsAsync(
+        string managementUrl,
+        string username,
+        string password,
+        bool autoUpdate,
+        int updateIntervalMinutes,
+        string selectedRuleId,
+        string selectedRuleName,
+        CancellationToken cancellationToken = default)
+    {
+        if (!loaded)
+        {
+            await LoadAsync(cancellationToken);
+        }
+        LuckyStunManagementUrl = managementUrl?.Trim() ?? string.Empty;
+        LuckyStunUsername = username?.Trim() ?? string.Empty;
+        LuckyStunPassword = password ?? string.Empty;
+        LuckyStunAutoUpdate = autoUpdate;
+        LuckyStunUpdateIntervalMinutes = Math.Clamp(updateIntervalMinutes, 5, 1440);
+        luckyStunSelectedRuleId = selectedRuleId ?? string.Empty;
+        luckyStunSelectedRuleName = selectedRuleName ?? string.Empty;
         await settingsService.SaveAsync(BuildAppSettings(), cancellationToken);
         loaded = true;
     }
@@ -428,14 +567,48 @@ public partial class SettingsViewModel : ObservableObject
         luckyStunAutoUpdateCancellationTokenSource = null;
         luckyStunAutoUpdateTask = null;
 
-        if (!LuckyStunAutoUpdate || string.IsNullOrWhiteSpace(LuckyStunManagementUrl))
+        if (LuckyStunAutoUpdate || !string.IsNullOrWhiteSpace(LuckyStunManagementUrl))
         {
+            StartLuckyStunAutoUpdateLoopCore();
             return;
         }
 
+        // 未配置全局凭据时，按源穿透配置仍需要 5 分钟轮询，惰性检查后启动。
+        _ = StartLuckyStunLoopIfPerSourceConfiguredAsync();
+    }
+
+    private void StartLuckyStunAutoUpdateLoopCore()
+    {
         var cancellation = new CancellationTokenSource();
         luckyStunAutoUpdateCancellationTokenSource = cancellation;
         luckyStunAutoUpdateTask = RunLuckyStunAutoUpdateLoopAsync(cancellation.Token);
+    }
+
+    private Task StartLuckyStunLoopIfPerSourceConfiguredAsync()
+    {
+        return Task.Run(async () =>
+        {
+            try
+            {
+                if (mediaSourceRepository is null)
+                {
+                    return;
+                }
+
+                var sources = await mediaSourceRepository.GetAllAsync();
+                var hasPerSource = sources.Any(static source => source.IsActive &&
+                                                                source.GetAddressConfiguration().LuckyStun is { AutoUpdate: true } lucky &&
+                                                                !string.IsNullOrWhiteSpace(lucky.ManagementUrl));
+                if (hasPerSource)
+                {
+                    StartLuckyStunAutoUpdateLoopCore();
+                }
+            }
+            catch
+            {
+                // 启动时检查失败不阻断设置加载；下次保存设置会重试。
+            }
+        });
     }
 
     private async Task RunLuckyStunAutoUpdateLoopAsync(CancellationToken cancellationToken)
@@ -444,14 +617,17 @@ public partial class SettingsViewModel : ObservableObject
         {
             try
             {
-                var due = !lastLuckyStunUpdatedAt.HasValue ||
-                          DateTimeOffset.UtcNow - lastLuckyStunUpdatedAt.Value >= TimeSpan.FromMinutes(Math.Clamp(LuckyStunUpdateIntervalMinutes, 5, 1440));
+                var due = LuckyStunAutoUpdate &&
+                          !string.IsNullOrWhiteSpace(LuckyStunManagementUrl) &&
+                          (!lastLuckyStunUpdatedAt.HasValue ||
+                           DateTimeOffset.UtcNow - lastLuckyStunUpdatedAt.Value >= TimeSpan.FromMinutes(Math.Clamp(LuckyStunUpdateIntervalMinutes, 5, 1440)));
                 if (due)
                 {
                     await RefreshLuckyStunCoreAsync(isAutomatic: true, cancellationToken);
                 }
 
-                await Task.Delay(TimeSpan.FromMinutes(Math.Clamp(LuckyStunUpdateIntervalMinutes, 5, 1440)), cancellationToken);
+                await RefreshDueLuckyStunSourcesAsync(cancellationToken);
+                await Task.Delay(TimeSpan.FromMinutes(5), cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -515,21 +691,6 @@ public partial class SettingsViewModel : ObservableObject
                     continue;
                 }
 
-                if (source.ProtocolKind == MediaSourceProtocol.OmniPlayDocker)
-                {
-                    if (string.Equals(source.GetNormalizedBaseUrl(), normalizedAddress, StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    source.BaseUrl = normalizedAddress;
-                    if (await mediaSourceRepository.UpdateAsync(source, cancellationToken))
-                    {
-                        updatedCount++;
-                    }
-                    continue;
-                }
-
                 var addressConfiguration = source.GetAddressConfiguration();
                 var changed = false;
                 foreach (var external in addressConfiguration.ExternalAddresses)
@@ -579,6 +740,8 @@ public partial class SettingsViewModel : ObservableObject
             {
                 LuckyStunAddressUpdated?.Invoke(this, EventArgs.Empty);
             }
+
+            await RefreshDueLuckyStunSourcesAsync(cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -598,6 +761,104 @@ public partial class SettingsViewModel : ObservableObject
             IsBusy = false;
             luckyStunUpdateGate.Release();
             NotifyCommandStateChanged();
+        }
+    }
+
+    /// <summary>
+    /// Refreshes every enabled source that carries its own Lucky STUN configuration
+    /// (ARM par: LuckyStunCoordinator.refreshDueSources). Each source is refreshed with its
+    /// own management credentials and rule selection; the resolved penetration address
+    /// (plus optional path suffix) is written back to the source base URL.
+    /// </summary>
+    private async Task RefreshDueLuckyStunSourcesAsync(CancellationToken cancellationToken)
+    {
+        if (luckyStunClient is null || mediaSourceRepository is null)
+        {
+            return;
+        }
+
+        var allSources = await mediaSourceRepository.GetAllAsync(cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        var dueSources = allSources
+            .Where(static source => source.IsActive &&
+                                    source.GetAddressConfiguration().LuckyStun is { } lucky &&
+                                    lucky.AutoUpdate &&
+                                    !string.IsNullOrWhiteSpace(lucky.ManagementUrl))
+            .Where(source =>
+            {
+                var lucky = source.GetAddressConfiguration().LuckyStun!;
+                var interval = TimeSpan.FromMinutes(Math.Clamp(lucky.UpdateIntervalMinutes, 5, 1440));
+                return !lucky.LastUpdatedAt.HasValue || now - lucky.LastUpdatedAt.Value >= interval;
+            })
+            .ToList();
+
+        foreach (var source in dueSources)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await RefreshLuckyStunSourceAsync(source, cancellationToken);
+        }
+    }
+
+    private async Task RefreshLuckyStunSourceAsync(MediaSource source, CancellationToken cancellationToken)
+    {
+        var configuration = source.GetAddressConfiguration();
+        var lucky = configuration.LuckyStun;
+        if (lucky is null || string.IsNullOrWhiteSpace(lucky.ManagementUrl))
+        {
+            return;
+        }
+
+        var settings = new LuckyStunSettings
+        {
+            ManagementUrl = lucky.ManagementUrl.Trim(),
+            Username = lucky.Username.Trim(),
+            Password = lucky.Password,
+            SelectedRuleId = lucky.RuleId,
+            SelectedRuleName = lucky.RuleName
+        };
+
+        LuckyStunSnapshot snapshot;
+        try
+        {
+            snapshot = await luckyStunClient.FetchAsync(settings, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return;
+        }
+
+        if (snapshot.SelectedRule is null)
+        {
+            return;
+        }
+
+        var normalizedAddress = LuckyStunAddressHelper.NormalizeAddress(snapshot.SelectedRule.Address);
+        if (string.IsNullOrWhiteSpace(normalizedAddress))
+        {
+            return;
+        }
+
+        var updatedAddress = LuckyStunAddressHelper.AppendPathSuffix(lucky.PathSuffix, normalizedAddress);
+        var addressChanged = !string.Equals(source.BaseUrl, updatedAddress, StringComparison.OrdinalIgnoreCase);
+
+        lucky.RuleId = snapshot.SelectedRule.Id;
+        lucky.RuleName = snapshot.SelectedRule.Name;
+        lucky.LastUpdatedAt = DateTimeOffset.UtcNow;
+
+        configuration.LocalAddress = updatedAddress;
+        configuration.LocalLabel = string.Empty;
+        configuration.ActiveAddress = updatedAddress;
+        configuration.ActiveLabel = string.Empty;
+        source.BaseUrl = updatedAddress;
+        source.SetAddressConfiguration(configuration);
+
+        if (addressChanged && await mediaSourceRepository!.UpdateAsync(source, cancellationToken))
+        {
+            LuckyStunAddressUpdated?.Invoke(this, EventArgs.Empty);
         }
     }
 
@@ -625,6 +886,8 @@ public partial class SettingsViewModel : ObservableObject
         return new UriBuilder(uri) { Path = path, Query = string.Empty, Fragment = string.Empty }
             .Uri.AbsoluteUri.TrimEnd('/');
     }
+
+    public string LuckyStunSelectedRuleId => luckyStunSelectedRuleId;
 
     public bool HasLuckyStunRules => LuckyStunRules.Count > 0;
 
@@ -806,6 +1069,16 @@ public partial class SettingsViewModel : ObservableObject
         AutoCheckUpdatesOnStartup = settings.AutoCheckUpdatesOnStartup;
         lastUpdateCheckAt = settings.LastUpdateCheckAt;
         ShowMediaSourceRealPath = settings.ShowMediaSourceRealPath;
+        HomeCategoryMode = NormalizeHomeCategoryMode(settings.HomeCategoryMode);
+        HomeFolderPosters = new Dictionary<string, string>(settings.HomeFolderPosters ?? new Dictionary<string, string>(), StringComparer.OrdinalIgnoreCase);
+        SelectedThemeId = AppThemeIds.Normalize(settings.ThemeId);
+        AppLanguage = string.Equals(
+            settings.AppLanguage,
+            OmniPlay.Core.Runtime.Locale.English,
+            StringComparison.OrdinalIgnoreCase)
+            ? OmniPlay.Core.Runtime.Locale.English
+            : OmniPlay.Core.Runtime.Locale.Chinese;
+        OmniPlay.Core.Runtime.Locale.Set(AppLanguage);
         lastLuckyStunUpdatedAt = luckyStun.LastUpdatedAt;
         luckyStunSelectedRuleId = luckyStun.SelectedRuleId ?? string.Empty;
         luckyStunSelectedRuleName = luckyStun.SelectedRuleName ?? string.Empty;
@@ -828,6 +1101,7 @@ public partial class SettingsViewModel : ObservableObject
         CustomTmdbApiKey = settings.Tmdb.CustomApiKey ?? string.Empty;
         CustomTmdbAccessToken = settings.Tmdb.CustomAccessToken ?? string.Empty;
         CustomTmdbCredential = FormatCustomTmdbCredential(CustomTmdbApiKey, CustomTmdbAccessToken);
+        CustomTmdbProxyUrl = settings.Tmdb.ProxyUrl ?? string.Empty;
         TmdbLanguage = NormalizeTmdbLanguage(settings.Tmdb.Language);
         DefaultAudioTrackMode = NormalizeDefaultAudioTrack(settings.Playback.DefaultAudioTrack);
         DefaultSubtitleTrack = NormalizeDefaultSubtitleTrack(settings.Playback.DefaultSubtitleTrack);
@@ -941,6 +1215,12 @@ public partial class SettingsViewModel : ObservableObject
             SelectedTmdbLanguageOption = FindOption(TmdbLanguageOptionItems, NormalizeTmdbLanguage(TmdbLanguage));
             SelectedDefaultAudioTrackOption = FindOption(DefaultAudioTrackOptionItems, NormalizeDefaultAudioTrack(DefaultAudioTrackMode));
             SelectedDefaultSubtitleTrackOption = FindOption(DefaultSubtitleTrackOptionItems, NormalizeDefaultSubtitleTrack(DefaultSubtitleTrack));
+            SelectedThemeOption = FindOption(ThemeOptionItems, AppThemeIds.Normalize(SelectedThemeId));
+            SelectedLanguageOption = FindOption(
+                LanguageOptionItems,
+                string.Equals(AppLanguage, OmniPlay.Core.Runtime.Locale.English, StringComparison.OrdinalIgnoreCase)
+                    ? OmniPlay.Core.Runtime.Locale.English
+                    : OmniPlay.Core.Runtime.Locale.Chinese);
         }
         finally
         {
@@ -1161,6 +1441,68 @@ public partial class SettingsViewModel : ObservableObject
         if (!suppressOptionSelectionChange && value is not null)
         {
             TmdbLanguage = value.Value;
+        }
+    }
+
+    partial void OnSelectedThemeOptionChanged(SettingsOptionItem? value)
+    {
+        if (suppressOptionSelectionChange || value is null)
+        {
+            return;
+        }
+        SelectedThemeId = value.Value;
+        ThemeChanged?.Invoke(value.Value);
+        if (loaded)
+        {
+            _ = SaveThemeSelectionAsync(value.Value);
+        }
+    }
+
+    partial void OnSelectedLanguageOptionChanged(SettingsOptionItem? value)
+    {
+        if (suppressOptionSelectionChange || value is null)
+        {
+            return;
+        }
+
+        AppLanguage = value.Value;
+        OmniPlay.Core.Runtime.Locale.Set(value.Value);
+        LanguageChanged?.Invoke(value.Value);
+        if (loaded)
+        {
+            _ = SaveLanguageSelectionAsync();
+        }
+    }
+
+    private async Task SaveLanguageSelectionAsync()
+    {
+        try
+        {
+            await settingsService.SaveAsync(BuildAppSettings(), CancellationToken.None);
+        }
+        catch
+        {
+            // 语言切换即时生效，这里仅忽略持久化失败。
+        }
+    }
+
+    private async Task SaveThemeSelectionAsync(string themeId)
+    {
+        try
+        {
+            await settingsService.SaveAsync(BuildAppSettings(), CancellationToken.None);
+        }
+        catch
+        {
+            // 主题选择仍会即时生效，这里仅忽略持久化失败。
+        }
+    }
+
+    partial void OnHomeCategoryModeChanged(string value)
+    {
+        if (loaded && !suppressCategoryPersistence)
+        {
+            _ = SaveHomeCategoryPreferenceAsync(value);
         }
     }
 

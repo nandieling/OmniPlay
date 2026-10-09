@@ -9,7 +9,7 @@ public enum PlaybackWatchState
 
 public static class PlaybackProgressRules
 {
-    public const double CompletionRatio = 0.97;
+    public const double CompletionRatio = 0.95;
     public const double MinimumProgressSeconds = 0;
 
     public static double GetProgressRatio(double playProgress, double duration)
@@ -45,9 +45,9 @@ public static class PlaybackProgressRules
     {
         return state switch
         {
-            PlaybackWatchState.Watched => "\u5DF2\u770B",
-            PlaybackWatchState.InProgress => "\u672A\u770B\u5B8C",
-            _ => "\u672A\u770B"
+            PlaybackWatchState.Watched => "\u5DF2\u64AD",
+            PlaybackWatchState.InProgress => "\u672A\u64AD\u5B8C",
+            _ => "\u672A\u64AD"
         };
     }
 }

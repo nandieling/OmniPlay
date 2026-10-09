@@ -65,6 +65,8 @@ stdout
 **/.bytro
 tmp_test.txt
 **/tmp_test.txt
+*.profraw
+*.tsbuildinfo
 
 # Local screenshots and manual test captures
 屏幕截图*
@@ -72,10 +74,19 @@ tmp_test.txt
 截屏*
 Screenshot*
 Screen Shot*
+# 版本目录根下随手放的对比截图（例如 OmniPlay-win/3.jpg）
+# 需要长期保留的配图请放进 docs/ 目录
+OmniPlay-*/*.jpg
+OmniPlay-*/*.jpeg
+OmniPlay-*/*.heic
+*.HEIC
 
 # Keep SQLite fixtures that are part of the vendored GRDB test suite.
 !OmniPlay开源-mac-ARM/GRDB.swift-master/Tests/**/*.sqlite
 !OmniPlay开源-mac-x64/GRDB.swift-master/Tests/**/*.sqlite
+# GRDB 自带的文档配图同样保留（上面 Screenshot* 规则会命中它）
+!OmniPlay开源-mac-ARM/GRDB.swift-master/Documentation/**/*.png
+!OmniPlay开源-mac-x64/GRDB.swift-master/Documentation/**/*.png
 
 # ============================================================
 # Build and package outputs
@@ -221,3 +232,32 @@ app/build/
 **/app/build/
 mapping/
 **/mapping/
+
+# Android Studio 本地 SDK / 模拟器数据（单个磁盘镜像可达 2 GB）
+.android-sdk/
+**/.android-sdk/
+.avd/
+**/.avd/
+*.avd/
+*.qcow2
+.kotlin/
+**/.kotlin/
+.externalNativeBuild/
+**/.externalNativeBuild/
+google-services.json.disabled
+
+# ============================================================
+# 本地媒体样本 / 抓包与刮削缓存
+# ============================================================
+# 源码里的 .ts 是 TypeScript，因此这里不忽略 *.ts
+*.mp4
+*.mkv
+*.m2ts
+*.mov
+*.webm
+*.iso
+*.bin
+
+media-samples/
+**/media-samples/
+.codesee/

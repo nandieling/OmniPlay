@@ -71,13 +71,10 @@ public sealed class WebDavDiscoveryClient : IWebDavDiscoveryClient, IWebDavConne
 
         try
         {
-            using var request = BuildRequest(
+            using var response = await SendPropFindAsync(
                 rootUri,
                 MediaSourceAuthConfigSerializer.DeserializeWebDav(source.AuthConfig),
-                depth: 0);
-            using var response = await httpClient.SendAsync(
-                request,
-                HttpCompletionOption.ResponseHeadersRead,
+                depth: 0,
                 cancellationToken);
 
             if (response.IsSuccessStatusCode)
@@ -107,6 +104,84 @@ public sealed class WebDavDiscoveryClient : IWebDavDiscoveryClient, IWebDavConne
         }
     }
 
+    private const int MaxPropFindAttempts = 3;
+
+    private static readonly TimeSpan PropFindRetryDelayBase = TimeSpan.FromMilliseconds(300);
+
+    /// <summary>
+    /// Sends a PROPFIND with bounded retries, mirroring the ARM mac scanner: 5xx responses and
+    /// network-level failures (timeout, connection lost) are retried up to 3 attempts with a
+    /// linear 300ms * attempt backoff; 401/403 and other non-2xx statuses are returned or
+    /// surfaced immediately.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendPropFindAsync(
+        Uri directoryUri,
+        WebDavAuthConfig? authConfig,
+        int depth,
+        CancellationToken cancellationToken)
+    {
+        Exception? lastError = null;
+        var lastFailureWasTimeout = false;
+
+        for (var attempt = 1; attempt <= MaxPropFindAttempts; attempt++)
+        {
+            using var request = BuildRequest(directoryUri, authConfig, depth);
+            HttpResponseMessage? ownedResponse = null;
+            try
+            {
+                ownedResponse = await httpClient.SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken);
+                var status = (int)ownedResponse.StatusCode;
+
+                if (ownedResponse.IsSuccessStatusCode || status == 207 || status is 401 or 403)
+                {
+                    var result = ownedResponse;
+                    ownedResponse = null;
+                    return result;
+                }
+
+                lastError = new HttpRequestException($"WebDAV 请求失败：HTTP {status} ({directoryUri})");
+                lastFailureWasTimeout = false;
+                if (status < 500)
+                {
+                    break;
+                }
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                lastError = new HttpRequestException("WebDAV 请求超时。", lastError);
+                lastFailureWasTimeout = true;
+            }
+            catch (HttpRequestException ex)
+            {
+                lastError = ex;
+                lastFailureWasTimeout = false;
+            }
+            finally
+            {
+                ownedResponse?.Dispose();
+            }
+
+            if (attempt < MaxPropFindAttempts)
+            {
+                await Task.Delay(PropFindRetryDelayBase * attempt, cancellationToken);
+            }
+        }
+
+        if (lastFailureWasTimeout)
+        {
+            throw new TaskCanceledException(
+                $"WebDAV 请求失败：重试后仍未成功 ({directoryUri})。最后错误：{lastError?.Message}",
+                lastError as Exception);
+        }
+
+        throw new HttpRequestException(
+            $"WebDAV 请求失败：重试后仍未成功 ({directoryUri})。最后错误：{lastError?.Message}",
+            lastError as Exception);
+    }
+
     private async Task EnumerateDirectoryAsync(
         Uri rootUri,
         Uri directoryUri,
@@ -121,11 +196,7 @@ public sealed class WebDavDiscoveryClient : IWebDavDiscoveryClient, IWebDavConne
             return;
         }
 
-        using var request = BuildRequest(directoryUri, authConfig, depth: 1);
-        using var response = await httpClient.SendAsync(
-            request,
-            HttpCompletionOption.ResponseHeadersRead,
-            cancellationToken);
+        using var response = await SendPropFindAsync(directoryUri, authConfig, depth: 1, cancellationToken);
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);

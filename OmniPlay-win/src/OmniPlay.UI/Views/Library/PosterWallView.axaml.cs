@@ -75,19 +75,19 @@ public partial class PosterWallView : UserControl
         AvaloniaProperty.Register<PosterWallView, double>(nameof(LibraryPosterTitleFontSize), 16);
 
     public static readonly StyledProperty<double> EpisodeThumbnailCardWidthProperty =
-        AvaloniaProperty.Register<PosterWallView, double>(nameof(EpisodeThumbnailCardWidth), 398);
+        AvaloniaProperty.Register<PosterWallView, double>(nameof(EpisodeThumbnailCardWidth), 320);
 
     public static readonly StyledProperty<double> EpisodeThumbnailCardHeightProperty =
-        AvaloniaProperty.Register<PosterWallView, double>(nameof(EpisodeThumbnailCardHeight), 224);
+        AvaloniaProperty.Register<PosterWallView, double>(nameof(EpisodeThumbnailCardHeight), 179);
 
     public static readonly StyledProperty<double> EpisodeThumbnailItemWidthProperty =
-        AvaloniaProperty.Register<PosterWallView, double>(nameof(EpisodeThumbnailItemWidth), 430);
+        AvaloniaProperty.Register<PosterWallView, double>(nameof(EpisodeThumbnailItemWidth), 354);
 
     public static readonly StyledProperty<double> EpisodeThumbnailItemHeightProperty =
-        AvaloniaProperty.Register<PosterWallView, double>(nameof(EpisodeThumbnailItemHeight), 340);
+        AvaloniaProperty.Register<PosterWallView, double>(nameof(EpisodeThumbnailItemHeight), 279);
 
     public static readonly StyledProperty<double> EpisodeThumbnailSpacingProperty =
-        AvaloniaProperty.Register<PosterWallView, double>(nameof(EpisodeThumbnailSpacing), 56);
+        AvaloniaProperty.Register<PosterWallView, double>(nameof(EpisodeThumbnailSpacing), 34);
 
     public static readonly StyledProperty<int> EpisodeThumbnailItemsPerRowProperty =
         AvaloniaProperty.Register<PosterWallView, int>(nameof(EpisodeThumbnailItemsPerRow), 4);
@@ -95,6 +95,7 @@ public partial class PosterWallView : UserControl
     private readonly DispatcherTimer overlayControlsHideTimer;
     private readonly DispatcherTimer overlayWindowControlsHideTimer;
     private readonly DispatcherTimer overlayVolumePopupHideTimer;
+    private DispatcherTimer? librarySkeletonPulseTimer;
     private WrapPanel? libraryItemsWrapPanel;
     private PosterWallViewModel? currentViewModel;
     private PlayerSurfaceHost? overlayPlayerSurfaceHost;
@@ -328,7 +329,7 @@ public partial class PosterWallView : UserControl
         var cardHeight = Math.Round(cardWidth * EpisodeThumbnailAspectRatio);
         var spacing = ResolveEpisodeThumbnailSpacing(physicalWidth);
         var itemWidth = Math.Round(cardWidth + spacing);
-        var itemHeight = Math.Round(cardHeight + 118);
+        var itemHeight = Math.Round(cardHeight + 100);
 
         EpisodeThumbnailCardWidth = cardWidth;
         EpisodeThumbnailCardHeight = cardHeight;
@@ -394,7 +395,7 @@ public partial class PosterWallView : UserControl
             return availableWidth >= 1700 ? 4 : 3;
         }
 
-        return Math.Max(3, Math.Floor(availableWidth / 430));
+        return Math.Max(3, Math.Floor(availableWidth / 350));
     }
 
     private static double ResolveEpisodeThumbnailCardWidth(
@@ -404,25 +405,25 @@ public partial class PosterWallView : UserControl
     {
         if (physicalWidth >= 3400)
         {
-            return Clamp(Math.Floor(availableWidth / targetColumns) - 34, 420, 470);
+            return Clamp(Math.Floor(availableWidth / targetColumns) - 28, 330, 380);
         }
 
         if (physicalWidth <= 2100)
         {
-            return Clamp(Math.Floor(availableWidth / targetColumns) - 34, 320, 366);
+            return Clamp(Math.Floor(availableWidth / targetColumns) - 28, 250, 300);
         }
 
-        return 398;
+        return 320;
     }
 
     private static double ResolveEpisodeThumbnailSpacing(double physicalWidth)
     {
         if (physicalWidth >= 3400)
         {
-            return 64;
+            return 52;
         }
 
-        return physicalWidth <= 2100 ? 46 : 56;
+        return physicalWidth <= 2100 ? 34 : 42;
     }
 
     private static double Clamp(double value, double minimum, double maximum)
@@ -1358,6 +1359,81 @@ public partial class PosterWallView : UserControl
         {
             currentViewModel.UpdatePlayerTimelineSeekPreview(slider.Value);
         }
+    }
+
+    private void OverlaySlider_OnPointerEntered(object? sender, PointerEventArgs e)
+    {
+        UpdateOverlayTimeBubble(e);
+    }
+
+    private void OverlaySlider_OnPointerMoved(object? sender, PointerEventArgs e)
+    {
+        UpdateOverlayTimeBubble(e);
+    }
+
+    private void OverlaySlider_OnPointerExited(object? sender, PointerEventArgs e)
+    {
+        if (OverlayTimeBubble is not null)
+        {
+            OverlayTimeBubble.IsVisible = false;
+        }
+    }
+
+    private void UpdateOverlayTimeBubble(PointerEventArgs e)
+    {
+        if (OverlayPositionSlider is null || OverlayTimeBubble is null || OverlayTimeBubbleText is null || currentViewModel is null)
+        {
+            return;
+        }
+        double duration = currentViewModel.PlayerTimelineDurationSeconds;
+        if (duration <= 0)
+        {
+            OverlayTimeBubble.IsVisible = false;
+            return;
+        }
+        var position = e.GetPosition(OverlayPositionSlider);
+        double width = System.Math.Max(1.0, OverlayPositionSlider.Bounds.Width);
+        double ratio = System.Math.Clamp(position.X / width, 0.0, 1.0);
+        OverlayTimeBubbleText.Text = FormatPlayerTimelineTime(ratio * duration);
+        double bubbleOffset = System.Math.Clamp(position.X - 18, 0.0, System.Math.Max(0.0, width - 36.0));
+        OverlayTimeBubble.RenderTransform = new Avalonia.Media.TranslateTransform(bubbleOffset, 0.0);
+        OverlayTimeBubble.IsVisible = true;
+    }
+
+    private static string FormatPlayerTimelineTime(double totalSeconds)
+    {
+        int seconds = (int)System.Math.Floor(System.Math.Max(0.0, totalSeconds));
+        int hours = seconds / 3600;
+        int minutes = (seconds % 3600) / 60;
+        int remainder = seconds % 60;
+        return hours > 0
+            ? string.Format("{0}:{1:00}:{2:00}", hours, minutes, remainder)
+            : string.Format("{0:00}:{1:00}", minutes, remainder);
+    }
+
+    private void LibrarySkeletonPanel_OnLoaded(object? sender, RoutedEventArgs e)
+    {
+        if (LibrarySkeletonPanel is null || librarySkeletonPulseTimer is not null)
+        {
+            return;
+        }
+        // 骨架屏呼吸动画：50ms 定时器驱动透明度正弦变化。
+        var timer = new DispatcherTimer
+        {
+            Interval = System.TimeSpan.FromMilliseconds(50)
+        };
+        double elapsed = 0.0;
+        timer.Tick += (_, _) =>
+        {
+            elapsed += 50.0;
+            double wave = System.Math.Cos(System.Math.PI * 2.0 * elapsed / 1400.0);
+            if (LibrarySkeletonPanel is not null)
+            {
+                LibrarySkeletonPanel.Opacity = 0.75 - 0.20 * wave;
+            }
+        };
+        timer.Start();
+        librarySkeletonPulseTimer = timer;
     }
 
     private void OverlayVolumeSlider_OnPointerPressed(object? sender, PointerPressedEventArgs e)

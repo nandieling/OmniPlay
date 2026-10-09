@@ -5,6 +5,7 @@ using OmniPlay.Core.ViewModels.Settings;
 
 namespace OmniPlay.Tests;
 
+[Collection("Locale")]
 public sealed class SettingsViewModelTests
 {
     [Fact]
@@ -324,4 +325,83 @@ public sealed class SettingsViewModelTests
             return shouldSucceed;
         }
     }
+
+    [Fact]
+    public async Task SaveLuckyStunCredentialsAsync_PersistsLoginAndSelectedRule()
+    {
+        var service = new FakeSettingsService();
+        var viewModel = new SettingsViewModel(service, new FakeTmdbConnectionTester());
+        await viewModel.LoadAsync();
+
+        await viewModel.SaveLuckyStunCredentialsAsync("http://192.168.1.1:16601", "admin", "secret", autoUpdate: true, updateIntervalMinutes: 45, selectedRuleId: "rule-1", selectedRuleName: "home");
+
+        Assert.NotNull(service.SavedSettings);
+        var saved = service.SavedSettings.LuckyStun;
+        Assert.Equal("http://192.168.1.1:16601", saved.ManagementUrl);
+        Assert.Equal("admin", saved.Username);
+        Assert.Equal("secret", saved.Password);
+        Assert.True(saved.AutoUpdate);
+        Assert.Equal(45, saved.UpdateIntervalMinutes);
+        Assert.Equal("rule-1", saved.SelectedRuleId);
+        Assert.Equal("home", saved.SelectedRuleName);
+
+        var reloaded = new SettingsViewModel(service, new FakeTmdbConnectionTester());
+        await reloaded.LoadAsync();
+
+        Assert.Equal("http://192.168.1.1:16601", reloaded.LuckyStunManagementUrl);
+        Assert.Equal("admin", reloaded.LuckyStunUsername);
+        Assert.Equal("secret", reloaded.LuckyStunPassword);
+        Assert.Equal("rule-1", reloaded.LuckyStunSelectedRuleId);
+        Assert.Equal("rule-1", reloaded.BuildLuckyStunSettings().SelectedRuleId);
+        Assert.Equal("home", reloaded.BuildLuckyStunSettings().SelectedRuleName);
+    }
+
+    [Fact]
+    public async Task LoadAsync_CategoryModeChange_ShouldNotPersistUnloadedTmdbState()
+    {
+        var initial = new AppSettings
+        {
+            HomeCategoryMode = "actor",
+            Tmdb = new TmdbSettings
+            {
+                CustomApiKey = "test-api-key",
+                ProxyUrl = "http://127.0.0.1:18099",
+                Language = "zh-CN"
+            }
+        };
+        var service = new FakeSettingsService(initial);
+        var viewModel = new SettingsViewModel(service, new FakeTmdbConnectionTester());
+
+        await viewModel.LoadAsync();
+
+        // 回归：加载设置过程中 HomeCategoryMode 属性变化曾触发局部保存，
+        // 用尚未填充完的表单状态覆盖设置，导致 API Key 与代理地址被清空。
+        Assert.Null(service.SavedSettings);
+        Assert.Equal("test-api-key", viewModel.BuildTmdbSettings().CustomApiKey);
+        Assert.Equal("http://127.0.0.1:18099", viewModel.BuildTmdbSettings().ProxyUrl);
+    }
+
+    [Fact]
+    public async Task SaveHomeCategoryPreferenceAsync_BeforeLoad_PreservesExistingTmdbSettings()
+    {
+        var initial = new AppSettings
+        {
+            HomeCategoryMode = "actor",
+            Tmdb = new TmdbSettings
+            {
+                CustomApiKey = "test-api-key",
+                Language = "zh-CN"
+            }
+        };
+        var service = new FakeSettingsService(initial);
+        var viewModel = new SettingsViewModel(service, new FakeTmdbConnectionTester());
+
+        // 未加载时发生局部保存（如首页选择分类），应先读取既有设置，避免清空 API Key。
+        await viewModel.SaveHomeCategoryPreferenceAsync("director");
+
+        Assert.NotNull(service.SavedSettings);
+        Assert.Equal("director", service.SavedSettings.HomeCategoryMode);
+        Assert.Equal("test-api-key", service.SavedSettings.Tmdb.CustomApiKey);
+    }
+
 }

@@ -14,5 +14,7 @@ public sealed record TmdbSettings
 
     public string CustomAccessToken { get; init; } = string.Empty;
 
+    public string ProxyUrl { get; init; } = string.Empty;
+
     public string Language { get; init; } = string.Empty;
 }

@@ -1,6 +1,7 @@
 using Dapper;
 using OmniPlay.Core.Interfaces;
 using OmniPlay.Core.Models;
+using OmniPlay.Core.Models.Library;
 using OmniPlay.Core.Models.Entities;
 using OmniPlay.Core.Settings;
 using OmniPlay.Infrastructure.Data;
@@ -14,17 +15,20 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
     private readonly ITmdbMetadataClient tmdbMetadataClient;
     private readonly ISettingsService? settingsService;
     private readonly ILocalMetadataSidecarService? localMetadataSidecarService;
+    private readonly ICategoryFolderStore? categoryFolderStore;
 
     public LibraryMetadataEnricher(
         SqliteDatabase database,
         ITmdbMetadataClient tmdbMetadataClient,
         ISettingsService? settingsService = null,
-        ILocalMetadataSidecarService? localMetadataSidecarService = null)
+        ILocalMetadataSidecarService? localMetadataSidecarService = null,
+        ICategoryFolderStore? categoryFolderStore = null)
     {
         this.database = database;
         this.tmdbMetadataClient = tmdbMetadataClient;
         this.settingsService = settingsService;
         this.localMetadataSidecarService = localMetadataSidecarService;
+        this.categoryFolderStore = categoryFolderStore;
     }
 
     public async Task<LibraryMetadataEnrichmentSummary> EnrichMissingMetadataAsync(
@@ -351,7 +355,10 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
                            WHERE vf.movieId = movie.id AND vf.mediaType = 'movie'
                            ORDER BY vf.relativePath COLLATE NOCASE ASC
                            LIMIT 1
-                       ) AS FileName
+                       ) AS FileName,
+                       movie.director AS Director,
+                       movie.mainCast AS MainCast,
+                       movie.tmdbId AS TmdbId
                 FROM movie
                 WHERE movie.isLocked = 0
                   {filterByMovie}
@@ -413,7 +420,9 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
                            WHERE vf.episodeId = tvShow.id AND vf.mediaType = 'tv'
                            ORDER BY vf.relativePath COLLATE NOCASE ASC
                            LIMIT 1
-                       ) AS FileName
+                       ) AS FileName,
+                       tvShow.director AS Director,
+                       tvShow.mainCast AS MainCast
                 FROM tvShow
                 WHERE tvShow.isLocked = 0
                   {filterByTvShow}
@@ -451,6 +460,11 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
         var newProductionCountryCodes = settings.EnableMetadataEnrichment ? PreferMetadataValue(match.ProductionCountryCodes, candidate.ProductionCountryCodes) : candidate.ProductionCountryCodes;
         var newOriginalLanguage = settings.EnableMetadataEnrichment ? PreferMetadataValue(match.OriginalLanguage, candidate.OriginalLanguage) : candidate.OriginalLanguage;
         var newMetadataLanguage = settings.EnableMetadataEnrichment ? ResolveDesiredMetadataLanguage(settings.Language) : candidate.MetadataLanguage;
+        var credits = settings.EnableMetadataEnrichment ? await TryFetchCreditsAsync(match, cancellationToken) : null;
+        credits = await RefreshPeopleAsync(credits, cancellationToken);
+        var people = PeopleColumns.FromCredits(credits, candidate.Director, candidate.MainCast);
+        var newDirector = people.DirectorText;
+        var newMainCast = people.MainCastText;
 
         var updatedMetadata =
             !string.Equals(newTitle, candidate.Title, StringComparison.Ordinal) ||
@@ -459,7 +473,9 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
             !Nullable.Equals(newVoteAverage, candidate.VoteAverage) ||
             !string.Equals(newProductionCountryCodes, candidate.ProductionCountryCodes, StringComparison.Ordinal) ||
             !string.Equals(newOriginalLanguage, candidate.OriginalLanguage, StringComparison.Ordinal) ||
-            !string.Equals(newMetadataLanguage, candidate.MetadataLanguage, StringComparison.OrdinalIgnoreCase);
+            !string.Equals(newMetadataLanguage, candidate.MetadataLanguage, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(newDirector, candidate.Director, StringComparison.Ordinal) ||
+            !string.Equals(newMainCast, candidate.MainCast, StringComparison.Ordinal);
 
         using var connection = database.OpenConnection();
         using var transaction = connection.BeginTransaction();
@@ -475,6 +491,10 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
                     productionCountryCodes = @ProductionCountryCodes,
                     originalLanguage = @OriginalLanguage,
                     metadataLanguage = @MetadataLanguage,
+                    director = @Director,
+                    mainCast = @MainCast,
+                    directors = @Directors,
+                    casts = @Casts,
                     tmdbId = @TmdbId
                 WHERE id = @Id
                 """,
@@ -489,6 +509,10 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
                     ProductionCountryCodes = newProductionCountryCodes,
                     OriginalLanguage = newOriginalLanguage,
                     MetadataLanguage = newMetadataLanguage,
+                    Director = newDirector,
+                    MainCast = newMainCast,
+                    Directors = people.Directors,
+                    Casts = people.Casts,
                     TmdbId = match.Id
                 },
                 transaction,
@@ -517,7 +541,9 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
                 Overview = newOverview,
                 PosterPath = newPosterPath,
                 VoteAverage = newVoteAverage,
-                TmdbId = match.Id
+                TmdbId = match.Id,
+                Directors = PersonNames.Decode(people.Directors),
+                Casts = PersonNames.Decode(people.Casts)
             });
     }
 
@@ -610,6 +636,11 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
         var newProductionCountryCodes = settings.EnableMetadataEnrichment ? PreferMetadataValue(match.ProductionCountryCodes, candidate.ProductionCountryCodes) : candidate.ProductionCountryCodes;
         var newOriginalLanguage = settings.EnableMetadataEnrichment ? PreferMetadataValue(match.OriginalLanguage, candidate.OriginalLanguage) : candidate.OriginalLanguage;
         var newMetadataLanguage = settings.EnableMetadataEnrichment ? ResolveDesiredMetadataLanguage(settings.Language) : candidate.MetadataLanguage;
+        var credits = settings.EnableMetadataEnrichment ? await TryFetchCreditsAsync(match, cancellationToken) : null;
+        credits = await RefreshPeopleAsync(credits, cancellationToken);
+        var people = PeopleColumns.FromCredits(credits, candidate.Director, candidate.MainCast);
+        var newDirector = people.DirectorText;
+        var newMainCast = people.MainCastText;
 
         var updatedMetadata =
             !string.Equals(newTitle, candidate.Title, StringComparison.Ordinal) ||
@@ -618,7 +649,9 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
             !Nullable.Equals(newVoteAverage, candidate.VoteAverage) ||
             !string.Equals(newProductionCountryCodes, candidate.ProductionCountryCodes, StringComparison.Ordinal) ||
             !string.Equals(newOriginalLanguage, candidate.OriginalLanguage, StringComparison.Ordinal) ||
-            !string.Equals(newMetadataLanguage, candidate.MetadataLanguage, StringComparison.OrdinalIgnoreCase);
+            !string.Equals(newMetadataLanguage, candidate.MetadataLanguage, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(newDirector, candidate.Director, StringComparison.Ordinal) ||
+            !string.Equals(newMainCast, candidate.MainCast, StringComparison.Ordinal);
 
         if (!updatedMetadata &&
             string.Equals(newPosterPath, candidate.PosterPath, StringComparison.Ordinal))
@@ -638,7 +671,11 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
                     voteAverage = @VoteAverage,
                     productionCountryCodes = @ProductionCountryCodes,
                     originalLanguage = @OriginalLanguage,
-                    metadataLanguage = @MetadataLanguage
+                    metadataLanguage = @MetadataLanguage,
+                    director = @Director,
+                    mainCast = @MainCast,
+                    directors = @Directors,
+                    casts = @Casts
                 WHERE id = @Id
                 """,
                 new
@@ -651,7 +688,11 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
                     VoteAverage = newVoteAverage,
                     ProductionCountryCodes = newProductionCountryCodes,
                     OriginalLanguage = newOriginalLanguage,
-                    MetadataLanguage = newMetadataLanguage
+                    MetadataLanguage = newMetadataLanguage,
+                    Director = newDirector,
+                    MainCast = newMainCast,
+                    Directors = people.Directors,
+                    Casts = people.Casts
                 },
                 cancellationToken: cancellationToken));
 
@@ -665,8 +706,26 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
                 Overview = newOverview,
                 PosterPath = newPosterPath,
                 VoteAverage = newVoteAverage,
-                TmdbId = match.Id
+                TmdbId = match.Id,
+                Directors = PersonNames.Decode(people.Directors),
+                Casts = PersonNames.Decode(people.Casts)
             });
+    }
+
+    /// <summary>用中文译名覆盖刮削到的外文人名，并把本片人物登记进导演/主演档案。</summary>
+    private Task<TmdbCredits?> RefreshPeopleAsync(TmdbCredits? credits, CancellationToken cancellationToken) =>
+        PeopleColumnFactory.RefreshPeopleAsync(categoryFolderStore, credits, cancellationToken);
+
+    private async Task<TmdbCredits?> TryFetchCreditsAsync(TmdbMetadataMatch match, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await tmdbMetadataClient.FetchCreditsAsync(match.Id, match.MediaType, cancellationToken);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     private static bool NeedsMovieRefresh(MovieMetadataCandidate candidate, TmdbSettings settings)
@@ -677,7 +736,10 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
                              || string.IsNullOrWhiteSpace(candidate.ReleaseDate)
                              || string.IsNullOrWhiteSpace(candidate.Overview)
                              || string.IsNullOrWhiteSpace(candidate.ProductionCountryCodes)
-                             || candidate.VoteAverage is null);
+                             || candidate.VoteAverage is null
+                             || (candidate.TmdbId.HasValue
+                                 && (string.IsNullOrWhiteSpace(candidate.Director)
+                                     || string.IsNullOrWhiteSpace(candidate.MainCast))));
         return needsPoster || needsMetadata;
     }
 
@@ -689,7 +751,10 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
                              || string.IsNullOrWhiteSpace(candidate.FirstAirDate)
                              || string.IsNullOrWhiteSpace(candidate.Overview)
                              || string.IsNullOrWhiteSpace(candidate.ProductionCountryCodes)
-                             || candidate.VoteAverage is null);
+                             || candidate.VoteAverage is null
+                             || (!string.IsNullOrWhiteSpace(candidate.MetadataLanguage)
+                                 && (string.IsNullOrWhiteSpace(candidate.Director)
+                                     || string.IsNullOrWhiteSpace(candidate.MainCast))));
         return needsPoster || needsMetadata;
     }
 
@@ -834,7 +899,10 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
         string? SourceProtocolType,
         string? BaseUrl,
         string? RelativePath,
-        string? FileName);
+        string? FileName,
+        string? Director,
+        string? MainCast,
+        long? TmdbId);
 
     private sealed record TvShowMetadataCandidate(
         long Id,
@@ -849,7 +917,9 @@ public sealed class LibraryMetadataEnricher : ILibraryMetadataEnricher
         string? SourceProtocolType,
         string? BaseUrl,
         string? RelativePath,
-        string? FileName);
+        string? FileName,
+        string? Director,
+        string? MainCast);
 
     private sealed record UpdateResult(
         bool UpdatedMetadata,

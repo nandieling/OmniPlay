@@ -1,2245 +1,2031 @@
 {
-  "sourceLanguage" : "zh-Hans",
-  "strings" : {
-    "" : {
-
-    },
-    "-" : {
-
+  "sourceLanguage": "zh-Hans",
+  "strings": {
+    "": {},
+    "%@  ·  %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$@  ·  %2$@"
+          }
+        }
+      }
     },
-    "%@  ·  %@" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@  ·  %2$@"
+    "%@ / %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ / %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ / %@"
           }
         }
       }
     },
-    "%@ · %@" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@ · %2$@"
+    "%@ / %@ · %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$@ / %2$@ · %3$@"
           }
         }
       }
     },
-    "%@ / %@" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%@ / %@"
+    "%@ · %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$@ · %2$@"
           }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%@ / %@"
+        }
+      }
+    },
+    "%@ · 第 %lld/%lld 集 · %lld%%": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$@ · 第 %2$lld/%3$lld 集 · %4$lld%%"
           }
         }
       }
     },
-    "%@:%lld" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@:%2$lld"
+    "%@ 登录": {},
+    "%@:%lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$@:%2$lld"
           }
         }
       }
     },
-    "%lld. %@ %@ 第 %lld 集" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld. %@ %@ Episode %lld"
+    "%lld": {},
+    "%lld%%": {},
+    "%lld. %@ %@ 第 %lld 集": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld. %@ %@ Episode %lld"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$lld. %2$@ %3$@ 第 %4$lld 集"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld. %2$@ %3$@ 第 %4$lld 集"
           }
         }
       }
     },
-    "%lld%%" : {
-
-    },
-    "⚠️ 该源地址已存在！" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "⚠️ This source address already exists!"
+    "-": {},
+    "API Key / v4 令牌": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "API Key / v4 Token"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "⚠️ 该源地址已存在！"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "API Key / v4 令牌"
           }
         }
       }
     },
-    "💡 提示：无需端口号，IP 后面直接加斜杠和“共享文件夹名”（如 /电影）" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "💡 Tip: No port needed. Add a slash and \"Shared Folder Name\" after the IP (e.g., /Movies)."
+    "Emby": {},
+    "English": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "English"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "💡 提示：无需端口号，IP 后面直接加斜杠和“共享文件夹名”（如 /电影）"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "English"
           }
         }
       }
     },
-    "API Key / v4 令牌" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "API Key / v4 Token"
+    "Jellyfin": {},
+    "Lucky STUN 穿透媒体源": {},
+    "Lucky 管理地址": {},
+    "Lucky 管理密码": {},
+    "Lucky 管理账号": {},
+    "MPVKit 打包来源 / 发布资产": {},
+    "OmniPlay Docker": {},
+    "Plex": {},
+    "Plex 访问令牌": {},
+    "SMB 局域网": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SMB (LAN)"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "API Key / v4 令牌"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SMB 局域网"
           }
         }
       }
-    },
-    "Docker" : {
-
     },
-    "Emby" : {
-
-    },
-    "English" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "English"
+    "TMDB API 代理网关（可选）": {},
+    "TMDB API 代理网关（可选）。留空直连官方 API；无法直连时可填写反向代理地址，支持域名或带路径前缀的地址，例如 https://proxy.example.com/tmdb。": {},
+    "TMDB API 无法连接": {},
+    "TMDB评分 (0.0 - 10.0)": {},
+    "TV-14": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TV-14"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "English"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TV-14"
           }
         }
       }
-    },
-    "Jellyfin" : {
-
-    },
-    "MPVKit 打包来源 / 发布资产" : {
-
     },
-    "OmniPlay Docker" : {
-
-    },
-    "Plex" : {
-
-    },
-    "Plex/Emby/Jellyfin" : {
-
-    },
-    "SMB 局域网" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "SMB (LAN)"
+    "WebDAV": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "WebDAV"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "SMB 局域网"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "WebDAV"
           }
         }
       }
-    },
-    "TMDB" : {
-
-    },
-    "TMDB API 无法连接" : {
-
     },
-    "TMDB评分 (0.0 - 10.0)" : {
-
-    },
-    "TV-14" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "TV-14"
+    "WebDAV 地址，例如 https://nas:5006/dav": {},
+    "WebDAV 地址，例如 https://nas:5006/dav/Media": {},
+    "“验证”会检查这里填写的 TMDB API Key / v4 令牌。": {},
+    "⚠️ 该源地址已存在！": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "⚠️ This source address already exists!"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "TV-14"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "⚠️ 该源地址已存在！"
           }
         }
       }
     },
-    "WebDAV" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "WebDAV"
+    "一键修复缺失数据": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "One-Click Repair Missing Data"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "WebDAV"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一键修复缺失数据"
           }
         }
       }
-    },
-    "WebDAV 地址，例如 https://nas:5006/dav" : {
-
     },
-    "WebDAV 地址，例如 https://nas:5006/dav/Media" : {
-
-    },
-    "局域网媒体源" : {
-
-    },
-    "一键修复缺失数据" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "One-Click Repair Missing Data"
+    "一键填入": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Autofill"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "一键修复缺失数据"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一键填入"
           }
         }
       }
     },
-    "一键填入" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Autofill"
+    "上映时间 (如: 2025-01-01)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Release Date (e.g., 2025-01-01)"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "一键填入"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上映时间 (如: 2025-01-01)"
           }
         }
       }
     },
-    "上映时间 (如: 2025-01-01)" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Release Date (e.g., 2025-01-01)"
+    "上游源码 / 许可证信息": {},
+    "上游项目 / 许可证主页": {},
+    "中文": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chinese"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "上映时间 (如: 2025-01-01)"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "中文"
           }
         }
       }
-    },
-    "上游源码 / 许可证信息" : {
-
     },
-    "上游项目 / 许可证主页" : {
-
-    },
-    "中文" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Chinese"
+    "中文优先 (简/繁)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chinese Preferred (Simp/Trad)"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "中文"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "中文优先 (简/繁)"
           }
         }
       }
     },
-    "中文优先 (简/繁)" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Chinese Preferred (Simp/Trad)"
+    "为「%@」选择封面": {},
+    "主演": {},
+    "主演（多人用顿号或逗号分隔）": {},
+    "仅修改应用内显示名称，不会改动真实文件夹。": {},
+    "优先检测局域网地址，失败后依次检测外网地址": {},
+    "保存": {},
+    "保存位置": {},
+    "保存修改": {},
+    "保存修改并锁定": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save Changes"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "中文优先 (简/繁)"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存修改并锁定"
           }
         }
       }
-    },
-    "仅修改应用内显示名称，不会改动真实文件夹。" : {
-
-    },
-    "保存" : {
-
-    },
-    "保存位置" : {
-
-    },
-    "保存修改" : {
-
     },
-    "保存修改并锁定" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Save Changes"
+    "保存并同步": {},
+    "保存登录信息后会先进入共享文件夹列表；可给多个目标文件夹点星标，关闭列表时统一挂载并扫描刮削。": {},
+    "偏好设置": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preferences"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "保存修改并锁定"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "偏好设置"
           }
         }
       }
     },
-    "保存登录信息后会先进入共享文件夹列表；可给多个目标文件夹点星标，关闭列表时统一挂载并扫描刮削。" : {
-
-    },
-    "偏好设置" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Preferences"
+    "全部分类": {},
+    "关联此项": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Link This Item"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "偏好设置"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关联此项"
           }
         }
       }
     },
-    "关联此项" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Link This Item"
+    "关闭": {},
+    "关闭字幕": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subtitles Off"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "关联此项"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭字幕"
           }
         }
       }
-    },
-    "关闭" : {
-
     },
-    "关闭字幕" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Subtitles Off"
+    "关闭并挂载 %lld 个文件夹": {},
+    "关闭并挂载标星文件夹": {},
+    "准备播放环境...": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparing playback environment..."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "关闭字幕"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "准备播放环境..."
           }
         }
       }
-    },
-    "关闭并挂载 %lld 个文件夹" : {
-
-    },
-    "关闭并挂载标星文件夹" : {
-
-    },
-    "最近使用" : {
-
     },
-    "准备播放环境..." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Preparing playback environment..."
+    "分集信息": {},
+    "切换后新打开的播放窗口会生效。": {},
+    "切换离线缓存编辑模式": {},
+    "删除文件夹时保留本地缓存海报": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep cached posters when removing folders"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "准备播放环境..."
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除文件夹时保留本地缓存海报"
           }
         }
       }
     },
-    "分集信息" : {
-
-    },
-    "切换后新打开的播放窗口会生效。" : {
-
-    },
-    "切换离线缓存编辑模式" : {
-
-    },
-    "删除文件夹时保留本地缓存海报" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Keep cached posters when removing folders"
+    "刮削完成后保存 NFO、海报和剧照到本地": {},
+    "刮削服务 (TMDB)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Metadata Provider (TMDB)"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "删除文件夹时保留本地缓存海报"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刮削服务 (TMDB)"
           }
         }
       }
     },
-    "刮削完成后保存 NFO、海报和剧照到本地" : {
-
-    },
-    "刮削服务 (TMDB)" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Metadata Provider (TMDB)"
+    "刷新": {},
+    "剧情简介": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Overview / Synopsis"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "刮削服务 (TMDB)"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "剧情简介"
           }
         }
       }
-    },
-    "刷新" : {
-
     },
-    "剧情简介" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Overview / Synopsis"
+    "剧照管理": {},
+    "加载外置字幕...": {},
+    "协议：%@": {},
+    "取消": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "剧情简介"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消"
           }
         }
       }
     },
-    "剧照管理" : {
-
-    },
-    "加载外置字幕..." : {
-
-    },
-    "取消" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Cancel"
+    "取消标星": {},
+    "取消离线缓存？": {},
+    "取消缓存": {},
+    "取消这一集的离线缓存？": {},
+    "同步": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sync"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "取消"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "同步"
           }
         }
       }
     },
-    "取消标星" : {
-
-    },
-    "同步" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Sync"
+    "同步中...": {},
+    "后台扫描本地库，并为评分为 0 或缺失资料的影视重新拉取数据。": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scan library in background and refetch data for titles with 0 rating or missing info."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "同步"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台扫描本地库，并为评分为 0 或缺失资料的影视重新拉取数据。"
           }
         }
       }
     },
-    "后台扫描本地库，并为评分为 0 或缺失资料的影视重新拉取数据。" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Scan library in background and refetch data for titles with 0 rating or missing info."
+    "启动时自动扫描并同步库": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auto-scan and sync library on startup"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "后台扫描本地库，并为评分为 0 或缺失资料的影视重新拉取数据。"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启动时自动扫描并同步库"
           }
         }
       }
     },
-    "启动时自动扫描并同步库" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Auto-scan and sync library on startup"
+    "启动时自动检查更新": {},
+    "启用快速悬停提示 (Tooltip)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enable Tooltips"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "启动时自动扫描并同步库"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启用快速悬停提示 (Tooltip)"
           }
         }
       }
     },
-    "启动时自动检查更新" : {
-
-    },
-    "启用快速悬停提示 (Tooltip)" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Enable Tooltips"
+    "在浏览器搜索豆瓣": {},
+    "地址：%@": {},
+    "基础信息": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Basic Info"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "启用快速悬停提示 (Tooltip)"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "基础信息"
           }
         }
       }
-    },
-    "在浏览器搜索豆瓣" : {
-
     },
-    "基础信息" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Basic Info"
+    "基础设置": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Basic Settings"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "基础信息"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "基础设置"
           }
         }
       }
     },
-    "基础设置" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Basic Settings"
+    "填写 Docker 版服务地址和登录账号，保存后会立即同步 Docker 端电影、剧集和已扫描元数据。": {},
+    "外观与主题": {},
+    "大号字体 (20)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Large Font (20)"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "基础设置"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "大号字体 (20)"
           }
         }
       }
     },
-    "填写自定义 API 后会优先使用你的密钥；“验证”只检查这里填写的自定义密钥。" : {
-
-    },
-    "外观与主题" : {
-
-    },
-    "大号字体 (20)" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Large Font (20)"
+    "好": {},
+    "媒体库空空如也，快去添加文件夹吧！": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your library is empty. Add a folder to get started!"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "大号字体 (20)"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "媒体库空空如也，快去添加文件夹吧！"
           }
         }
       }
     },
-    "媒体库空空如也，快去添加文件夹吧！" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Your library is empty. Add a folder to get started!"
+    "媒体源显示真实路径": {},
+    "媒体源登录信息": {},
+    "字幕": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subtitles"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "媒体库空空如也，快去添加文件夹吧！"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "字幕"
           }
         }
       }
     },
-    "媒体源显示真实路径" : {
-
-    },
-    "字幕" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Subtitles"
+    "字幕同步 (G 早 / H 晚)": {},
+    "字幕大小": {},
+    "字幕调早 0.5 秒": {},
+    "字幕调晚 0.5 秒": {},
+    "密码": {},
+    "密码 (可选)": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Password (Optional)"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "字幕"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "密码 (可选)"
           }
         }
       }
-    },
-    "字幕同步 (G 早 / H 晚)" : {
-
-    },
-    "字幕大小" : {
-
     },
-    "字幕调早 0.5 秒" : {
-
-    },
-    "字幕调晚 0.5 秒" : {
-
-    },
-    "密码" : {
-
-    },
-    "密码 (可选)" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Password (Optional)"
+    "密码 / API Key / 访问令牌": {},
+    "密码（可选）": {},
+    "导演": {},
+    "导演（多人用顿号或逗号分隔）": {},
+    "将当前浏览的目录添加到主页，并开始自动刮削海报": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add the current directory to Home and start auto-scraping posters."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "密码 (可选)"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将当前浏览的目录添加到主页，并开始自动刮削海报"
           }
         }
       }
     },
-    "密码（可选）" : {
-
-    },
-    "将当前浏览的目录添加到主页，并开始自动刮削海报" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Add the current directory to Home and start auto-scraping posters."
+    "将批量解除首页库的所有影视卡片的锁定状态。": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This will bulk unlock all movie cards in the library."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "将当前浏览的目录添加到主页，并开始自动刮削海报"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将批量解除首页库的所有影视卡片的锁定状态。"
           }
         }
       }
     },
-    "将批量解除首页库的所有影视卡片的锁定状态。" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "This will bulk unlock all movie cards in the library."
+    "将批量锁定首页库的所有影视卡片，不再参与自动刮削。": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This will bulk lock all movie cards in the library; they will no longer be auto-scraped."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "将批量解除首页库的所有影视卡片的锁定状态。"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将批量锁定首页库的所有影视卡片，不再参与自动刮削。"
           }
         }
       }
     },
-    "将批量锁定首页库的所有影视卡片，不再参与自动刮削。" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "This will bulk lock all movie cards in the library; they will no longer be auto-scraped."
+    "将移除“%@”及其影片索引。": {},
+    "小号字体 (12)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Small Font (12)"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "将批量锁定首页库的所有影视卡片，不再参与自动刮削。"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "小号字体 (12)"
           }
         }
       }
-    },
-    "将移除“%@”及其影片索引。" : {
-
     },
-    "小号字体 (12)" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Small Font (12)"
+    "局域网发现": {},
+    "局域网媒体源": {},
+    "已挂载": {},
+    "已挂载媒体源：": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mounted Media Sources:"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "小号字体 (12)"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已挂载媒体源："
           }
         }
       }
     },
-    "局域网发现" : {
-
-    },
-    "已挂载" : {
-
-    },
-    "已挂载媒体源：" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Mounted Media Sources:"
+    "已播": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Watched"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "已挂载媒体源："
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已播"
           }
         }
       }
     },
-    "已播" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Watched"
+    "已标星 %lld 个文件夹，关闭列表后会加入挂载媒体源。": {},
+    "已添加": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Added"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "已播"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已添加"
           }
         }
       }
     },
-    "已标星 %lld 个文件夹，关闭列表后会加入挂载媒体源。" : {
-
-    },
-    "已添加" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Added"
+    "已看": {},
+    "已缓存的内容会保留，未完成的文件将被删除。": {},
+    "已锁定 (跳过自动刮削)": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Locked (Skip Auto-Scraping)"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "已添加"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已锁定 (跳过自动刮削)"
           }
         }
       }
     },
-    "已锁定 (跳过自动刮削)" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Locked (Skip Auto-Scraping)"
+    "平衡 (推荐)": {},
+    "年份(可选)": {},
+    "应用主题配色": {},
+    "开启": {},
+    "开启分类后，首页「所有影视」右侧会出现分类下拉按钮，可随时切换或关闭。文件夹海报默认取文件夹内影视的随机海报，可手动指定或自定义图片。": {},
+    "当前 macOS 构建按 MPVKit-GPL 产品链展开后，共整理出 %lld 个直接或间接打包进播放器栈的二级依赖。下面按功能分组，每个条目都可打开单独详情页。": {},
+    "当前显示: %@": {},
+    "当前服务器没有可挂载的媒体库。": {},
+    "当前未配置任何 TMDB 凭据。TMDB 刮削、海报与剧照获取将不可用。": {},
+    "当前构建内置了 GNU GPL v3.0、GNU LGPL v3.0、GNU LGPL v2.1、Apache 2.0 和 GRDB 的 MIT 正文，便于在 App 内直接查看。": {},
+    "当前没有为该条目内置专属或通用许可证正文，请优先查看上游项目页中的 LICENSE / COPYING。": {},
+    "当前海报": {},
+    "当前版本": {},
+    "当前目录没有可浏览的子文件夹。": {},
+    "当前绑定：%@": {},
+    "影视名称": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Title"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "已锁定 (跳过自动刮削)"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "影视名称"
           }
         }
       }
-    },
-    "平衡 (推荐)" : {
-
-    },
-    "年份(可选)" : {
-
     },
-    "应用主题配色" : {
-
-    },
-    "开启" : {
-
-    },
-    "当前 macOS 构建按 MPVKit-GPL 产品链展开后，共整理出 %lld 个直接或间接打包进播放器栈的二级依赖。下面按功能分组，每个条目都可打开单独详情页。" : {
-
-    },
-    "当前显示: %@" : {
-
-    },
-    "当前服务器没有可挂载的媒体库。" : {
-
-    },
-    "当前未配置任何 TMDB 凭据。TMDB 刮削、海报与剧照获取将不可用。" : {
-
-    },
-    "当前构建内置了 GNU GPL v3.0、GNU LGPL v3.0、GNU LGPL v2.1、Apache 2.0 和 GRDB 的 MIT 正文，便于在 App 内直接查看。" : {
-
-    },
-    "当前没有为该条目内置专属或通用许可证正文，请优先查看上游项目页中的 LICENSE / COPYING。" : {
-
-    },
-    "当前海报" : {
-
-    },
-    "当前版本" : {
-
-    },
-    "当前目录没有可浏览的子文件夹。" : {
-
-    },
-    "当前绑定：%@" : {
-
-    },
-    "影视名称" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Title"
+    "恢复默认封面": {},
+    "我的觅影库": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "My Library"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "影视名称"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "我的觅影库"
           }
         }
       }
     },
-    "我的觅影库" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "My Library"
+    "所有影视": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All Media"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "我的觅影库"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "所有影视"
           }
         }
       }
     },
-    "所有影视" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "All Media"
+    "手动匹配": {},
+    "手动编辑资料": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edit Metadata Manually"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "所有影视"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "手动编辑资料"
           }
         }
       }
     },
-    "手动匹配" : {
-
-    },
-    "手动编辑资料" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Edit Metadata Manually"
+    "打开 GitHub 仓库": {},
+    "扫描中...": {},
+    "扫描刮削失败": {},
+    "扫描到 OmniPlay Docker、WebDAV、Plex、Emby 或 Jellyfin 后，点击设备进入登录。": {},
+    "扫描到 WebDAV、Plex、Emby 或 Jellyfin 后，点击设备进入登录。": {},
+    "扫描设备": {},
+    "批量解锁": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bulk Unlock"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "手动编辑资料"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "批量解锁"
           }
         }
       }
-    },
-    "打开 GitHub 仓库" : {
-
-    },
-    "扫描中..." : {
-
     },
-    "扫描到 WebDAV、Plex、Emby 或 Jellyfin 后，点击设备进入登录。" : {
-
-    },
-    "扫描设备" : {
-
-    },
-    "批量解锁" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Bulk Unlock"
+    "批量解锁全部影视": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bulk Unlock All Titles"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "批量解锁"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "批量解锁全部影视"
           }
         }
       }
     },
-    "批量解锁全部影视" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Bulk Unlock All Titles"
+    "批量锁定": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bulk Lock"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "批量解锁全部影视"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "批量锁定"
           }
         }
       }
     },
-    "批量锁定" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Bulk Lock"
+    "批量锁定全部影视": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bulk Lock All Titles"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "批量锁定"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "批量锁定全部影视"
           }
         }
       }
     },
-    "批量锁定全部影视" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Bulk Lock All Titles"
+    "找到正确条目后复制 subject 链接回来绑定。": {},
+    "按%@": {},
+    "搜索": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "批量锁定全部影视"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索"
           }
         }
       }
     },
-    "找到正确条目后复制 subject 链接回来绑定。" : {
-
-    },
-    "搜索" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Search"
+    "搜索...": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search…"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "搜索"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索..."
           }
         }
       }
     },
-    "搜索..." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Search…"
+    "搜索当前目录...": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search current directory..."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "搜索..."
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索当前目录..."
           }
         }
       }
     },
-    "搜索当前目录..." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Search current directory..."
+    "播放下一集": {},
+    "播放器内核与开源组件": {},
+    "播放画质模式": {},
+    "播放蓝光花絮": {},
+    "支持 http/https。请直接填写 NAS 里的媒体文件夹地址（不要只填服务根）。例如：https://nas:5006/dav/Movies": {},
+    "数据修复工具": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Data Repair Tool"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "搜索当前目录..."
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "数据修复工具"
           }
         }
       }
-    },
-    "播放下一集" : {
-
-    },
-    "播放器内核与开源组件" : {
-
     },
-    "播放画质模式" : {
-
-    },
-    "播放蓝光花絮" : {
-
-    },
-    "支持 http/https。请直接填写 NAS 里的媒体文件夹地址（不要只填服务根）。例如：https://nas:5006/dav/Movies" : {
-
-    },
-    "数据修复工具" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Data Repair Tool"
+    "文件: %@": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "File: %@"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "数据修复工具"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文件: %@"
           }
         }
       }
     },
-    "文件: %@" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "File: %@"
+    "新增媒体源": {},
+    "无法播放": {},
+    "日语": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Japanese"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "文件: %@"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "日语"
           }
         }
       }
-    },
-    "新增媒体源" : {
-
-    },
-    "无法播放" : {
-
     },
-    "日语" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Japanese"
+    "显示名称 (如: 群晖影视库)": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Display Name (e.g., Synology Library)"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "日语"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示名称 (如: 群晖影视库)"
           }
         }
       }
     },
-    "显示名称 (如: 群晖影视库)" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Display Name (e.g., Synology Library)"
+    "显示名称（可选）": {},
+    "智能匹配 (制片国家语言)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Smart Match (Origin Country Language)"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "显示名称 (如: 群晖影视库)"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "智能匹配 (制片国家语言)"
           }
         }
       }
     },
-    "显示名称（可选）" : {
-
-    },
-    "智能匹配 (制片国家语言)" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Smart Match (Origin Country Language)"
+    "暂无搜索结果，请输入关键字后回车开始匹配": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No results. Enter keywords and press Enter to match."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "智能匹配 (制片国家语言)"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无搜索结果，请输入关键字后回车开始匹配"
           }
         }
       }
     },
-    "暂无搜索结果，请输入关键字后回车开始匹配" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "No results. Enter keywords and press Enter to match."
+    "暂无源": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No Sources"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "暂无搜索结果，请输入关键字后回车开始匹配"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无源"
           }
         }
       }
     },
-    "暂无源" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "No Sources"
+    "更改此项将改变 TMDB 刮削获取的海报和简介语言。": {},
+    "更改此项将改变 TMDB 刮削获取的海报和简介语言。注意：UI 菜单翻译需配合 Xcode 的 String Catalog 使用。": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Changing this will update the language of posters and overviews fetched from TMDB."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "暂无源"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更改此项将改变 TMDB 刮削获取的海报和简介语言。注意：UI 菜单翻译需配合 Xcode 的 String Catalog 使用。"
           }
         }
       }
-    },
-    "更改此项将改变 TMDB 刮削获取的海报和简介语言。" : {
-
     },
-    "更改此项将改变 TMDB 刮削获取的海报和简介语言。注意：UI 菜单翻译需配合 Xcode 的 String Catalog 使用。" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Changing this will update the language of posters and overviews fetched from TMDB."
+    "更改目录": {},
+    "更新周期：%lld 分钟": {},
+    "最近使用": {},
+    "未发现附近设备": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No nearby devices found"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "更改此项将改变 TMDB 刮削获取的海报和简介语言。注意：UI 菜单翻译需配合 Xcode 的 String Catalog 使用。"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未发现附近设备"
           }
         }
       }
     },
-    "更改目录" : {
-
-    },
-    "未发现附近设备" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "No nearby devices found"
+    "未完成的文件将被删除。": {},
+    "未找到待移除的媒体源。": {},
+    "未播": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unwatched"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未发现附近设备"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未播"
           }
         }
       }
     },
-    "未找到待移除的媒体源。" : {
-
-    },
-    "未播" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Unwatched"
+    "未看": {},
+    "未设置": {},
+    "未锁定": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlocked"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未播"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未锁定"
           }
         }
       }
-    },
-    "未设置" : {
-
     },
-    "未锁定" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Unlocked"
+    "本地刮削文件": {},
+    "本地文件夹": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local Folder"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未锁定"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地文件夹"
           }
         }
       }
     },
-    "本地刮削文件" : {
-
-    },
-    "本地文件夹" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Local Folder"
+    "本次不刮削": {},
+    "查看全文": {},
+    "查看开源组件详情与许可证线索": {},
+    "标准字体 (16)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Standard Font (16)"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "本地文件夹"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "标准字体 (16)"
           }
         }
       }
-    },
-    "本次不刮削" : {
-
     },
-    "查看全文" : {
-
-    },
-    "查看开源组件详情与许可证线索" : {
-
-    },
-    "标准字体 (16)" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Standard Font (16)"
+    "标星此文件夹": {},
+    "标记为已播": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mark as Watched"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "标准字体 (16)"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "标记为已播"
           }
         }
       }
-    },
-    "标星此文件夹" : {
-
     },
-    "标记为已播" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Mark as Watched"
+    "标记为已播？": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mark as Watched？"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "标记为已播"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "标记为已播？"
           }
         }
       }
     },
-    "标记为已播？" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Mark as Watched？"
+    "标记后，该影片将被视为已看完，并从“继续播放”列表中移除。": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Once marked, this title will be considered watched and removed from \"Continue Watching\"."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "标记为已播？"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "标记后，该影片将被视为已看完，并从“继续播放”列表中移除。"
           }
         }
       }
     },
-    "标记后，该影片将被视为已看完，并从“继续播放”列表中移除。" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Once marked, this title will be considered watched and removed from \"Continue Watching\"."
+    "检查更新": {},
+    "检测中...": {},
+    "检测到有待刮削的影视，但 TMDB 暂时无法连接。请添加自定义 TMDB API，或开启代理后在设置中重新检测。\n%@": {},
+    "检测连通性": {},
+    "正在向 TMDB 请求数据...": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Requesting data from TMDB..."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "标记后，该影片将被视为已看完，并从“继续播放”列表中移除。"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在向 TMDB 请求数据..."
           }
         }
       }
     },
-    "检查更新" : {
-
-    },
-    "检测到有待刮削的影视，但 TMDB 暂时无法连接。请添加自定义 TMDB API，或开启代理后在设置中重新检测。\n%@" : {
-
-    },
-    "正在向 TMDB 请求数据..." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Requesting data from TMDB..."
+    "正在扫描网络环境...": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scanning network..."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "正在向 TMDB 请求数据..."
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在扫描网络环境..."
           }
         }
       }
     },
-    "正在扫描网络环境..." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Scanning network..."
+    "此 WebDAV 源未保存凭据。": {},
+    "此处显示当前构建实际采用的播放器栈和主要三方组件，便于用户确认采用的内核、解码链路和数据库栈。仅展示信息不替代开源协议要求的源码提供、许可证随附和再分发义务。": {},
+    "流畅优先": {},
+    "测试中...": {},
+    "测试连接": {},
+    "海报管理": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Poster Management"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "正在扫描网络环境..."
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "海报管理"
           }
         }
       }
-    },
-    "此 WebDAV 源未保存凭据。" : {
-
-    },
-    "此处显示当前构建实际采用的播放器栈和主要三方组件，便于用户确认采用的内核、解码链路和数据库栈。仅展示信息不替代开源协议要求的源码提供、许可证随附和再分发义务。" : {
-
-    },
-    "流畅优先" : {
-
     },
-    "测试中..." : {
-
-    },
-    "测试连接" : {
-
-    },
-    "海报管理" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Poster Management"
+    "添加": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "海报管理"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加"
           }
         }
       }
     },
-    "添加" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Add"
+    "添加 %@ 服务器": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add %@ Server"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "添加"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加 %@ 服务器"
           }
         }
       }
     },
-    "添加 %@ 服务器" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Add %@ Server"
+    "添加 API / 设置代理": {},
+    "添加 Lucky STUN 穿透媒体源": {},
+    "添加 OmniPlay Docker": {},
+    "添加 WebDAV 媒体源": {},
+    "添加局域网媒体源": {},
+    "添加本地文件夹": {},
+    "清除历史": {},
+    "源文件信息": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "File Info"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "添加 %@ 服务器"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "源文件信息"
           }
         }
       }
-    },
-    "添加 API / 设置代理" : {
-
-    },
-    "添加 WebDAV 媒体源" : {
-
-    },
-    "添加媒体服务器" : {
-
     },
-    "添加本地文件夹" : {
-
-    },
-    "清除历史" : {
-
-    },
-    "源文件信息" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "File Info"
+    "源文件名称：": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Filename"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "源文件信息"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "源文件名称："
+          }
+        }
+      }
+    },
+    "点击“扫描设备”自动发现局域网中的 WebDAV、Plex、Emby 和 Jellyfin 服务。": {},
+    "版本 %lld · %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "版本 %1$lld · %2$@"
           }
         }
       }
     },
-    "源文件名称：" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Filename"
+    "版本 / 文件（%lld）": {},
+    "特别篇": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Specials"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "源文件名称："
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "特别篇"
           }
         }
       }
-    },
-    "点击“扫描设备”自动发现局域网中的 WebDAV、Plex、Emby 和 Jellyfin 服务。" : {
-
     },
-    "特别篇" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Specials"
+    "特大字体 (24)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Extra Large Font (24)"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "特别篇"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "特大字体 (24)"
           }
         }
       }
     },
-    "特大字体 (24)" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Extra Large Font (24)"
+    "用户名": {},
+    "用户名 (可选)": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Username (Optional)"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "特大字体 (24)"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "用户名 (可选)"
           }
         }
       }
     },
-    "用户名" : {
-
-    },
-    "用户名 (可选)" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Username (Optional)"
+    "用户名 / 用户 ID": {},
+    "用户名 / 用户 ID（可选）": {},
+    "用户名（可选）": {},
+    "画质优先": {},
+    "留空直连官方 API": {},
+    "留空直连官方 API；无法直连时可填写反向代理地址。支持域名或带路径前缀的地址，例如 https://proxy.example.com/tmdb。": {},
+    "登录 Plex": {},
+    "登录 WebDAV": {},
+    "登录信息": {},
+    "登录检测": {},
+    "目录: %@": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Directory / Path: %@"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "用户名 (可选)"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目录: %@"
           }
         }
       }
-    },
-    "用户名 / 用户 ID（可选）" : {
-
-    },
-    "用户名（可选）" : {
-
     },
-    "画质优先" : {
-
-    },
-    "登录 Plex" : {
-
-    },
-    "登录 WebDAV" : {
-
-    },
-    "目录: %@" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Directory / Path: %@"
+    "直接更新": {},
+    "知道了": {},
+    "确定": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "目录: %@"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "确定"
           }
         }
       }
-    },
-    "直接更新" : {
-
-    },
-    "知道了" : {
-
     },
-    "确定" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Confirm"
+    "确定解锁": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm Unlock"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "确定"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "确定解锁"
           }
         }
       }
     },
-    "确定解锁" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Confirm Unlock"
+    "确定锁定": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm Lock"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "确定解锁"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "确定锁定"
           }
         }
       }
     },
-    "确定锁定" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Confirm Lock"
+    "确认移除": {},
+    "离线缓存": {},
+    "移除 WebDAV 源时同时删除保存的登录凭据": {},
+    "移除媒体源": {},
+    "空文件夹": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Empty Folder"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "确定锁定"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "空文件夹"
           }
         }
       }
     },
-    "确认移除" : {
-
-    },
-    "离线缓存" : {
-
-    },
-    "移除 WebDAV 源时同时删除保存的登录凭据" : {
-
-    },
-    "移除媒体源" : {
-
-    },
-    "空文件夹" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Empty Folder"
+    "穿透地址": {},
+    "穿透规则": {},
+    "第 %lld 季": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Season %lld"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "空文件夹"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "第 %lld 季"
           }
         }
       }
     },
-    "第 %lld 季" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Season %lld"
+    "第几季": {},
+    "第几集": {},
+    "等待 Plex 授权...": {},
+    "简体中文": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Simplified Chinese"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "第 %lld 季"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "简体中文"
           }
         }
       }
-    },
-    "第几季" : {
-
     },
-    "第几集" : {
-
-    },
-    "等待 Plex 授权..." : {
-
-    },
-    "简体中文" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Simplified Chinese"
+    "类型": {},
+    "索引与剧照默认保留 30 天，重新开启后会立即重新扫描。": {},
+    "绑定并抓取": {},
+    "绑定豆瓣条目": {},
+    "继续播放": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue Watching"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "简体中文"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "继续播放"
           }
         }
       }
-    },
-    "类型" : {
-
-    },
-    "索引与剧照默认保留 30 天，重新开启后会立即重新扫描。" : {
-
-    },
-    "绑定并抓取" : {
-
     },
-    "绑定豆瓣条目" : {
-
-    },
-    "继续播放" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Continue Watching"
+    "继续缓存": {},
+    "缓存当前选择的整季": {},
+    "自动更新穿透地址": {},
+    "自定义分集剧照": {},
+    "自定义副标题": {},
+    "若开启，删除 WebDAV 源会连同钥匙串里的账号密码一并清理。关闭则保留以便下次自动填充。": {},
+    "英语": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "English"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "继续播放"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "英语"
           }
         }
       }
-    },
-    "缓存当前选择的整季" : {
-
-    },
-    "自定义分集剧照" : {
-
-    },
-    "自定义副标题" : {
-
-    },
-    "若开启，删除 WebDAV 源会连同钥匙串里的账号密码一并清理。关闭则保留以便下次自动填充。" : {
-
     },
-    "英语" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "English"
+    "英语优先": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "English Preferred"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "英语"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "英语优先"
           }
         }
       }
     },
-    "英语优先" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "English Preferred"
+    "解除绑定": {},
+    "许可证来源": {},
+    "设为刮削源": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Set as Metadata Source"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "英语优先"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设为刮削源"
           }
         }
       }
     },
-    "解除绑定" : {
-
-    },
-    "许可证来源" : {
-
-    },
-    "设为刮削源" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Set as Metadata Source"
+    "设置": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Settings"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "设为刮削源"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设置"
           }
         }
       }
     },
-    "设置" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Settings"
+    "设置后，您可以在影视详情页将 NAS 视频缓存至此目录，方便离线观看。": {},
+    "评分 (0.0 - 10.0)": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rating (0.0 - 10.0)"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "设置"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "评分 (0.0 - 10.0)"
           }
         }
       }
     },
-    "设置后，您可以在影视详情页将 NAS 视频缓存至此目录，方便离线观看。" : {
-
-    },
-    "评分 (0.0 - 10.0)" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Rating (0.0 - 10.0)"
+    "该分类下暂无影视，可先为影视补充导演/主演信息": {},
+    "该文件夹下的影视暂无海报，可先使用下方「选择本地图片...」设置自定义海报。": {},
+    "详情": {},
+    "语言与播放偏好": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Language & Playback Preferences"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "评分 (0.0 - 10.0)"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语言与播放偏好"
           }
         }
       }
     },
-    "详情" : {
-
-    },
-    "语言与播放偏好" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Language & Playback Preferences"
+    "请填写自己的 TMDB API Key / v4 令牌，以启用刮削、海报和剧照获取。": {},
+    "请往TMDB官网注册获取api：https://www.themoviedb.org": {},
+    "请进入具体的影片分类文件夹（如：电影），然后点击右上角“设为刮削源”": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please enter a specific category folder (e.g., Movies), then click \"Set as Metadata Source\" in the top right."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "语言与播放偏好"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请进入具体的影片分类文件夹（如：电影），然后点击右上角“设为刮削源”"
           }
         }
       }
-    },
-    "请往TMDB官网注册获取api：https://www.themoviedb.org" : {
-
     },
-    "请进入具体的影片分类文件夹（如：电影），然后点击右上角“设为刮削源”" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Please enter a specific category folder (e.g., Movies), then click \"Set as Metadata Source\" in the top right."
+    "请选择穿透规则": {},
+    "读取中...": {},
+    "读取本地 NFO、海报和剧照": {},
+    "豆瓣": {},
+    "豆瓣仅支持手动绑定单个条目；不会自动搜索豆瓣，也不会参与批量扫描。刷新会走本地缓存和低频限速，遇到风控会自动暂停。": {},
+    "豆瓣评分 (0.0 - 10.0)": {},
+    "豆瓣链接或 subject ID，例如 https://movie.douban.com/subject/1292052/": {},
+    "软件与刮削语言": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App & Metadata Language"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "请进入具体的影片分类文件夹（如：电影），然后点击右上角“设为刮削源”"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "软件与刮削语言"
           }
         }
       }
     },
-    "读取中..." : {
-
-    },
-    "读取本地 NFO、海报和剧照" : {
-
-    },
-    "豆瓣" : {
-
-    },
-    "豆瓣仅支持手动绑定单个条目；不会自动搜索豆瓣，也不会参与批量扫描。刷新会走本地缓存和低频限速，遇到风控会自动暂停。" : {
-
-    },
-    "豆瓣评分 (0.0 - 10.0)" : {
-
-    },
-    "豆瓣链接或 subject ID，例如 https://movie.douban.com/subject/1292052/" : {
-
-    },
-    "软件与刮削语言" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "App & Metadata Language"
+    "软件更新": {},
+    "输入新的显示名称": {},
+    "输入正确的影视名称...": {},
+    "输入正确的影视名称进行搜索...": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter correct title to search..."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "软件与刮削语言"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "输入正确的影视名称进行搜索..."
           }
         }
       }
-    },
-    "软件更新" : {
-
     },
-    "输入新的显示名称" : {
-
-    },
-    "输入正确的影视名称..." : {
-
-    },
-    "输入正确的影视名称进行搜索..." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Enter correct title to search..."
+    "返回上一级目录": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Back to Parent Directory"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "输入正确的影视名称进行搜索..."
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "返回上一级目录"
           }
         }
       }
     },
-    "返回上一级目录" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Back to Parent Directory"
+    "返回上级": {},
+    "退回媒体库": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Back to Library"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "返回上一级目录"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退回媒体库"
           }
         }
       }
-    },
-    "返回上级" : {
-
     },
-    "退回媒体库" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Back to Library"
+    "选择 %@ 共享文件夹": {},
+    "选择后，首页会把同一导演或主演的影视归入同一个分类文件夹。": {},
+    "选择本地图片...": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Select Local Image..."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "退回媒体库"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "选择本地图片..."
           }
         }
       }
     },
-    "选择 %@ 共享文件夹" : {
-
-    },
-    "选择本地图片..." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Select Local Image..."
+    "部分源文件不存在，需重新连接外置硬盘/NAS 或使用本地缓存播放": {},
+    "重命名媒体源": {},
+    "重新匹配 TMDB": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rematch with TMDB"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "选择本地图片..."
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新匹配 TMDB"
           }
         }
       }
-    },
-    "选择要手动连接的远程媒体源类型。" : {
-
     },
-    "部分源文件不存在，需重新连接外置硬盘/NAS 或使用本地缓存播放" : {
-
-    },
-    "重命名媒体源" : {
-
-    },
-    "重新匹配 TMDB" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Rematch with TMDB"
+    "重新扫描": {},
+    "重新搜索匹配": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Research & Match"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "重新匹配 TMDB"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新搜索匹配"
           }
         }
       }
-    },
-    "重新扫描" : {
-
     },
-    "重新搜索匹配" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Research & Match"
+    "重试扫描": {},
+    "附近的局域网设备": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nearby Network Devices"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "重新搜索匹配"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "附近的局域网设备"
           }
         }
       }
     },
-    "附近的局域网设备" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Nearby Network Devices"
+    "音轨": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio Track"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "附近的局域网设备"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "音轨"
           }
         }
       }
     },
-    "音轨" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Audio Track"
+    "预扫描中...": {},
+    "预扫描局域网媒体源": {},
+    "首页分类": {},
+    "首页分类方式": {},
+    "验证": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verify"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "音轨"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "验证"
           }
         }
       }
     },
-    "预扫描局域网媒体源" : {
-
-    },
-    "预扫描中..." : {
-
-    },
-    "验证" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Verify"
+    "验证中...": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verifying..."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "验证"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "验证中..."
           }
         }
       }
     },
-    "验证中..." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Verifying..."
+    "验证并添加": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verify and Add"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "验证中..."
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "验证并添加"
           }
         }
       }
     },
-    "验证并添加" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Verify and Add"
+    "默认关闭。仅对本地文件夹源生效，支持 movie.nfo、tvshow.nfo、同名 .nfo、poster/fanart 与同名 -thumb 图片。": {},
+    "默认关闭。关闭时蓝光 BDMV 会按 STREAM 文件大小自动选择主电影；开启后会按文件编号播放包含花絮在内的所有 STREAM 视频。": {},
+    "默认音轨": {},
+    "默认首选字幕": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Default Subtitles"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "验证并添加"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认首选字幕"
           }
         }
       }
-    },
-    "默认关闭。仅对本地文件夹源生效，支持 movie.nfo、tvshow.nfo、同名 .nfo、poster/fanart 与同名 -thumb 图片。" : {
-
-    },
-    "默认关闭。关闭时蓝光 BDMV 会按 STREAM 文件大小自动选择主电影；开启后会按文件编号播放包含花絮在内的所有 STREAM 视频。" : {
-
-    },
-    "默认开启。关闭后只有填写自定义 TMDB API 时才能继续刮削和获取剧照。" : {
-
-    },
-    "默认音轨" : {
-
     },
-    "默认首选字幕" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Default Subtitles"
+    "默认首选音轨": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Default Audio Track"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "默认首选字幕"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认首选音轨"
           }
         }
       }
     },
-    "默认首选音轨" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Default Audio Track"
+    "💡 提示：无需端口号，IP 后面直接加斜杠和“共享文件夹名”（如 /电影）": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "💡 Tip: No port needed. Add a slash and \"Shared Folder Name\" after the IP (e.g., /Movies)."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "默认首选音轨"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "💡 提示：无需端口号，IP 后面直接加斜杠和“共享文件夹名”（如 /电影）"
           }
         }
       }
     }
   },
-  "version" : "1.1"
+  "version": "1.1"
 }

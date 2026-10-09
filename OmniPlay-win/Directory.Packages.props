@@ -2,7 +2,6 @@
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
-
   <ItemGroup>
     <PackageVersion Include="Avalonia" Version="11.2.0" />
     <PackageVersion Include="Avalonia.Controls.DataGrid" Version="11.2.0" />

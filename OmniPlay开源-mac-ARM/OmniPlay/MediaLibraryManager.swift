@@ -1520,7 +1520,21 @@ class MediaLibraryManager {
         let extracted = extractTitlesAndYear(from: file)
         let chineseFallback = extracted.chineseTitle ?? extracted.parentChineseTitle
         let resultId = Int64(tmdbResult.id); let oldFakeMovieId = file.movieId; let rTitle = tmdbResult.preferredTitle(chineseFallback: chineseFallback); let rDate = tmdbResult.releaseDate ?? tmdbResult.firstAirDate; let rOverview = tmdbResult.overview; let rPoster = tmdbResult.posterPath; let rVoteAverage = tmdbResult.voteAverage; let rFileId = file.id
-        
+
+        // 🌟 导演/主演：强制刮削——只要 TMDB 凭据可用就请求 credits 并更新名单（结果按 TMDB id 缓存，同剧集逐集刮削不重复耗配额；请求为空时保留原值）。
+        var rDirectorInfos: [TMDBPersonInfo] = []
+        var rCastInfos: [TMDBPersonInfo] = []
+        if TMDBService.shared.currentCredentialSource().isAvailable {
+            (rDirectorInfos, rCastInfos) = await TMDBService.shared.fetchCredits(id: tmdbResult.id, mediaType: tmdbResult.mediaType)
+            // 外文人名换成 TMDB 中文译名（无中文条目时保留原名）
+            let localized = await ChineseNameStore.localizeCredits(directors: rDirectorInfos, casts: rCastInfos)
+            rDirectorInfos = localized.directors
+            rCastInfos = localized.casts
+            PersonProfileStore.upsertFromCredits(directors: rDirectorInfos, casts: rCastInfos)
+        }
+        let rDirectorsJSON = Movie.encodePersonList(rDirectorInfos.map(\.name))
+        let rCastsJSON = Movie.encodePersonList(rCastInfos.map(\.name))
+
         try await dbQueue.write { db in
             let movie: Movie
             if var existingMovie = try Movie.fetchOne(db, key: resultId) {
@@ -1530,11 +1544,20 @@ class MediaLibraryManager {
                     existingMovie.overview = rOverview
                     existingMovie.posterPath = rPoster
                     existingMovie.voteAverage = rVoteAverage
+                    if let rDirectorsJSON { existingMovie.directors = rDirectorsJSON }
+                    if let rCastsJSON { existingMovie.casts = rCastsJSON }
                     try existingMovie.update(db)
+                } else {
+                    // 导演/主演为强制刮削字段，始终更新；其余字段保留用户手填内容。
+                    if let rDirectorsJSON { existingMovie.directors = rDirectorsJSON }
+                    if let rCastsJSON { existingMovie.casts = rCastsJSON }
+                    if existingMovie.directors != nil || existingMovie.casts != nil {
+                        try existingMovie.update(db)
+                    }
                 }
                 movie = existingMovie
             } else {
-                movie = Movie(id: resultId, title: rTitle, releaseDate: rDate, overview: rOverview, posterPath: rPoster, voteAverage: rVoteAverage, isLocked: false)
+                movie = Movie(id: resultId, title: rTitle, releaseDate: rDate, overview: rOverview, posterPath: rPoster, voteAverage: rVoteAverage, isLocked: false, directors: rDirectorsJSON, casts: rCastsJSON)
                 try movie.insert(db)
             }
             if let fakeId = oldFakeMovieId, fakeId < 0 {
@@ -1575,6 +1598,9 @@ class MediaLibraryManager {
         let exportSource = try? await dbQueue.read { db in
             try MediaSource.fetchOne(db, key: file.sourceId)
         }
+        let exportMovie = try? await dbQueue.read { db -> Movie? in
+            try Movie.fetchOne(db, key: resultId)
+        }
         if UserDefaults.standard.bool(forKey: "enableLocalMetadataExport"),
            let source = exportSource,
            source.protocolKind == .local {
@@ -1589,7 +1615,9 @@ class MediaLibraryManager {
                 voteAverage: rVoteAverage,
                 tmdbId: tmdbResult.id,
                 seasonNumber: nil,
-                episodeNumber: nil
+                episodeNumber: nil,
+                directors: exportMovie?.directorList ?? [],
+                casts: exportMovie?.castList ?? []
             )
             if isTVResult(tmdbResult) {
                 await LocalMetadataSidecarStore.shared.exportTVShow(metadata: sidecar, videoURL: videoURL)
@@ -2752,7 +2780,6 @@ struct MediaServerLibraryBrowser {
         case .plex: return "Plex"
         case .emby: return "Emby"
         case .jellyfin: return "Jellyfin"
-        case .omniplayDocker: return "OmniPlay Docker"
         default: return "媒体服务器"
         }
     }
@@ -3507,7 +3534,6 @@ struct MediaServerPreflightChecker {
         case .plex: return "Plex"
         case .emby: return "Emby"
         case .jellyfin: return "Jellyfin"
-        case .omniplayDocker: return "OmniPlay Docker"
         default: return "媒体服务器"
         }
     }
@@ -3531,7 +3557,7 @@ private enum MediaSourceScannerFactory {
                 throw MediaSourceScanError.invalidBaseURL(source.baseUrl)
             }
             return MediaServerScanner(source: source)
-        case .direct, .omniplayDocker:
+        case .direct:
             throw MediaSourceScanError.unsupportedProtocol(protocolKind.rawValue)
         }
     }
@@ -3541,371 +3567,6 @@ extension MediaLibraryManager {
     // 🌟 这里是完完整整的本地文件雷达扫描入库逻辑！保证它存在！
     func scanLocalSource(_ source: MediaSource) async {
         _ = await scanLocalSourceWithResult(source)
-    }
-
-    func syncOmniPlayDockerSourceWithResult(_ source: MediaSource) async -> MediaSourceScanResult {
-        guard let sourceId = source.id else {
-            let message = "Docker 媒体源缺少ID，无法同步。"
-            return MediaSourceScanResult(
-                sourceId: nil,
-                sourceName: source.name,
-                protocolType: source.protocolType,
-                scannedCount: 0,
-                insertedCount: 0,
-                removedCount: 0,
-                errorCategory: .config,
-                userMessage: message,
-                diagnostic: buildDiagnostic(source: source, category: .config, message: message, error: nil, retryAttempts: 0)
-            )
-        }
-
-        do {
-            let config = OmniPlayDockerAuthConfig.decode(source.authConfig)
-            let client = try OmniPlayDockerClient(baseURLString: source.baseUrl, sessionCookie: config?.sessionCookie)
-            let summaries = try await client.libraryItems()
-            let details = try await withThrowingTaskGroup(of: OmniPlayDockerLibraryDetail.self) { group in
-                for item in summaries {
-                    group.addTask {
-                        try await client.libraryDetail(id: item.id)
-                    }
-                }
-                var values: [OmniPlayDockerLibraryDetail] = []
-                for try await detail in group {
-                    values.append(detail)
-                }
-                return values
-            }
-            let stats = try await importOmniPlayDocker(details: details, sourceId: sourceId, client: client)
-            DispatchQueue.main.async { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
-            return MediaSourceScanResult(
-                sourceId: sourceId,
-                sourceName: source.name,
-                protocolType: source.protocolType,
-                scannedCount: stats.scannedCount,
-                insertedCount: stats.insertedCount,
-                removedCount: stats.removedCount,
-                errorCategory: nil,
-                userMessage: "Docker 同步完成：新增 \(stats.insertedCount)，移除 \(stats.removedCount)，共 \(stats.scannedCount) 个文件。",
-                diagnostic: nil
-            )
-        } catch {
-            let category = dockerScanErrorCategory(error)
-            let message = userFacingMessage(for: category, sourceName: source.name, fallback: error.localizedDescription)
-            return MediaSourceScanResult(
-                sourceId: sourceId,
-                sourceName: source.name,
-                protocolType: source.protocolType,
-                scannedCount: 0,
-                insertedCount: 0,
-                removedCount: 0,
-                errorCategory: category,
-                userMessage: message,
-                diagnostic: buildDiagnostic(source: source, category: category, message: error.localizedDescription, error: error, retryAttempts: 0)
-            )
-        }
-    }
-
-    private func dockerScanErrorCategory(_ error: Error) -> MediaSourceScanErrorCategory {
-        if let dockerError = error as? OmniPlayDockerClientError {
-            switch dockerError {
-            case .authenticationRequired:
-                return .auth
-            case .invalidBaseURL:
-                return .config
-            case .requestFailed(let status, _):
-                return status == 401 || status == 403 ? .auth : .server
-            case .network:
-                return .network
-            case .invalidResponse:
-                return .server
-            }
-        }
-        if error is URLError {
-            return .network
-        }
-        return .unknown
-    }
-
-    private func importOmniPlayDocker(
-        details: [OmniPlayDockerLibraryDetail],
-        sourceId: Int64,
-        client: OmniPlayDockerClient
-    ) async throws -> (scannedCount: Int, insertedCount: Int, removedCount: Int) {
-        let importedPosters = await importOmniPlayDockerPosters(details: details, client: client)
-        await importOmniPlayDockerThumbnails(details: details, sourceId: sourceId, client: client)
-
-        return try await dbQueue.write { db in
-            var remoteFileIds = Set<String>()
-            var insertedCount = 0
-            var scannedCount = 0
-
-            for detail in details {
-                let movieId = Self.omniPlayDockerMovieId(for: detail.id)
-                let effectiveOverview = detail.overview?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                    ? detail.overview
-                    : detail.douban?.summary
-                let existingPosterPath = try Movie.fetchOne(db, key: movieId)?.posterPath
-                let posterPath = importedPosters[detail.id]
-                    ?? existingPosterPath
-                    ?? detail.douban?.posterUrl
-                let movie = Movie(
-                    id: movieId,
-                    title: detail.title,
-                    releaseDate: detail.releaseDate,
-                    overview: effectiveOverview,
-                    posterPath: posterPath,
-                    voteAverage: detail.voteAverage,
-                    isLocked: true
-                )
-                try movie.save(db)
-
-                if let douban = Self.doubanMetadata(from: detail, movieId: movieId) {
-                    try douban.save(db)
-                }
-
-                let files = Self.flattenDockerFiles(detail)
-                for remoteFile in files {
-                    let localFileId = Self.omniPlayDockerVideoFileId(for: remoteFile.id, sourceId: sourceId)
-                    let displayRelativePath = Self.omniPlayDockerDisplayRelativePath(for: remoteFile)
-                    let displayFileName = Self.omniPlayDockerDisplayFileName(for: remoteFile, relativePath: displayRelativePath)
-                    scannedCount += 1
-                    remoteFileIds.insert(localFileId)
-                    let file = VideoFile(
-                        id: localFileId,
-                        sourceId: sourceId,
-                        relativePath: displayRelativePath,
-                        fileName: displayFileName,
-                        mediaType: detail.itemKind == "tv" ? "tv" : "movie",
-                        movieId: movieId,
-                        episodeId: nil,
-                        playProgress: remoteFile.positionSeconds,
-                        duration: remoteFile.durationSeconds,
-                        fileSize: remoteFile.fileSizeBytes ?? 0,
-                        lastPlayedAt: remoteFile.positionSeconds > 5 ? Date().timeIntervalSince1970 : nil
-                    )
-                    if var existing = try VideoFile.fetchOne(db, key: localFileId) {
-                        let existingProgressIsNewer = existing.playProgress > 5 && remoteFile.positionSeconds <= 0
-                        existing.sourceId = sourceId
-                        existing.relativePath = file.relativePath
-                        existing.fileName = file.fileName
-                        existing.mediaType = file.mediaType
-                        existing.movieId = file.movieId
-                        existing.episodeId = nil
-                        existing.fileSize = file.fileSize
-                        existing.duration = max(existing.duration, file.duration)
-                        if !existingProgressIsNewer {
-                            existing.playProgress = file.playProgress
-                            existing.lastPlayedAt = file.lastPlayedAt
-                        }
-                        try existing.update(db)
-                    } else {
-                        try file.insert(db)
-                        insertedCount += 1
-                    }
-                }
-            }
-
-            let existingIds = try String.fetchAll(db, sql: "SELECT id FROM videoFile WHERE sourceId = ?", arguments: [sourceId])
-            var removedCount = 0
-            for id in existingIds where !remoteFileIds.contains(id) {
-                _ = try VideoFile.deleteOne(db, key: id)
-                removedCount += 1
-            }
-            try db.execute(sql: "DELETE FROM movie WHERE id NOT IN (SELECT DISTINCT movieId FROM videoFile WHERE movieId IS NOT NULL)")
-            return (scannedCount, insertedCount, removedCount)
-        }
-    }
-
-    private func importOmniPlayDockerPosters(
-        details: [OmniPlayDockerLibraryDetail],
-        client: OmniPlayDockerClient
-    ) async -> [String: String] {
-        await withTaskGroup(of: (String, String)?.self) { group in
-            for detail in details {
-                guard let assetId = detail.posterAssetId else { continue }
-                group.addTask {
-                    do {
-                        let data = try await client.posterData(assetId: assetId)
-                        guard NSImage(data: data) != nil else { return nil }
-                        let cacheKey = "omniplay-docker-\(detail.id)-\(assetId)"
-                        let (fileName, destination) = await MainActor.run {
-                            let fileName = PosterManager.shared.cacheFileName(for: cacheKey)
-                            let destination = PosterManager.shared.cacheDirectory.appendingPathComponent(fileName)
-                            return (fileName, destination)
-                        }
-                        try FileManager.default.createDirectory(
-                            at: destination.deletingLastPathComponent(),
-                            withIntermediateDirectories: true
-                        )
-                        try data.write(to: destination, options: .atomic)
-                        await MainActor.run {
-                            NotificationCenter.default.post(name: NSNotification.Name("PosterUpdated_\(fileName)"), object: nil)
-                        }
-                        return (detail.id, destination.path)
-                    } catch {
-                        return nil
-                    }
-                }
-            }
-
-            var imported: [String: String] = [:]
-            for await result in group {
-                if let result {
-                    imported[result.0] = result.1
-                }
-            }
-            return imported
-        }
-    }
-
-    private func importOmniPlayDockerThumbnails(
-        details: [OmniPlayDockerLibraryDetail],
-        sourceId: Int64,
-        client: OmniPlayDockerClient
-    ) async {
-        let candidates: [(String, String)] = details.flatMap { detail in
-            detail.seasons.flatMap { season in
-                season.episodes.flatMap { episode -> [(String, String)] in
-                    guard let assetId = episode.stillAssetId else { return [] }
-                    return episode.videoFiles.map { ($0.id, assetId) }
-                }
-            }
-        }
-        guard !candidates.isEmpty else { return }
-
-        let thumbnailDirectory = await MainActor.run { ThumbnailManager.shared.thumbDirectory }
-        try? FileManager.default.createDirectory(at: thumbnailDirectory, withIntermediateDirectories: true)
-
-        await withTaskGroup(of: Void.self) { group in
-            var iterator = candidates.makeIterator()
-            func addNext() -> Bool {
-                guard let candidate = iterator.next() else { return false }
-                group.addTask {
-                    let localFileId = Self.omniPlayDockerVideoFileId(for: candidate.0, sourceId: sourceId)
-                    let destination = thumbnailDirectory.appendingPathComponent("\(localFileId).jpg")
-                    if FileManager.default.fileExists(atPath: destination.path) { return }
-                    do {
-                        let data = try await client.thumbnailData(assetId: candidate.1)
-                        guard NSImage(data: data) != nil else { return }
-                        try data.write(to: destination, options: .atomic)
-                    } catch {
-                        return
-                    }
-                }
-                return true
-            }
-
-            for _ in 0..<4 where addNext() {}
-            while await group.next() != nil {
-                _ = addNext()
-            }
-        }
-    }
-
-    nonisolated static func omniPlayDockerMovieId(for id: String) -> Int64 {
-        let raw = "omniplay-docker:\(id)".precomposedStringWithCanonicalMapping.lowercased()
-        var hash: UInt64 = 1469598103934665603
-        for byte in raw.utf8 {
-            hash ^= UInt64(byte)
-            hash = hash &* 1099511628211
-        }
-        let positive = Int64(hash & 0x3FFF_FFFF_FFFF_FFFF)
-        return -max(positive, 1)
-    }
-
-    nonisolated static func omniPlayDockerVideoFileId(for id: String, sourceId: Int64) -> String {
-        "omniplay-docker:\(sourceId):\(id)"
-    }
-
-    nonisolated private static func flattenDockerFiles(_ detail: OmniPlayDockerLibraryDetail) -> [OmniPlayDockerVideoFile] {
-        var files = detail.videoFiles
-        for season in detail.seasons {
-            files.append(contentsOf: season.episodes.flatMap(\.videoFiles))
-        }
-        var seen = Set<String>()
-        return files.filter { file in
-            guard !seen.contains(file.id) else { return false }
-            seen.insert(file.id)
-            return true
-        }
-    }
-
-    nonisolated private static func omniPlayDockerDisplayRelativePath(for file: OmniPlayDockerVideoFile) -> String {
-        let relativePath = file.relativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalized = relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        if !normalized.isEmpty, !isOmniPlayDockerPlaybackEndpointPath(normalized) {
-            return normalized
-        }
-
-        return file.fileName.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    nonisolated private static func omniPlayDockerDisplayFileName(for file: OmniPlayDockerVideoFile, relativePath: String) -> String {
-        let fileName = file.fileName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !fileName.isEmpty,
-           fileName.lowercased() != "stream",
-           !isOmniPlayDockerPlaybackEndpointPath(fileName) {
-            return fileName
-        }
-
-        let relativeLastComponent = (relativePath as NSString).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !relativeLastComponent.isEmpty, relativeLastComponent.lowercased() != "stream" {
-            return relativeLastComponent
-        }
-
-        return fileName.isEmpty ? relativePath : fileName
-    }
-
-    nonisolated private static func isOmniPlayDockerPlaybackEndpointPath(_ value: String) -> Bool {
-        let parts = value.trimmingCharacters(in: CharacterSet(charactersIn: "/")).split(separator: "/").map(String.init)
-        return parts.count >= 5
-            && parts[0] == "api"
-            && parts[1] == "playback"
-            && parts[2] == "files"
-            && parts[4] == "stream"
-    }
-
-    nonisolated private static func doubanMetadata(from detail: OmniPlayDockerLibraryDetail, movieId: Int64) -> DoubanMetadata? {
-        guard let douban = detail.douban ?? minimalDoubanMetadata(from: detail) else { return nil }
-        let fetchedAt = ISO8601DateFormatter().date(from: douban.fetchedAt) ?? Date()
-        return DoubanMetadata(
-            movieId: movieId,
-            subjectId: douban.subjectId,
-            subjectURL: douban.subjectUrl,
-            title: douban.title,
-            originalTitle: douban.originalTitle,
-            year: douban.year,
-            rating: douban.rating,
-            ratingCount: douban.ratingCount,
-            summary: douban.summary,
-            genres: douban.genres,
-            countries: douban.countries,
-            directors: nil,
-            casts: nil,
-            posterURL: douban.posterUrl,
-            fetchedAt: fetchedAt.timeIntervalSince1970,
-            nextRefreshAt: fetchedAt.addingTimeInterval(30 * 24 * 60 * 60).timeIntervalSince1970,
-            lastError: nil
-        )
-    }
-
-    nonisolated private static func minimalDoubanMetadata(from detail: OmniPlayDockerLibraryDetail) -> OmniPlayDockerDoubanMetadata? {
-        guard let rating = detail.doubanRating else { return nil }
-        let year = detail.releaseDate.map { String($0.prefix(4)) }
-        return OmniPlayDockerDoubanMetadata(
-            subjectId: "docker-\(detail.id)",
-            subjectUrl: "",
-            title: detail.title,
-            originalTitle: nil,
-            year: year,
-            rating: rating,
-            ratingCount: nil,
-            summary: nil,
-            genres: nil,
-            countries: nil,
-            posterUrl: nil,
-            fetchedAt: ISO8601DateFormatter().string(from: Date())
-        )
     }
 
     func scanLocalSourceWithResult(
@@ -4289,7 +3950,9 @@ extension MediaLibraryManager {
                 overview: imported?.overview ?? (group.shouldAttemptAutomaticScrape ? "正在排队等待刮削..." : "未能自动识别影视名称，可手动重新匹配。"),
                 posterPath: imported?.posterPath,
                 voteAverage: imported?.voteAverage,
-                isLocked: imported != nil || !group.shouldAttemptAutomaticScrape
+                isLocked: imported != nil || !group.shouldAttemptAutomaticScrape,
+                directors: Movie.encodePersonList(imported?.directors ?? []),
+                casts: Movie.encodePersonList(imported?.casts ?? [])
             )
             try? dummyMovie.insert(db)
 

@@ -11,7 +11,10 @@ using OmniPlay.Desktop.Bootstrap;
 using OmniPlay.Desktop.Diagnostics;
 using OmniPlay.Desktop.Startup;
 using OmniPlay.Infrastructure.Data;
+using OmniPlay.Core.Interfaces;
+using OmniPlay.Core.ViewModels.Settings;
 using OmniPlay.Desktop.Windows;
+using OmniPlay.UI.Themes;
 using OmniPlay.UI.Views.Shell;
 
 namespace OmniPlay.Desktop;
@@ -32,19 +35,66 @@ public partial class App : Application
             Services = ServiceRegistration.BuildServices();
             AppLog.Info("依赖注入容器已创建");
 
+            // 启动时按持久化主题切换应用级语义颜色资源。
+            try
+            {
+                var settingsService = Services.GetRequiredService<ISettingsService>();
+                // 在线程池上加载设置：异步反序列化会捕获 Avalonia 调度器上下文，
+                // 直接在 UI 线程同步等待会造成死锁。
+                var startupSettings = Task.Run(() => settingsService.LoadAsync()).GetAwaiter().GetResult();
+                ThemeService.Apply(startupSettings.ThemeId);
+                LocaleService.Apply(startupSettings.AppLanguage);
+                Services.GetRequiredService<SettingsViewModel>().LanguageChanged += language =>
+                {
+                    LocaleService.Apply(language);
+                    try
+                    {
+                        Services.GetRequiredService<OmniPlay.Core.ViewModels.Library.PosterWallViewModel>()
+                            .ShowToast("语言已切换", OmniPlay.Core.ViewModels.Library.ToastKind.Success);
+                    }
+                    catch
+                    {
+                        // 提示失败不影响语言生效。
+                    }
+                };
+                Services.GetRequiredService<SettingsViewModel>().ThemeChanged += themeId =>
+                {
+                    ThemeService.Apply(themeId);
+                    try
+                    {
+                        Services.GetRequiredService<OmniPlay.Core.ViewModels.Library.PosterWallViewModel>()
+                            .ShowToast("主题已切换", OmniPlay.Core.ViewModels.Library.ToastKind.Success);
+                    }
+                    catch
+                    {
+                        // 提示失败不影响主题生效。
+                    }
+                };
+            }
+            catch (Exception themeEx)
+            {
+                AppLog.Error("主题初始化失败，使用默认主题。", themeEx);
+            }
+
             Services.GetRequiredService<SqliteDatabase>().EnsureInitialized();
             AppLog.Info("SQLite 数据库初始化完成");
 
             AppLog.Info("媒体库初始化加载完成");
             if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
             {
+                // UI 线程未处理异常（如弹窗绑定/渲染错误）统一兜底，避免直接闪退。
+                Avalonia.Threading.Dispatcher.UIThread.UnhandledException += (_, eventArgs) =>
+                {
+                    AppLog.Error("UI 线程未处理异常。", eventArgs.Exception);
+                    eventArgs.Handled = true;
+                };
+
                 var launchOptions = CommandLineOptions.Current;
                 var mainWindow = CreateMainWindowForLaunchMode();
                 desktop.ShutdownMode = launchOptions.HasPlaybackRequest || launchOptions.HasOverlayPlaybackRequest
                     ? ShutdownMode.OnMainWindowClose
                     : ShutdownMode.OnExplicitShutdown;
                 desktop.MainWindow = mainWindow;
-
                 if (!launchOptions.HasPlaybackRequest && !launchOptions.HasOverlayPlaybackRequest)
                 {
                     mainWindow.Closing += async (_, e) =>
@@ -96,6 +146,7 @@ public partial class App : Application
 
         base.OnFrameworkInitializationCompleted();
     }
+
 
     private Avalonia.Controls.Window CreateMainWindowForLaunchMode()
     {
@@ -348,3 +399,4 @@ public partial class App : Application
                $"Duration={playerViewModel.DurationSeconds:0.###}";
     }
 }
+

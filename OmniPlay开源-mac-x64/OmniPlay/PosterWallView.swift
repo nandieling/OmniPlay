@@ -1,6 +1,7 @@
 import SwiftUI
 import GRDB
 import AppKit
+import UniformTypeIdentifiers
 
 private struct RecentWebDAVHistoryItem: Identifiable, Codable, Equatable {
     var id: UUID
@@ -197,7 +198,7 @@ struct PosterWallView: View {
     @State private var movies: [Movie] = []
     @State private var continueWatchingMovies: [Movie] = []
     let libraryManager = MediaLibraryManager()
-
+    
     @State private var currentScanTask: Task<Void, Never>? = nil
     @State private var currentScanRunID = UUID()
     @State private var isProcessing = false
@@ -205,11 +206,13 @@ struct PosterWallView: View {
     @State private var showSettings = false
     @State private var settingsFocusTMDBApi = false
     @State private var mediaSources: [MediaSource] = []
-
+    
     // 删除了关于网络别名的复杂状态变量
     @State private var isShowingManageSources = false
     @State private var needsRescanAfterCurrentRun = false
     @State private var isShowingRenameSourceSheet = false
+    @State private var isShowingSourceInfoSheet = false
+    @State private var sourceInfoTarget: MediaSource?
     @State private var sourceToRename: MediaSource? = nil
     @State private var renamingSourceName: String = ""
     @State private var isShowingManualRemoteSourceSheet = false
@@ -223,7 +226,7 @@ struct PosterWallView: View {
     @State private var webDAVIsTestingConnection: Bool = false
     @State private var webDAVLastPreflight: WebDAVPreflightResult? = nil
     @State private var isShowingMediaServerSheet = false
-    @State private var mediaServerProtocol: MediaSourceProtocol = .omniplayDocker
+    @State private var mediaServerProtocol: MediaSourceProtocol = .plex
     @State private var mediaServerName = ""
     @State private var mediaServerBaseURL = ""
     @State private var mediaServerToken = ""
@@ -237,8 +240,25 @@ struct PosterWallView: View {
     @State private var webDAVLocalLabel = "局域网"
     @State private var webDAVBrowserLocalLabel = "局域网"
     @State private var luckyStunRules: [LuckyStunRule] = []
+    @State private var isShowingLuckyStunSourceSheet = false
+    @State private var luckySourceName = ""
+    @State private var luckySourceProtocol: MediaSourceProtocol = .plex
+    @State private var luckyManagementURL = ""
+    @State private var luckyUsername = ""
+    @State private var luckyPassword = ""
+    @State private var luckyRuleID = ""
+    @State private var luckyStunAddress = ""
+    @State private var luckyAutoUpdate = true
+    @State private var luckyUpdateIntervalMinutes = 30
+    @State private var luckyDockerUsername = ""
+    @State private var luckyDockerPassword = ""
+    @State private var luckyStatusMessage: String? = nil
+    @State private var isTestingLuckySource = false
+    @State private var pendingLuckyConfiguration: LuckyStunSourceConfiguration? = nil
     @State private var isShowingWebDAVPreScanLoginSheet = false
     @State private var isShowingWebDAVFolderBrowserSheet = false
+    @State private var shouldStartLuckyWebDAVAfterDismiss = false
+    @State private var shouldShowWebDAVBrowserAfterLoginDismiss = false
     @State private var webDAVBrowserName: String = ""
     @State private var webDAVBrowserBaseURL: String = ""
     @State private var webDAVBrowserUsername: String = ""
@@ -254,27 +274,26 @@ struct PosterWallView: View {
     @State private var webDAVBrowserIsLoading = false
     @State private var webDAVBrowserIsBatchMounting = false
     @State private var webDAVBrowserStarredFolders: [WebDAVBrowserStarredFolder] = []
-
+    
     @AppStorage("keepLocalPosters") var keepLocalPosters = true
     @AppStorage("autoScanOnStartup") var autoScanOnStartup = true
     @AppStorage("enableFastTooltip") var enableFastTooltip = true
     @AppStorage("showMediaSourceRealPath") var showMediaSourceRealPath = true
     @AppStorage("removeWebDAVCredentialsOnDelete") var removeWebDAVCredentialsOnDelete = false
-
+    
     @AppStorage("appTheme") var appTheme = ThemeType.crystal.rawValue
     var theme: AppTheme { ThemeType(rawValue: appTheme)?.colors ?? ThemeType.crystal.colors }
     @Environment(\.colorScheme) private var colorScheme
-
+    
     @ObservedObject var thumbManager = ThumbnailManager.shared
     @ObservedObject var cacheManager = OfflineCacheManager.shared
     @StateObject private var lanScanner = LANScanner()
-
+    
     @State private var searchText: String = ""
     @State private var isSearchActive: Bool = false
     @State private var selectedSortOption: MovieSortOption = .year
     @State private var isAscending: Bool = false
     @State private var pendingLibraryReloadTask: Task<Void, Never>? = nil
-    @State private var dockerAutoSyncTask: Task<Void, Never>? = nil
     @State private var activeScanningSourceID: Int64? = nil
     @State private var removedSourceIDsDuringRun: Set<Int64> = []
     @State private var recentWebDAVHistory: [RecentWebDAVHistoryItem] = PosterWallView.loadRecentWebDAVHistory()
@@ -286,20 +305,578 @@ struct PosterWallView: View {
     @State private var needsLibraryReloadAfterCurrentLoad = false
     @State private var isShowingTMDBConnectionAlert = false
     @State private var tmdbConnectionMessage = ""
+    @State private var isShowingScanErrorAlert = false
+    @State private var scanErrorMessage = ""
     @State private var isHomeCacheModeActive = false
 
+    // 🌟 首页分类（导演/主演文件夹）
+    @AppStorage("homeCategoryMode") var homeCategoryMode = HomeCategoryMode.none.rawValue
+    @AppStorage("categoryFolderSortAsc") var categoryFolderSortAsc = true
+    @State private var categoryFolderRecords: [String: CategoryFolder] = [:]
+    @State private var categoryFolderRandomPosters: [String: String?] = [:]
+    @State private var categoryPosterPickerGroup: CategoryFolderGroup? = nil
+    // 分类文件夹编辑弹窗里的人物名输入框草稿
+    @State private var categoryFolderNameDraft = ""
+    @State private var personProfiles: [String: PersonProfile] = [:]
+    @State private var folderFilmography: [String: [TMDBFilmographyItem]] = [:]
+    @State private var folderFilmographyLoading: Set<String> = []
+    
     // 🌟 彻底删除了所有与 network 相关的 State
-
+    
     let columns = [GridItem(.adaptive(minimum: 160), spacing: 20)]
     init() {
         let isFast = UserDefaults.standard.bool(forKey: "enableFastTooltip")
         UserDefaults.standard.set(isFast ? 50 : 1000, forKey: "NSInitialToolTipDelay")
     }
-
+    
     var displayedMovies: [Movie] { var result = movies; if !searchText.isEmpty { result = result.filter { $0.title.localizedCaseInsensitiveContains(searchText) } }; result.sort { m1, m2 in let isLess: Bool; switch selectedSortOption { case .name: isLess = m1.title.localizedStandardCompare(m2.title) == .orderedAscending; case .year: isLess = (m1.releaseDate ?? "") < (m2.releaseDate ?? ""); case .rating: isLess = (m1.voteAverage ?? 0.0) < (m2.voteAverage ?? 0.0) }; return isAscending ? isLess : !isLess }; return result }
     private var discoveredNetworkDevices: [DiscoveredDevice] {
         lanScanner.discoveredDevices.filter { $0.type.isWebDAV || $0.type.isMediaServer }
     }
+
+    // MARK: - 首页分类文件夹（导演/主演）
+
+    private var activeCategoryMode: HomeCategoryMode {
+        HomeCategoryMode(rawValue: homeCategoryMode) ?? .none
+    }
+
+    @ViewBuilder
+    private func homeMovieCard(movie: Movie) -> some View {
+        if isHomeCacheModeActive {
+            MovieCardView(movie: movie, isHomeCacheModeActive: isHomeCacheModeActive)
+        } else {
+            NavigationLink(destination: MovieDetailView(movie: movie)) {
+                MovieCardView(movie: movie)
+            }.buttonStyle(.plain)
+        }
+    }
+
+    private var categoryFolderGroups: [CategoryFolderGroup] {
+        let mode = activeCategoryMode
+        guard mode != .none, let kind = mode.personKind else { return [] }
+        var buckets: [String: [Movie]] = [:]
+        var order: [String] = []
+        var uncategorized: [Movie] = []
+        for movie in displayedMovies {
+            let names = (mode == .director ? movie.directorList : movie.castList)
+            if names.isEmpty {
+                uncategorized.append(movie)
+                continue
+            }
+            for name in names {
+                let id = CategoryFolder.folderID(kind: kind, name: name)
+                if buckets[id] == nil {
+                    buckets[id] = []
+                    order.append(id)
+                }
+                buckets[id]?.append(movie)
+            }
+        }
+        let groups = order.compactMap { id -> CategoryFolderGroup? in
+            guard let movies = buckets[id], !movies.isEmpty else { return nil }
+            let name = String(id.dropFirst(kind.count + 1))
+            guard !name.isEmpty else { return nil }
+            return CategoryFolderGroup(
+                folder: CategoryFolder(id: id, kind: kind, name: name, posterPath: nil, updatedAt: nil),
+                movies: movies
+            )
+        }
+        .sorted { lhs, rhs in
+            // 分类文件夹按名称排序，升降序由首页箭头按钮切换
+            let cmp = lhs.folder.name.localizedStandardCompare(rhs.folder.name)
+            if cmp != .orderedSame {
+                return categoryFolderSortAsc ? cmp == .orderedAscending : cmp == .orderedDescending
+            }
+            return lhs.movies.count > rhs.movies.count
+        }
+        var result = groups
+        if !uncategorized.isEmpty {
+            result.append(CategoryFolderGroup(
+                folder: CategoryFolder(id: CategoryFolder.folderID(kind: kind, name: "未标注"), kind: kind, name: "未标注", posterPath: nil, updatedAt: nil),
+                movies: uncategorized
+            ))
+        }
+        return result
+    }
+
+    // 封面优先级：手动指定 > 随机影视海报（人物照片只用于详情页）
+    private func groupPosterPath(for group: CategoryFolderGroup) -> String? {
+        if let custom = categoryFolderRecords[group.id]?.posterPath, !custom.isEmpty {
+            return custom
+        }
+        if let random = categoryFolderRandomPosters[group.id], let random, !random.isEmpty {
+            return random
+        }
+        return group.movies.compactMap { $0.posterPath }.first { !$0.isEmpty }
+    }
+
+    private func personPhotoPath(for group: CategoryFolderGroup) -> String? {
+        guard let photo = personProfiles[group.id]?.photoPath, !photo.isEmpty else { return nil }
+        return photo
+    }
+
+    private func hasCustomFolderPoster(for group: CategoryFolderGroup) -> Bool {
+        (categoryFolderRecords[group.id]?.posterPath ?? "").isEmpty == false
+    }
+
+    private func refreshCategoryFolderState() {
+        refreshCategoryRandomPosters()
+        PersonProfileStore.backfillMissingFilmographies()
+        ChineseNameStore.backfillExistingChineseNames()
+        Task {
+            let folders = try? await AppDatabase.shared.dbQueue.read { db in
+                try CategoryFolder.fetchAll(db)
+            }
+            let persons = try? await AppDatabase.shared.dbQueue.read { db in
+                try PersonProfile.fetchAll(db)
+            }
+            await MainActor.run {
+                self.categoryFolderRecords = Dictionary(uniqueKeysWithValues: (folders ?? []).map { ($0.id, $0) })
+                self.personProfiles = Dictionary(uniqueKeysWithValues: (persons ?? []).map { ($0.id, $0) })
+                // 作品名可能被后台补齐成了中文，用库内数据刷新内存快照，避免详情页继续显示旧片名
+                for profile in self.personProfiles.values where !profile.filmography.isEmpty {
+                    self.folderFilmography[profile.id] = profile.filmography
+                }
+            }
+        }
+    }
+
+    private func refreshCategoryRandomPosters() {
+        var result: [String: String?] = [:]
+        for group in categoryFolderGroups {
+            let candidates = group.movies.compactMap { $0.posterPath }.filter { !$0.isEmpty }
+            result[group.id] = candidates.randomElement()
+        }
+        categoryFolderRandomPosters = result
+    }
+
+    private func saveFolderPoster(group: CategoryFolderGroup, posterPath: String?) {
+        let current = categoryFolderRecords[group.id]?.posterPath
+        if current == posterPath { return }
+        if let posterPath {
+            PosterManager.shared.downloadPoster(posterPath: posterPath)
+        }
+        let kind = group.folder.kind
+        let name = group.folder.name
+        let groupID = group.id
+        Task {
+            try? await AppDatabase.shared.dbQueue.write { db in
+                if let posterPath {
+                    if var existing = try CategoryFolder.fetchOne(db, key: groupID) {
+                        existing.posterPath = posterPath
+                        existing.updatedAt = Date().timeIntervalSince1970
+                        try existing.update(db)
+                    } else {
+                        let record = CategoryFolder(id: groupID, kind: kind, name: name, posterPath: posterPath, updatedAt: Date().timeIntervalSince1970)
+                        try record.insert(db)
+                    }
+                } else {
+                    _ = try CategoryFolder.deleteOne(db, key: groupID)
+                }
+            }
+            await MainActor.run {
+                if let posterPath {
+                    self.categoryFolderRecords[groupID] = CategoryFolder(id: groupID, kind: kind, name: name, posterPath: posterPath, updatedAt: Date().timeIntervalSince1970)
+                } else {
+                    self.categoryFolderRecords[groupID] = nil
+                }
+            }
+        }
+    }
+
+    private func selectCustomFolderPoster(for group: CategoryFolderGroup) {
+        let panel = NSOpenPanel()
+        panel.message = "为「\(group.folder.name)」文件夹选择自定义海报"
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let newName = "folder_poster_\(UUID().uuidString.prefix(8)).jpg"
+        do {
+            let destURL = OmniPlayICloudSync.posterDirectory().appendingPathComponent(newName)
+            try FileManager.default.copyItem(at: url, to: destURL)
+            saveFolderPoster(group: group, posterPath: "/" + newName)
+        } catch {
+            print("文件夹海报拷贝失败: \(error)")
+        }
+    }
+
+    private var categoryMenuButton: some View {
+        Menu {
+            Picker("首页分类", selection: Binding(
+                get: { activeCategoryMode },
+                set: { newMode in
+                    withAnimation(.easeInOut(duration: 0.2)) { homeCategoryMode = newMode.rawValue }
+                }
+            )) {
+                ForEach(HomeCategoryMode.allCases) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: activeCategoryMode == .none ? "square.grid.2x2" : "person.2.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(activeCategoryMode == .none ? "全部分类" : "按\(activeCategoryMode.kindLabel)")
+                    .font(.subheadline.weight(.semibold))
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10, weight: .bold))
+            }
+            .foregroundColor(activeCategoryMode == .none ? Color.secondary : theme.accent)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(activeCategoryMode == .none ? theme.surface.opacity(0.6) : theme.accent.opacity(0.12)))
+            .overlay(Capsule().stroke(activeCategoryMode == .none ? Color.secondary.opacity(0.25) : theme.accent.opacity(0.5), lineWidth: 1))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .conditionalHelp("切换首页分类方式（导演/主演）", show: enableFastTooltip)
+    }
+
+    @ViewBuilder
+    private var categoryFolderList: some View {
+        if categoryFolderGroups.isEmpty {
+            VStack(spacing: 16) {
+                Image(systemName: "folder")
+                    .font(.system(size: 50))
+                    .foregroundColor(.secondary)
+                Text("该分类下暂无影视，可先为影视补充导演/主演信息")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 80)
+        } else {
+            LazyVGrid(columns: columns, spacing: 30) {
+                ForEach(categoryFolderGroups) { group in
+                    categoryFolderCard(for: group)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func categoryFolderCard(for group: CategoryFolderGroup) -> some View {
+        CategoryFolderCard(
+            group: group,
+            posterPath: groupPosterPath(for: group),
+            theme: theme,
+            enableFastTooltip: enableFastTooltip,
+            onEdit: { categoryPosterPickerGroup = group },
+            destination: { categoryFolderDetailView(for: group) }
+        )
+    }
+
+    // 简介单行：年份标签（同年仅第一部显示）+ 作品名与评分
+    private struct FolderBioRow {
+        let yearLabel: String
+        let text: String
+        let isLocal: Bool
+    }
+
+    // 简介数据：本地影视 + TMDB 该人物执导/参演的全部作品（含评分），按上映时间正序
+    private func folderBio(for group: CategoryFolderGroup) -> (header: String, rows: [FolderBioRow]) {
+        if group.folder.name == "未标注" {
+            return ("这些 \(group.movies.count) 部影视尚未补充导演/主演信息，补充后将自动归入对应文件夹。", [])
+        }
+        let verb = group.folder.kind == "director" ? "执导" : "参演"
+        struct Entry { let title: String; let rating: Double?; let isLocal: Bool; let year: Int?; let date: String? }
+        var entries: [Entry] = []
+        let remote = folderFilmography[group.id] ?? []
+        var remoteByID: [Int: TMDBFilmographyItem] = [:]
+        for item in remote {
+            if let rid = item.tmdbId { remoteByID[rid] = item }
+        }
+        var representedRemoteIds = Set<Int>()
+        for movie in group.movies {
+            let localYear = Int((movie.releaseDate ?? "").prefix(4))
+            if let rid = movie.id, let r = remoteByID[Int(rid)] {
+                // 同一作品以 TMDB 中文标题展示
+                representedRemoteIds.insert(Int(rid))
+                let zh = TMDBService.shared.simplifyChineseIfNeeded(r.title) ?? r.title
+                let title = zh.isEmpty ? movie.title : zh
+                entries.append(Entry(title: title, rating: movie.voteAverage ?? r.rating, isLocal: true, year: r.year ?? localYear, date: r.date ?? movie.releaseDate))
+            } else {
+                let title = TMDBService.shared.simplifyChineseIfNeeded(movie.title) ?? movie.title
+                entries.append(Entry(title: title, rating: movie.voteAverage, isLocal: true, year: localYear, date: movie.releaseDate))
+            }
+        }
+        for item in remote {
+            if let rid = item.tmdbId, representedRemoteIds.contains(rid) { continue }
+            let title = TMDBService.shared.simplifyChineseIfNeeded(item.title) ?? item.title
+            entries.append(Entry(title: title, rating: item.rating, isLocal: false, year: item.year, date: item.date))
+        }
+        let header = entries.isEmpty
+            ? "\(group.folder.name)暂无作品记录。"
+            : "\(group.folder.name)共\(verb)过 \(entries.count) 部影视"
+        guard !entries.isEmpty else { return (header, []) }
+        // 按上映时间正序（最早的在前），缺日期的排最后
+        let sorted = entries.sorted { lhs, rhs in
+            let ld = lhs.date ?? "9999-12-31"
+            let rd = rhs.date ?? "9999-12-31"
+            if ld != rd { return ld < rd }
+            return (lhs.year ?? 9999) < (rhs.year ?? 9999)
+        }
+        var rows: [FolderBioRow] = []
+        var lastLabelledYear: Int?
+        var labelledNoYear = false
+        for entry in sorted {
+            let rating = entry.rating.map { String(format: "%.1f", $0) } ?? "暂无评分"
+            let yearLabel: String
+            if let year = entry.year {
+                if lastLabelledYear != year {
+                    yearLabel = "\(year)："
+                    lastLabelledYear = year
+                    labelledNoYear = false
+                } else {
+                    yearLabel = ""
+                }
+            } else if !labelledNoYear {
+                yearLabel = "其他："
+                labelledNoYear = true
+            } else {
+                yearLabel = ""
+            }
+            rows.append(FolderBioRow(
+                yearLabel: yearLabel,
+                text: "《\(entry.title)》\(rating)",
+                isLocal: entry.isLocal
+            ))
+        }
+        return (header, rows)
+    }
+
+    // 简介视图：三列展示，每行一部作品与评分
+    @ViewBuilder
+    private func folderBioView(for group: CategoryFolderGroup) -> some View {
+        let bio = folderBio(for: group)
+        VStack(alignment: .leading, spacing: 6) {
+            Text(bio.header)
+                .foregroundColor(theme.textSecondary)
+            if !bio.rows.isEmpty {
+                let chunk = max(1, (bio.rows.count + 2) / 3)
+                HStack(alignment: .top, spacing: 20) {
+                    ForEach(0..<3, id: \.self) { column in
+                        VStack(alignment: .leading, spacing: 4) {
+                            let start = column * chunk
+                            let end = min(start + chunk, bio.rows.count)
+                            if start < end {
+                                ForEach(0..<(end - start), id: \.self) { rowIndex in
+                                    let row = bio.rows[start + rowIndex]
+                                    HStack(alignment: .top, spacing: 2) {
+                                        Text(row.yearLabel)
+                                            .foregroundColor(theme.textSecondary)
+                                            .frame(width: 42, alignment: .leading)
+                                        Text(row.text)
+                                            .fontWeight(row.isLocal ? .bold : .regular)
+                                            .foregroundColor(row.isLocal ? theme.accent : theme.textSecondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            if folderFilmographyLoading.contains(group.id) {
+                Text("（正在获取完整作品列表…）")
+                    .foregroundColor(theme.textSecondary)
+            }
+        }
+        .font(.subheadline)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // 打开文件夹详情时按需拉取人物完整作品列表并持久化缓存
+    private func loadFilmographyIfNeeded(for group: CategoryFolderGroup) async {
+        guard let person = personProfiles[group.id] else { return }
+        let cached = folderFilmography[group.id] ?? person.filmography
+        if !cached.isEmpty {
+            if folderFilmography[group.id] == nil { folderFilmography[group.id] = cached }
+            return
+        }
+        guard let personId = person.tmdbPersonId else { return }
+        guard folderFilmographyLoading.contains(group.id) == false else { return }
+        folderFilmographyLoading.insert(group.id)
+        defer { folderFilmographyLoading.remove(group.id) }
+        guard TMDBService.shared.currentCredentialSource().isAvailable,
+              let items = await ChineseNameStore.filmography(personId: Int(personId), kind: group.folder.kind) else {
+            return
+        }
+        let profileID = group.id
+        if let data = try? JSONEncoder().encode(items), let json = String(data: data, encoding: .utf8) {
+            try? await AppDatabase.shared.dbQueue.write { db in
+                if var p = try PersonProfile.fetchOne(db, key: profileID) {
+                    p.filmographyJson = json
+                    p.updatedAt = Date().timeIntervalSince1970
+                    try p.update(db)
+                }
+            }
+        }
+        folderFilmography[group.id] = items
+    }
+
+    @ViewBuilder
+    private func categoryFolderDetailView(for group: CategoryFolderGroup) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                HStack(alignment: .top, spacing: 20) {
+                    CachedPosterView(posterPath: personPhotoPath(for: group) ?? groupPosterPath(for: group))
+                        .frame(width: 150, height: 225)
+                        .cornerRadius(12)
+                        .shadow(color: .black.opacity(0.1), radius: 8, y: 4)
+                        .conditionalHelp(personPhotoPath(for: group) != nil ? "人物照片" : "文件夹封面", show: enableFastTooltip)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(group.folder.name)
+                            .font(.title2)
+                            .fontWeight(.bold)
+                            .foregroundColor(theme.textPrimary)
+                            .lineLimit(1)
+                        // 简介（含全部作品及评分）放在名称下方，三列、按上映时间正序
+                        folderBioView(for: group)
+                    }
+                    Spacer(minLength: 0)
+                }
+                Divider().background(theme.textSecondary.opacity(0.3))
+                LazyVGrid(columns: columns, spacing: 30) {
+                    ForEach(group.movies, id: \.id) { movie in
+                        homeMovieCard(movie: movie)
+                    }
+                }
+            }
+            .padding(25)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(theme.background.ignoresSafeArea())
+        .modifier(RemoveNavTitleModifier())
+        .task(id: group.id) {
+            await loadFilmographyIfNeeded(for: group)
+        }
+    }
+
+    private func categoryPosterPickerSheet(for group: CategoryFolderGroup) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("编辑「\(group.folder.name)」")
+                    .font(.title3.bold())
+                Spacer()
+                Button {
+                    categoryPosterPickerGroup = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill").font(.title2).foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding()
+            Divider()
+            if group.folder.name != "未标注" {
+                HStack(spacing: 10) {
+                    Text("\(group.folder.kindLabel)名称")
+                        .font(.subheadline)
+                        .foregroundColor(theme.textSecondary)
+                    TextField("输入\(group.folder.kindLabel)名称", text: $categoryFolderNameDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 300)
+                        .onSubmit { commitCategoryFolderRename(for: group) }
+                    Button("保存名称") { commitCategoryFolderRename(for: group) }
+                        .disabled(categoryFolderNameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                  || categoryFolderNameDraft == group.folder.name)
+                        .conditionalHelp("手动改成中文译名，会同步更新影片名单、封面与人物资料", show: enableFastTooltip)
+                    Spacer()
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                Divider()
+            }
+            if group.movies.allSatisfy({ ($0.posterPath ?? "").isEmpty }) {
+                VStack(spacing: 10) {
+                    Image(systemName: "photo.badge.exclamationmark")
+                        .font(.system(size: 34))
+                        .foregroundColor(.secondary)
+                    Text("该文件夹下的影视暂无海报，可先使用下方「选择本地图片...」设置自定义海报。")
+                        .font(.subheadline)
+                        .foregroundColor(theme.textSecondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 16)], spacing: 20) {
+                        ForEach(group.movies.filter { ($0.posterPath ?? "").isEmpty == false }, id: \.id) { movie in
+                            Button(action: {
+                                saveFolderPoster(group: group, posterPath: movie.posterPath)
+                                categoryPosterPickerGroup = nil
+                            }) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    CachedPosterView(posterPath: movie.posterPath)
+                                        .frame(width: 120, height: 180)
+                                        .cornerRadius(8)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 8)
+                                                .stroke(groupPosterPath(for: group) == movie.posterPath ? theme.accent : .clear, lineWidth: 2)
+                                        )
+                                    Text(movie.title)
+                                        .font(.caption)
+                                        .lineLimit(1)
+                                        .foregroundColor(theme.textPrimary)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(20)
+                }
+            }
+            Divider()
+            HStack {
+                Button(action: {
+                    categoryPosterPickerGroup = nil
+                    selectCustomFolderPoster(for: group)
+                }) {
+                    Label("选择本地图片...", systemImage: "photo.badge.plus")
+                        .font(.subheadline)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(theme.textSecondary)
+                .conditionalHelp("使用本地图片作为该文件夹封面", show: enableFastTooltip)
+                Spacer()
+                Button(action: {
+                    saveFolderPoster(group: group, posterPath: nil)
+                    refreshCategoryRandomPosters()
+                    categoryPosterPickerGroup = nil
+                }) {
+                    Label("恢复默认封面", systemImage: "arrow.counterclockwise")
+                        .font(.subheadline)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(theme.textSecondary)
+                .conditionalHelp("封面改回默认（人物照片，无照片时为随机影视海报）", show: enableFastTooltip)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+        }
+        .frame(width: 640, height: 560)
+        .task(id: group.id) {
+            categoryFolderNameDraft = group.folder.name
+        }
+    }
+
+    // 弹窗里手动改导演/主演名：迁移库内数据并记住该名字，避免下次刮削又退回外文名
+    private func commitCategoryFolderRename(for group: CategoryFolderGroup) {
+        let newName = categoryFolderNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !newName.isEmpty, newName != group.folder.name else { return }
+        let folder = group.folder
+        Task {
+            await ChineseNameStore.setUserPersonName(kind: folder.kind, currentName: folder.name, newName: newName)
+            await MainActor.run {
+                categoryPosterPickerGroup = nil
+                NotificationCenter.default.post(name: .libraryUpdated, object: nil)
+            }
+        }
+    }
+
     private var topToolbarInactiveIconColor: Color {
         colorScheme == .dark ? theme.textPrimary.opacity(0.78) : .secondary
     }
@@ -317,7 +894,7 @@ struct PosterWallView: View {
         NavigationStack {
             ZStack(alignment: .top) {
                 theme.background.ignoresSafeArea()
-
+                
                 ScrollView {
                     if movies.isEmpty && continueWatchingMovies.isEmpty {
                         VStack(spacing: 20) {
@@ -355,6 +932,7 @@ struct PosterWallView: View {
                                 Text("所有影视")
                                     .font(.title2).fontWeight(.bold)
                                     .foregroundColor(theme.textPrimary)
+                                categoryMenuButton
                                 Spacer().frame(width: 15)
                                 if isSearchActive {
                                     TextField("搜索...", text: $searchText)
@@ -370,29 +948,38 @@ struct PosterWallView: View {
                                 } label: {
                                     Image(systemName: "line.3.horizontal.decrease.circle").font(.system(size: 16, weight: .semibold)).foregroundColor(.secondary)
                                 }.menuStyle(.borderlessButton).fixedSize()
-                                Button(action: { withAnimation { isAscending.toggle() } }) {
-                                    Image(systemName: isAscending ? "arrow.up" : "arrow.down").font(.system(size: 14, weight: .bold)).foregroundColor(.secondary)
+                                Button(action: {
+                                    withAnimation {
+                                        if activeCategoryMode == .none { isAscending.toggle() } else { categoryFolderSortAsc.toggle() }
+                                    }
+                                }) {
+                                    Image(systemName: (activeCategoryMode == .none ? isAscending : categoryFolderSortAsc) ? "arrow.up" : "arrow.down")
+                                        .font(.system(size: 14, weight: .bold)).foregroundColor(.secondary)
                                 }.buttonStyle(.plain)
+                                .conditionalHelp(activeCategoryMode == .none ? "切换排序方向" : "分类文件夹按名称排序，点击切换升/降序", show: enableFastTooltip)
                                 Spacer()
                             }.padding(.horizontal, 25).padding(.top, continueWatchingMovies.isEmpty ? 6 : 4)
-
-                            LazyVGrid(columns: columns, spacing: 30) {
-                                ForEach(displayedMovies, id: \.id) { movie in
-                                    if isHomeCacheModeActive {
-                                        MovieCardView(movie: movie, isHomeCacheModeActive: isHomeCacheModeActive)
-                                    } else {
-                                        NavigationLink(destination: MovieDetailView(movie: movie)) {
-                                            MovieCardView(movie: movie)
-                                        }.buttonStyle(.plain)
+                            
+                            Group {
+                                if activeCategoryMode == .none {
+                                    LazyVGrid(columns: columns, spacing: 30) {
+                                        ForEach(displayedMovies, id: \.id) { movie in
+                                            homeMovieCard(movie: movie)
+                                        }
                                     }
+                                } else {
+                                    categoryFolderList
                                 }
-                            }.padding(.horizontal, 25).padding(.bottom, 25).animation(.easeInOut, value: displayedMovies.count)
+                            }
+                            .padding(.horizontal, 25)
+                            .padding(.bottom, 25)
+                            .animation(.easeInOut, value: displayedMovies.count)
                         }
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(.top, topBarHeight)
-
+                
                 if let cacheMessage = cacheManager.cacheStatusMessage {
                     Text(cacheMessage)
                         .font(.subheadline.weight(.semibold))
@@ -408,6 +995,25 @@ struct PosterWallView: View {
                 }
 
                 HStack(alignment: .center, spacing: 16) {
+                    if cacheManager.isCaching {
+                        HStack(spacing: 8) {
+                            ProgressView(value: cacheManager.overallDownloadProgress)
+                                .progressViewStyle(.circular)
+                                .controlSize(.small)
+                                .tint(theme.accent)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(cacheManager.activeCacheTitle ?? "离线缓存")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundColor(topToolbarStatusTextColor)
+                                    .lineLimit(1)
+                                Text("\(cacheManager.currentCacheFileName ?? "等待缓存") · 第 \(min(cacheManager.completedDownloadCount + 1, cacheManager.totalDownloadCount))/\(cacheManager.totalDownloadCount) 集 · \(Int(cacheManager.overallDownloadProgress * 100))%")
+                                    .font(.caption2)
+                                    .foregroundColor(topToolbarStatusTextColor.opacity(0.8))
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: 260, alignment: .leading)
+                        }
+                    }
                     if isProcessing || !thumbManager.progressMessage.isEmpty {
                         let statusMessage = isProcessing
                             ? (processingMessage.isEmpty ? "正在扫描媒体源..." : processingMessage)
@@ -422,9 +1028,9 @@ struct PosterWallView: View {
                                 .frame(maxWidth: 220, alignment: .leading)
                         }
                     }
-
+                    
                     Spacer(minLength: 20)
-
+                    
                     Button(action: { isShowingManageSources.toggle() }) {
                         Image(systemName: "folder.badge.plus")
                             .font(.system(size: 21, weight: .medium))
@@ -435,7 +1041,7 @@ struct PosterWallView: View {
                     .accessibilityIdentifier("toolbar.addSource")
                     .conditionalHelp("查看已挂载媒体源，并添加本地文件夹或 WebDAV 媒体源", show: enableFastTooltip)
                     .popover(isPresented: $isShowingManageSources, arrowEdge: .top) { folderMenuPanel }
-
+                    
                     Button(action: { triggerScanAndScrape() }) {
                         Image(systemName: "arrow.triangle.2.circlepath")
                             .font(.system(size: 21, weight: .medium))
@@ -446,7 +1052,7 @@ struct PosterWallView: View {
                     .accessibilityIdentifier("toolbar.sync")
                     .disabled(isProcessing)
                     .conditionalHelp("重新扫描目录并刷新刮削结果", show: enableFastTooltip)
-
+                    
                     Button(action: { withAnimation { isHomeCacheModeActive.toggle() } }) {
                         Image(systemName: isHomeCacheModeActive ? "icloud.fill" : "icloud")
                             .font(.system(size: 21, weight: .medium))
@@ -480,23 +1086,46 @@ struct PosterWallView: View {
             .sheet(isPresented: $isShowingRenameSourceSheet) {
                 renameSourceSheet()
             }
+            .sheet(isPresented: $isShowingSourceInfoSheet) {
+                if let source = sourceInfoTarget {
+                    sourceInfoSheet(source)
+                }
+            }
             .sheet(isPresented: $isShowingManualRemoteSourceSheet) {
                 manualRemoteSourceSheet()
             }
-            .sheet(isPresented: $isShowingWebDAVPreScanLoginSheet) {
+            .sheet(isPresented: $isShowingWebDAVPreScanLoginSheet, onDismiss: showPendingWebDAVBrowser) {
                 webDAVPreScanLoginSheet()
             }
             .sheet(isPresented: $isShowingWebDAVFolderBrowserSheet) {
                 webDAVFolderBrowserSheet()
             }
+            .sheet(item: $categoryPosterPickerGroup) { group in
+                categoryPosterPickerSheet(for: group)
+            }
             .sheet(isPresented: $isShowingMediaServerSheet) {
                 mediaServerSourceSheet()
+            }
+            .sheet(isPresented: $isShowingLuckyStunSourceSheet, onDismiss: startPendingLuckyWebDAV) {
+                luckyStunSourceSheet()
             }
             .sheet(isPresented: $isShowingRemoveSourceSheet) {
                 removeSourceSheet()
             }
+            .alert("扫描刮削失败", isPresented: $isShowingScanErrorAlert) {
+                Button("好", role: .cancel) { }
+            } message: {
+                Text(scanErrorMessage)
+            }
             .alert("TMDB API 无法连接", isPresented: $isShowingTMDBConnectionAlert) {
-                Button("本次不刮削", role: .cancel) { }
+                Button("本次不刮削", role: .cancel) {
+                    // 不刮元数据，但缺失的分集剧照仍然要补抓。
+                    Task { await enqueueEpisodeStillBackfill(runID: UUID(), movieIDs: []) }
+                }
+                Button("重试扫描") {
+                    isShowingTMDBConnectionAlert = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { triggerScanAndScrape() }
+                }
                 Button("添加 API / 设置代理", role: .cancel) {
                     settingsFocusTMDBApi = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -510,7 +1139,6 @@ struct PosterWallView: View {
         }
         .onAppear {
             loadData()
-            startDockerAutoSyncIfNeeded()
             luckyStunRules = LuckyStunCoordinator.shared.cachedRules
             LuckyStunCoordinator.shared.startAutomaticUpdates()
             MacAppUpdateChecker.checkAtStartupIfNeeded()
@@ -522,8 +1150,13 @@ struct PosterWallView: View {
                 triggerScanAndScrape()
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .libraryUpdated)) { _ in
-            scheduleDebouncedLibraryReload()
+        .onReceive(NotificationCenter.default.publisher(for: .libraryUpdated)) { notification in
+            if notification.userInfo?[LibraryUpdateUserInfoKey.metadataScrapeCompleted] as? Bool == true {
+                pendingLibraryReloadTask?.cancel()
+                loadData()
+            } else {
+                scheduleDebouncedLibraryReload()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: LuckyStunCoordinator.sourceUpdatedNotification)) { _ in
             scheduleDebouncedLibraryReload()
@@ -536,6 +1169,9 @@ struct PosterWallView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TriggerScanAndScrape"))) { _ in triggerScanAndScrape() }
         .onChange(of: enableFastTooltip) { _, isFast in
             UserDefaults.standard.set(isFast ? 50 : 1000, forKey: "NSInitialToolTipDelay")
+        }
+        .onChange(of: homeCategoryMode) { _, _ in
+            refreshCategoryRandomPosters()
         }
         .onChange(of: isShowingManageSources) { _, isShown in
             if isShown {
@@ -554,11 +1190,9 @@ struct PosterWallView: View {
         }
         .onDisappear {
             pendingLibraryReloadTask?.cancel()
-            dockerAutoSyncTask?.cancel()
-            dockerAutoSyncTask = nil
         }
     }
-
+    
     // ==========================================
     // 🌟 原生 Finder 添加目录逻辑 (无沙盒精简版)
     // ==========================================
@@ -569,7 +1203,7 @@ struct PosterWallView: View {
         panel.canChooseDirectories = true
         panel.canCreateDirectories = false
         panel.allowsMultipleSelection = false
-
+        
         if panel.runModal() == .OK, let selectedURL = panel.url {
             let absolutePath = MediaSourceProtocol.local.normalizedBaseURL(selectedURL.path)
             let sourceName = selectedURL.lastPathComponent
@@ -603,7 +1237,7 @@ struct PosterWallView: View {
             }
         }
     }
-
+    
     private var folderMenuPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(mediaSources.isEmpty ? "暂无源" : "已挂载媒体源：").font(.headline).foregroundColor(.secondary)
@@ -619,12 +1253,6 @@ struct PosterWallView: View {
                         Text("\(sourceProtocolLabel(source)) · \(source.isEnabled ? "已开启" : "已关闭")")
                             .font(.caption2)
                             .foregroundColor(source.isEnabled ? .secondary : .orange)
-                        if !source.isEnabled {
-                            Text("索引与剧照默认保留 30 天，重新开启后会立即重新扫描。")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
                         if showMediaSourceRealPath {
                             Text(source.displayBaseURL())
                                 .font(.caption)
@@ -641,28 +1269,21 @@ struct PosterWallView: View {
                     }
                     .frame(maxWidth: 300, alignment: .leading)
                     Spacer()
-                    Button(checkingSourceIDs.contains(source.id ?? -1) ? "检测中..." : "检测连通性") {
-                        checkMediaSourceConnectivity(source)
+                    Button(action: { checkMediaSourceConnectivity(source) }) {
+                        Image(systemName: checkingSourceIDs.contains(source.id ?? -1) ? "hourglass" : "bolt.fill")
                     }
-                    .font(.caption.weight(.semibold))
                     .disabled(source.id == nil || checkingSourceIDs.contains(source.id ?? -1))
                     .help("优先检测局域网地址，失败后依次检测外网地址")
                     Button(action: { toggleMediaSourceEnabled(source) }) {
-                        Text(source.isEnabled ? "关闭" : "开启")
-                            .font(.caption.weight(.semibold))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
+                        Image(systemName: source.isEnabled ? "power" : "power.circle")
                             .foregroundColor(source.isEnabled ? .orange : .green)
-                            .background((source.isEnabled ? Color.orange : Color.green).opacity(0.12))
-                            .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)
                     Button(action: {
-                        renamingSourceName = source.name
-                        sourceToRename = source
-                        isShowingRenameSourceSheet = true
+                        sourceInfoTarget = source
+                        isShowingSourceInfoSheet = true
                     }) {
-                        Image(systemName: "pencil.circle.fill")
+                        Image(systemName: "pencil")
                             .foregroundColor(.secondary)
                     }.buttonStyle(.plain)
                     Button(action: {
@@ -673,10 +1294,10 @@ struct PosterWallView: View {
                     }.buttonStyle(.plain)
                 }
             }
-
+            
             Divider()
                 .padding(.top, 4)
-
+            
             VStack(alignment: .leading, spacing: 10) {
                 Text("新增媒体源").font(.subheadline.weight(.semibold)).foregroundColor(.secondary)
                 Button(action: {
@@ -688,7 +1309,7 @@ struct PosterWallView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("menu.addLocalFolder")
-
+                
                 Button(action: {
                     openManualRemoteSourceChooser()
                 }) {
@@ -697,6 +1318,12 @@ struct PosterWallView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("menu.addRemoteSource")
+
+                Button(action: openLuckyStunSourceSheet) {
+                    Label("Lucky STUN 穿透媒体源", systemImage: "point.3.connected.trianglepath.dotted")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
             }
 
             Divider()
@@ -726,7 +1353,7 @@ struct PosterWallView: View {
                 }
 
                 if discoveredNetworkDevices.isEmpty {
-                    Text("扫描到 OmniPlay Docker、WebDAV、Plex、Emby 或 Jellyfin 后，点击设备进入登录。")
+                    Text("扫描到 WebDAV、Plex、Emby 或 Jellyfin 后，点击设备进入登录。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -768,12 +1395,14 @@ struct PosterWallView: View {
     }
 
     private func sourceProtocolLabel(_ source: MediaSource) -> String {
+        if let luckyStunDisplayName = source.luckyStunDisplayName {
+            return luckyStunDisplayName
+        }
         switch source.protocolKind {
         case .webdav: return "WebDAV"
         case .plex: return "Plex"
         case .emby: return "Emby"
         case .jellyfin: return "Jellyfin"
-        case .omniplayDocker: return "OmniPlay Docker"
         case .direct: return "直连"
         case .local, .none: return "本地目录"
         }
@@ -782,94 +1411,8 @@ struct PosterWallView: View {
     private func sourceIconName(_ source: MediaSource) -> String {
         switch source.protocolKind {
         case .webdav: return "network"
-        case .plex, .emby, .jellyfin, .omniplayDocker: return "server.rack"
+        case .plex, .emby, .jellyfin: return "server.rack"
         default: return "folder.fill"
-        }
-    }
-
-    private func externalAddressBinding(
-        for id: UUID,
-        in addresses: Binding<[MediaSourceExternalAddress]>
-    ) -> Binding<MediaSourceExternalAddress> {
-        Binding(
-            get: {
-                addresses.wrappedValue.first(where: { $0.id == id }) ?? MediaSourceExternalAddress()
-            },
-            set: { value in
-                guard let index = addresses.wrappedValue.firstIndex(where: { $0.id == id }) else { return }
-                addresses.wrappedValue[index] = value
-            }
-        )
-    }
-
-    private func externalAddressEditor(
-        addresses: Binding<[MediaSourceExternalAddress]>,
-        title: String = "外网地址"
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(title).font(.subheadline.weight(.semibold))
-                Spacer()
-                Button {
-                    addresses.wrappedValue.append(MediaSourceExternalAddress())
-                } label: {
-                    Label("添加外网地址", systemImage: "plus.circle")
-                }
-                .buttonStyle(.plain)
-            }
-
-            if addresses.wrappedValue.isEmpty {
-                Text("可添加多个外网入口；检测连通性时会在局域网失败后按顺序尝试。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                ForEach(addresses.wrappedValue) { item in
-                    let itemBinding = externalAddressBinding(for: item.id, in: addresses)
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 8) {
-                            TextField("外网地址（请输入与局域网媒体源对应的完整地址）", text: itemBinding.address)
-                                .textFieldStyle(.roundedBorder)
-                            Button {
-                                addresses.wrappedValue.removeAll { $0.id == item.id }
-                            } label: {
-                                Image(systemName: "minus.circle.fill").foregroundColor(.red.opacity(0.8))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        TextField("自定义标签（例如：家、公司、远程）", text: itemBinding.label)
-                            .textFieldStyle(.roundedBorder)
-                        Toggle("使用 Lucky STUN 自动更新此地址", isOn: itemBinding.useLuckyStun)
-                            .toggleStyle(.checkbox)
-                        if itemBinding.wrappedValue.useLuckyStun {
-                            let ruleSelection = Binding<String>(
-                                get: { itemBinding.wrappedValue.luckyRuleId },
-                                set: { value in
-                                    var updated = itemBinding.wrappedValue
-                                    updated.luckyRuleId = value
-                                    updated.luckyRuleName = luckyStunRules.first(where: { $0.id == value })?.name ?? ""
-                                    itemBinding.wrappedValue = updated
-                                }
-                            )
-                            Picker("指定 Lucky STUN 规则", selection: ruleSelection) {
-                                Text(luckyStunRules.isEmpty ? "请先在设置中登录 Lucky STUN" : "选择规则").tag("")
-                                ForEach(luckyStunRules) { rule in
-                                    Text("\(rule.name) · \(rule.address)").tag(rule.id)
-                                }
-                            }
-                            if luckyStunRules.isEmpty {
-                                Text("请先在设置中点击“登录检测并更新”，登录成功后这里会显示规则列表。")
-                                    .font(.caption2)
-                                    .foregroundColor(.orange)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                    }
-                    .padding(9)
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-            }
         }
     }
 
@@ -911,7 +1454,6 @@ struct PosterWallView: View {
 
     private func mediaServerProtocolLabel(_ value: MediaSourceProtocol) -> String {
         switch value {
-        case .omniplayDocker: return "OmniPlay Docker"
         case .webdav: return "WebDAV"
         case .plex: return "Plex"
         case .emby: return "Emby"
@@ -922,8 +1464,6 @@ struct PosterWallView: View {
 
     private func defaultMediaServerName(for protocolKind: MediaSourceProtocol) -> String {
         switch protocolKind {
-        case .omniplayDocker:
-            return "OmniPlay Docker"
         case .webdav:
             return "WebDAV"
         case .plex:
@@ -939,8 +1479,6 @@ struct PosterWallView: View {
 
     private var mediaServerAddressPlaceholder: String {
         switch mediaServerProtocol {
-        case .omniplayDocker:
-            return "Docker 地址，例如 http://192.168.0.100:45722"
         case .webdav:
             return "WebDAV 地址，例如 https://nas:5006/dav"
         case .plex:
@@ -960,8 +1498,6 @@ struct PosterWallView: View {
 
     private func defaultMediaServerBaseURL(for protocolKind: MediaSourceProtocol) -> String {
         switch protocolKind {
-        case .omniplayDocker:
-            return "http://192.168.0.100:45722"
         case .webdav:
             return ""
         case .plex:
@@ -978,13 +1514,10 @@ struct PosterWallView: View {
         return trimmed == defaultMediaServerBaseURL(for: .plex)
             || trimmed == defaultMediaServerBaseURL(for: .emby)
             || trimmed == defaultMediaServerBaseURL(for: .jellyfin)
-            || trimmed == defaultMediaServerBaseURL(for: .omniplayDocker)
     }
 
     private func mediaServerConnectionHint(for protocolKind: MediaSourceProtocol) -> String {
         switch protocolKind {
-        case .omniplayDocker:
-            return "Docker 服务默认地址为 http://192.168.0.100:45722。登录后会同步服务端媒体库，播放仍由 mac 本地硬解。"
         case .webdav:
             return "WebDAV 会先进入共享文件夹列表；可给多个目标文件夹点星标，关闭列表时统一挂载并扫描刮削。"
         case .plex:
@@ -1003,9 +1536,6 @@ struct PosterWallView: View {
         if protocolKind == .plex {
             return "Plex 需要访问令牌（X-Plex-Token）才能读取媒体库。"
         }
-        if protocolKind == .omniplayDocker {
-            return "OmniPlay Docker 需要用户名和密码才能同步媒体库。"
-        }
         return "\(mediaServerProtocolLabel(protocolKind)) 需要 API Key 或访问令牌才能读取媒体列表和生成播放地址。"
     }
 
@@ -1018,10 +1548,10 @@ struct PosterWallView: View {
         if currentBaseURL.isEmpty || isDefaultMediaServerBaseURL(currentBaseURL) {
             mediaServerBaseURL = defaultMediaServerBaseURL(for: newValue)
         }
-        if newValue == .plex || newValue == .omniplayDocker || newValue == .webdav {
+        if newValue == .plex || newValue == .webdav {
             mediaServerUserId = ""
         }
-        if newValue != .omniplayDocker && newValue != .webdav {
+        if newValue != .webdav {
             mediaServerPassword = ""
         }
         if newValue == .webdav {
@@ -1032,11 +1562,9 @@ struct PosterWallView: View {
 
     private var remoteSourceSaveButtonTitle: String {
         if mediaServerIsPreScanning {
-            return mediaServerProtocol == .omniplayDocker ? "同步中..." : "读取中..."
+            return "读取中..."
         }
         switch mediaServerProtocol {
-        case .omniplayDocker:
-            return "保存并同步"
         case .webdav:
             return "继续"
         default:
@@ -1087,8 +1615,11 @@ struct PosterWallView: View {
     }
 
     private func closeRemoteSourceSheets() {
+        shouldStartLuckyWebDAVAfterDismiss = false
+        shouldShowWebDAVBrowserAfterLoginDismiss = false
         isShowingManualRemoteSourceSheet = false
         isShowingMediaServerSheet = false
+        isShowingLuckyStunSourceSheet = false
         isShowingWebDAVPreScanLoginSheet = false
         isShowingWebDAVFolderBrowserSheet = false
     }
@@ -1096,17 +1627,172 @@ struct PosterWallView: View {
     private func openManualRemoteSourceChooser() {
         isShowingManageSources = false
         closeRemoteSourceSheets()
-        resetOmniPlayDockerForm()
+        resetMediaServerForm()
         DispatchQueue.main.async {
             isShowingManualRemoteSourceSheet = true
         }
     }
 
-    private func openOmniPlayDockerSourceSheet() {
+    private func openLuckyStunSourceSheet() {
+        isShowingManageSources = false
         closeRemoteSourceSheets()
-        resetOmniPlayDockerForm()
-        DispatchQueue.main.async {
-            isShowingMediaServerSheet = true
+        luckySourceName = ""
+        luckySourceProtocol = .plex
+        luckyManagementURL = ""
+        luckyUsername = ""
+        luckyPassword = ""
+        luckyRuleID = ""
+        luckyStunAddress = ""
+        luckyStunRules = []
+        luckyAutoUpdate = true
+        luckyUpdateIntervalMinutes = 30
+        luckyDockerUsername = ""
+        luckyDockerPassword = ""
+        luckyStatusMessage = nil
+        isTestingLuckySource = false
+        pendingLuckyConfiguration = nil
+        isShowingLuckyStunSourceSheet = true
+    }
+
+    private func startPendingLuckyWebDAV() {
+        guard shouldStartLuckyWebDAVAfterDismiss else { return }
+        shouldStartLuckyWebDAVAfterDismiss = false
+        // Present the browser immediately so a slow first tunnel request still
+        // exposes the current URL and an actionable refresh button.
+        webDAVBrowserIsLoading = true
+        isShowingWebDAVFolderBrowserSheet = true
+        saveWebDAVBrowserLoginAndBrowse(presentBrowserWhenLoaded: false)
+    }
+
+    private func showPendingWebDAVBrowser() {
+        guard shouldShowWebDAVBrowserAfterLoginDismiss else { return }
+        shouldShowWebDAVBrowserAfterLoginDismiss = false
+        isShowingWebDAVFolderBrowserSheet = true
+    }
+
+    private func testLuckyStunLogin() {
+        let managementURL = luckyManagementURL
+        let username = luckyUsername
+        let password = luckyPassword
+        isTestingLuckySource = true
+        luckyStatusMessage = "正在登录并读取穿透规则..."
+        Task { @MainActor in
+            do {
+                let rules = try await LuckyStunClient.shared.fetch(
+                    managementURL: managementURL,
+                    username: username,
+                    password: password,
+                    selectedRuleID: luckyRuleID,
+                    selectedRuleName: ""
+                )
+                luckyStunRules = rules
+                if !rules.contains(where: { $0.id == luckyRuleID }) {
+                    luckyRuleID = rules.first?.id ?? ""
+                }
+                luckyStunAddress = rules.first(where: { $0.id == luckyRuleID })?.address ?? ""
+                luckyStatusMessage = rules.isEmpty ? "登录成功，但没有读取到穿透规则。" : "登录成功，已读取 \(rules.count) 条穿透规则。"
+            } catch {
+                luckyStunRules = []
+                luckyStatusMessage = error.localizedDescription
+            }
+            isTestingLuckySource = false
+        }
+    }
+
+    private func luckyStunSourceSheet() -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("添加 Lucky STUN 穿透媒体源")
+                .font(.title3.bold())
+            Picker("类型", selection: $luckySourceProtocol) {
+                Text("WebDAV").tag(MediaSourceProtocol.webdav)
+                Text("Plex").tag(MediaSourceProtocol.plex)
+                Text("Emby").tag(MediaSourceProtocol.emby)
+                Text("Jellyfin").tag(MediaSourceProtocol.jellyfin)
+            }
+            .pickerStyle(.segmented)
+            TextField("显示名称（可选）", text: $luckySourceName)
+                .textFieldStyle(.roundedBorder)
+            TextField("Lucky 管理地址", text: $luckyManagementURL)
+                .textFieldStyle(.roundedBorder)
+            TextField("Lucky 管理账号", text: $luckyUsername)
+                .textFieldStyle(.roundedBorder)
+            SecureField("Lucky 管理密码", text: $luckyPassword)
+                .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Button(isTestingLuckySource ? "检测中..." : "登录检测") { testLuckyStunLogin() }
+                    .disabled(
+                        isTestingLuckySource ||
+                        luckyManagementURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                        luckyUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                        luckyPassword.isEmpty
+                    )
+                if isTestingLuckySource { ProgressView().controlSize(.small) }
+            }
+
+            Picker("穿透规则", selection: Binding(get: { luckyRuleID }, set: { value in
+                luckyRuleID = value
+                luckyStunAddress = luckyStunRules.first(where: { $0.id == value })?.address ?? ""
+            })) {
+                Text("请选择穿透规则").tag("")
+                ForEach(luckyStunRules) { rule in
+                    Text("\(rule.name) · \(rule.address)").tag(rule.id)
+                }
+            }
+            .disabled(luckyStunRules.isEmpty)
+
+            Toggle("自动更新穿透地址", isOn: $luckyAutoUpdate)
+                .toggleStyle(.checkbox)
+            if luckyAutoUpdate {
+                Stepper("更新周期：\(luckyUpdateIntervalMinutes) 分钟", value: $luckyUpdateIntervalMinutes, in: 5...1440, step: 5)
+            }
+
+            Divider()
+            Text("\(mediaServerProtocolLabel(luckySourceProtocol)) 登录")
+                .font(.subheadline.weight(.semibold))
+            TextField("穿透地址", text: $luckyStunAddress)
+                .textFieldStyle(.roundedBorder)
+                .disabled(true)
+            if luckySourceProtocol == .plex {
+                SecureField("Plex 访问令牌", text: $luckyDockerPassword)
+                    .textFieldStyle(.roundedBorder)
+            } else {
+                TextField(luckySourceProtocol == .webdav ? "用户名（可选）" : "用户名 / 用户 ID", text: $luckyDockerUsername)
+                    .textFieldStyle(.roundedBorder)
+                SecureField(
+                    luckySourceProtocol == .webdav ? "密码（可选）" : "密码 / API Key / 访问令牌",
+                    text: $luckyDockerPassword
+                )
+                .textFieldStyle(.roundedBorder)
+            }
+
+            if let luckyStatusMessage {
+                Text(luckyStatusMessage)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Spacer()
+                Button("取消") { isShowingLuckyStunSourceSheet = false }
+                Button("保存并同步") { saveLuckyStunSource() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(isTestingLuckySource || luckyRuleID.isEmpty || !isLuckySourceCredentialComplete)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+    }
+
+    private var isLuckySourceCredentialComplete: Bool {
+        switch luckySourceProtocol {
+        case .plex, .emby, .jellyfin:
+            return !luckyDockerPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .webdav:
+            return true
+        default:
+            return false
         }
     }
 
@@ -1127,7 +1813,6 @@ struct PosterWallView: View {
             Text("添加局域网媒体源")
                 .font(.title3.bold())
             Picker("类型", selection: $mediaServerProtocol) {
-                Text("OmniPlay Docker").tag(MediaSourceProtocol.omniplayDocker)
                 Text("WebDAV").tag(MediaSourceProtocol.webdav)
                 Text("Plex").tag(MediaSourceProtocol.plex)
                 Text("Emby").tag(MediaSourceProtocol.emby)
@@ -1138,15 +1823,12 @@ struct PosterWallView: View {
                 .textFieldStyle(.roundedBorder)
             TextField(mediaServerAddressPlaceholder, text: $mediaServerBaseURL)
                 .textFieldStyle(.roundedBorder)
-            TextField("局域网自定义标签（默认：局域网）", text: $mediaServerLocalLabel)
-                .textFieldStyle(.roundedBorder)
-            externalAddressEditor(addresses: $pendingExternalAddresses)
             if mediaServerProtocol == .webdav {
                 TextField("用户名（可选）", text: $mediaServerUserId)
                     .textFieldStyle(.roundedBorder)
                 SecureField("密码（可选）", text: $mediaServerPassword)
                     .textFieldStyle(.roundedBorder)
-            } else if mediaServerProtocol != .plex && mediaServerProtocol != .omniplayDocker {
+            } else if mediaServerProtocol != .plex {
                 TextField("用户名 / 用户 ID（可选）", text: $mediaServerUserId)
                     .textFieldStyle(.roundedBorder)
             }
@@ -1156,12 +1838,7 @@ struct PosterWallView: View {
                 }
                 .disabled(mediaServerIsPreScanning)
             }
-            if mediaServerProtocol == .omniplayDocker {
-                TextField("用户名", text: $mediaServerUserId)
-                    .textFieldStyle(.roundedBorder)
-                SecureField("密码", text: $mediaServerPassword)
-                    .textFieldStyle(.roundedBorder)
-            } else if mediaServerProtocol != .webdav {
+            if mediaServerProtocol != .webdav {
                 SecureField(mediaServerTokenPlaceholder, text: $mediaServerToken)
                     .textFieldStyle(.roundedBorder)
             }
@@ -1186,44 +1863,29 @@ struct PosterWallView: View {
         }
     }
 
-    private func omniPlayDockerSourceSheet() -> some View {
+    private func sourceInfoSheet(_ source: MediaSource) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("添加 OmniPlay Docker")
-                .font(.title3.bold())
-            Text("填写 Docker 版服务地址和登录账号，保存后会立即同步 Docker 端电影、剧集和已扫描元数据。")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            Text("媒体源登录信息").font(.title3.bold())
+            Text(source.displayNameWithActiveLabel).font(.headline)
+            Text("地址：\(source.displayBaseURL())").font(.caption).foregroundColor(.secondary)
+            Divider()
+            Text("协议：\(sourceProtocolLabel(source))")
+            Text("登录信息")
+                .font(.subheadline.weight(.semibold))
+            Text(source.authConfig?.isEmpty == false ? source.authConfig! : "未保存登录信息")
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-
-            TextField("显示名称（可选）", text: $mediaServerName)
-                .textFieldStyle(.roundedBorder)
-            TextField(mediaServerAddressPlaceholder, text: $mediaServerBaseURL)
-                .textFieldStyle(.roundedBorder)
-            TextField("局域网自定义标签（默认：局域网）", text: $mediaServerLocalLabel)
-                .textFieldStyle(.roundedBorder)
-            externalAddressEditor(addresses: $pendingExternalAddresses)
-            TextField("用户名", text: $mediaServerUserId)
-                .textFieldStyle(.roundedBorder)
-            SecureField("密码", text: $mediaServerPassword)
-                .textFieldStyle(.roundedBorder)
-
-            if let mediaServerMessage {
-                Text(mediaServerMessage)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
             HStack {
                 Spacer()
-                Button("取消") { isShowingMediaServerSheet = false }
-                Button(mediaServerIsPreScanning ? "同步中..." : "保存并同步") { saveMediaServerSource() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(mediaServerIsPreScanning)
+                Button("关闭") {
+                    isShowingSourceInfoSheet = false
+                    sourceInfoTarget = nil
+                }
             }
         }
         .padding(20)
-        .frame(width: 500)
+        .frame(width: 480)
     }
 
     private func renameSourceSheet() -> some View {
@@ -1434,7 +2096,7 @@ struct PosterWallView: View {
             credentialID: credentialID
         )
     }
-
+    
     private func fetchLatestWebDAVSourceSnapshot() -> RecentWebDAVHistoryItem? {
         guard let queue = AppDatabase.shared.dbQueue else { return nil }
         return try? queue.read { db -> RecentWebDAVHistoryItem? in
@@ -1459,7 +2121,7 @@ struct PosterWallView: View {
             )
         }
     }
-
+    
     private func readableWebDAVURL(from raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
@@ -1476,7 +2138,6 @@ struct PosterWallView: View {
         case .plex: return "Plex"
         case .emby: return "Emby"
         case .jellyfin: return "Jellyfin"
-        case .omniplayDocker: return "OmniPlay Docker"
         default: return "媒体源"
         }
     }
@@ -1582,9 +2243,6 @@ struct PosterWallView: View {
                     .menuStyle(.borderlessButton)
                 }
             }
-            TextField("局域网自定义标签（默认：局域网）", text: $webDAVLocalLabel)
-                .textFieldStyle(.roundedBorder)
-            externalAddressEditor(addresses: $pendingExternalAddresses)
             TextField("用户名（可选）", text: $webDAVUsername)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("webdav.username")
@@ -1693,9 +2351,6 @@ struct PosterWallView: View {
             TextField("WebDAV 地址，例如 https://nas:5006/dav", text: $webDAVBrowserBaseURL)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("webdav.baseURL")
-            TextField("局域网自定义标签（默认：局域网）", text: $webDAVBrowserLocalLabel)
-                .textFieldStyle(.roundedBorder)
-            externalAddressEditor(addresses: $webDAVBrowserExternalAddresses)
             TextField("用户名（可选）", text: $webDAVBrowserUsername)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("webdav.username")
@@ -1713,6 +2368,7 @@ struct PosterWallView: View {
             HStack {
                 Spacer()
                 Button("取消") {
+                    shouldShowWebDAVBrowserAfterLoginDismiss = false
                     isShowingWebDAVPreScanLoginSheet = false
                     resetWebDAVBrowserState(clearLogin: true)
                 }
@@ -1770,11 +2426,16 @@ struct PosterWallView: View {
                     .disabled(webDAVBrowserPathStack.isEmpty || webDAVBrowserIsLoading)
                     Spacer()
                     Button {
-                        loadWebDAVBrowserDirectory(at: webDAVBrowserCurrentURL, replaceStackWith: webDAVBrowserPathStack)
+                        loadWebDAVBrowserDirectory(
+                            at: webDAVBrowserCurrentURL.isEmpty ? webDAVBrowserBaseURL : webDAVBrowserCurrentURL,
+                            replaceStackWith: webDAVBrowserPathStack
+                        )
                     } label: {
                         Label("刷新", systemImage: "arrow.clockwise")
                     }
-                    .disabled(webDAVBrowserCurrentURL.isEmpty || webDAVBrowserIsLoading)
+                    // Keep refresh available during the first tunnel request so a
+                    // stalled/empty response can be retried without leaving the sheet.
+                    .disabled(webDAVBrowserCurrentURL.isEmpty && webDAVBrowserBaseURL.isEmpty)
                 }
             }
 
@@ -1872,7 +2533,7 @@ struct PosterWallView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
-    private func saveWebDAVBrowserLoginAndBrowse() {
+    private func saveWebDAVBrowserLoginAndBrowse(presentBrowserWhenLoaded: Bool = true) {
         let normalizedInput = MediaSourceProtocol.webdav.normalizedBaseURL(webDAVBrowserBaseURL)
         guard MediaSourceProtocol.webdav.isValidBaseURL(normalizedInput) else {
             webDAVBrowserMessage = "WebDAV 地址无效，请输入 http(s):// 开头且包含主机名的地址。"
@@ -1919,9 +2580,13 @@ struct PosterWallView: View {
                     webDAVBrowserIsLoading = false
                     webDAVBrowserMessage = items.isEmpty ? "连接成功，但当前目录没有可浏览的子文件夹。" : nil
                     webDAVBrowserMessageIsError = false
-                    isShowingWebDAVPreScanLoginSheet = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                        isShowingWebDAVFolderBrowserSheet = true
+                    if presentBrowserWhenLoaded {
+                        if isShowingWebDAVPreScanLoginSheet {
+                            shouldShowWebDAVBrowserAfterLoginDismiss = true
+                            isShowingWebDAVPreScanLoginSheet = false
+                        } else {
+                            isShowingWebDAVFolderBrowserSheet = true
+                        }
                     }
                 }
             } catch {
@@ -2022,6 +2687,8 @@ struct PosterWallView: View {
         let credentialID = webDAVBrowserCredentialID
         let configuredExternalAddresses = webDAVBrowserExternalAddresses
         let browserLocalLabel = webDAVBrowserLocalLabel
+        let luckyConfiguration = pendingLuckyConfiguration
+        let luckyRootAddress = webDAVBrowserBaseURL
 
         webDAVBrowserIsBatchMounting = true
         webDAVBrowserMessage = nil
@@ -2065,6 +2732,13 @@ struct PosterWallView: View {
                         configuration.localLabel = browserLocalLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "局域网" : browserLocalLabel.trimmingCharacters(in: .whitespacesAndNewlines)
                         let normalizedExternal = normalizedExternalAddresses(configuredExternalAddresses, protocolKind: folder.protocolKind)
                         configuration.externalAddresses = normalizedExternal
+                        if var mountedLuckyConfiguration = luckyConfiguration {
+                            mountedLuckyConfiguration.pathSuffix = relativePathSuffix(
+                                from: luckyRootAddress,
+                                to: baseURL
+                            )
+                            configuration.luckyStun = mountedLuckyConfiguration
+                        }
                         if existingID == nil || configuration.activeAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             configuration.activeAddress = baseURL
                             configuration.activeLabel = configuration.localLabel
@@ -2123,6 +2797,7 @@ struct PosterWallView: View {
             webDAVBrowserProtocol = .webdav
             webDAVBrowserLocalLabel = "局域网"
             webDAVBrowserExternalAddresses = []
+            pendingLuckyConfiguration = nil
         }
         webDAVBrowserCurrentURL = ""
         webDAVBrowserPathStack = []
@@ -2132,6 +2807,18 @@ struct PosterWallView: View {
         webDAVBrowserIsLoading = false
         webDAVBrowserIsBatchMounting = false
         webDAVBrowserStarredFolders = []
+    }
+
+    nonisolated private func relativePathSuffix(from rootAddress: String, to mountedAddress: String) -> String {
+        guard let root = URLComponents(string: rootAddress),
+              let mounted = URLComponents(string: mountedAddress) else { return "" }
+        let rootPath = root.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let mountedPath = mounted.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !mountedPath.isEmpty else { return "" }
+        if rootPath.isEmpty { return mountedPath }
+        if mountedPath == rootPath { return "" }
+        let prefix = rootPath + "/"
+        return mountedPath.hasPrefix(prefix) ? String(mountedPath.dropFirst(prefix.count)) : mountedPath
     }
 
     nonisolated private func sanitizedWebDAVBrowserURL(_ raw: String) -> String {
@@ -2159,9 +2846,6 @@ struct PosterWallView: View {
             let libraryId = MediaServerAuthConfig.decode(authConfig)?.libraryId?.trimmingCharacters(in: .whitespacesAndNewlines)
             return "\(protocolKind.rawValue):\(normalizedURL):\(libraryId?.isEmpty == false ? libraryId! : "all")"
         }
-        if protocolKind == .omniplayDocker {
-            return "\(protocolKind.rawValue):\(normalizedURL)"
-        }
         return "\(protocolKind.rawValue):\(normalizedURL)"
     }
 
@@ -2172,7 +2856,7 @@ struct PosterWallView: View {
     private func mountedRemoteBrowserKeys(from sources: [MediaSource]) -> Set<String> {
         Set(sources.compactMap { source in
             guard let protocolKind = source.protocolKind else { return nil }
-            guard protocolKind == .webdav || protocolKind == .plex || protocolKind == .emby || protocolKind == .jellyfin || protocolKind == .omniplayDocker else { return nil }
+            guard protocolKind == .webdav || protocolKind == .plex || protocolKind == .emby || protocolKind == .jellyfin else { return nil }
             return remoteBrowserKey(protocolKind: protocolKind, baseURL: source.baseUrl, authConfig: source.authConfig)
         })
     }
@@ -2191,7 +2875,7 @@ struct PosterWallView: View {
                 webDAVName = device.name.isEmpty ? "WebDAV \(device.ipAddress)" : device.name
             }
             webDAVValidationMessage = nil
-        case .plex, .emby, .jellyfin, .omniplayDocker:
+        case .plex, .emby, .jellyfin:
             prepareMediaServerLogin(for: device)
             isShowingAddWebDAVSheet = false
             isShowingManualRemoteSourceSheet = true
@@ -2225,16 +2909,10 @@ struct PosterWallView: View {
             mediaServerProtocol = .emby
         case .jellyfin:
             mediaServerProtocol = .jellyfin
-        case .omniplayDocker:
-            mediaServerProtocol = .omniplayDocker
         default:
             mediaServerProtocol = .plex
         }
-        if mediaServerProtocol == .omniplayDocker {
-            mediaServerName = "OmniPlay Docker"
-        } else {
-            mediaServerName = device.name.isEmpty ? "\(mediaServerProtocolLabel(mediaServerProtocol)) \(device.ipAddress)" : device.name
-        }
+        mediaServerName = device.name.isEmpty ? "\(mediaServerProtocolLabel(mediaServerProtocol)) \(device.ipAddress)" : device.name
         mediaServerBaseURL = discoveredDeviceURLString(for: device)
         mediaServerToken = ""
         mediaServerUserId = ""
@@ -2268,19 +2946,6 @@ struct PosterWallView: View {
         mediaServerLocalLabel = "局域网"
         pendingExternalAddresses = []
         mediaServerMessage = mediaServerConnectionHint(for: .plex)
-    }
-
-    private func resetOmniPlayDockerForm() {
-        mediaServerProtocol = .omniplayDocker
-        mediaServerName = ""
-        mediaServerBaseURL = defaultMediaServerBaseURL(for: .omniplayDocker)
-        mediaServerToken = ""
-        mediaServerUserId = ""
-        mediaServerPassword = ""
-        mediaServerIsPreScanning = false
-        mediaServerLocalLabel = "局域网"
-        pendingExternalAddresses = []
-        mediaServerMessage = mediaServerConnectionHint(for: .omniplayDocker)
     }
 
     private func authorizePlex() {
@@ -2331,24 +2996,6 @@ struct PosterWallView: View {
             let host = URL(string: normalizedURL)?.host ?? "媒体服务器"
             return "\(mediaServerProtocolLabel(mediaServerProtocol)) · \(host)"
         }()
-        if mediaServerProtocol == .omniplayDocker {
-            let username = mediaServerUserId.trimmingCharacters(in: .whitespacesAndNewlines)
-            let password = mediaServerPassword.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !username.isEmpty, !password.isEmpty else {
-                mediaServerMessage = mediaServerMissingTokenMessage(for: mediaServerProtocol)
-                return nil
-            }
-            return MediaServerSourceDraft(
-                protocolKind: mediaServerProtocol,
-                normalizedURL: normalizedURL,
-                token: password,
-                userId: username,
-                finalName: finalName,
-                authConfig: nil,
-                localLabel: mediaServerLocalLabel,
-                externalAddresses: normalizedExternalAddresses(pendingExternalAddresses, protocolKind: mediaServerProtocol)
-            )
-        }
 
         let token = mediaServerToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty else {
@@ -2397,10 +3044,6 @@ struct PosterWallView: View {
     private func saveMediaServerSource() {
         guard let draft = currentMediaServerDraft() else { return }
 
-        if draft.protocolKind == .omniplayDocker {
-            saveOmniPlayDockerSource(draft: draft)
-            return
-        }
 
         Task {
             do {
@@ -2446,85 +3089,100 @@ struct PosterWallView: View {
         }
     }
 
-    private func saveOmniPlayDockerSource(draft: MediaServerSourceDraft) {
-        Task {
-            do {
-                await MainActor.run {
-                    mediaServerIsPreScanning = true
-                    mediaServerMessage = "正在登录 OmniPlay Docker..."
-                }
-                let client = try OmniPlayDockerClient(baseURLString: draft.normalizedURL)
-                try await client.login(username: draft.userId, password: draft.token)
-                let authConfig = OmniPlayDockerAuthConfig.encode(username: draft.userId, sessionCookie: client.sessionCookie)
-                let sourceId = try await AppDatabase.shared.dbQueue.write { db -> Int64 in
-                    let existing = try MediaSource.fetchAll(
-                        db,
-                        sql: "SELECT * FROM mediaSource WHERE protocolType = ?",
-                        arguments: [MediaSourceProtocol.omniplayDocker.rawValue]
-                    ).first { source in
-                        let configuration = source.addressConfiguration()
-                        return MediaSourceProtocol.omniplayDocker.normalizedBaseURL(source.baseUrl).caseInsensitiveCompare(draft.normalizedURL) == .orderedSame
-                            || MediaSourceProtocol.omniplayDocker.normalizedBaseURL(configuration.localAddress).caseInsensitiveCompare(draft.normalizedURL) == .orderedSame
-                    }
-                    if var existing {
-                        existing.name = draft.finalName
-                        existing.authConfig = authConfig
-                        existing.isEnabled = true
-                        existing.disabledAt = nil
-                        var configuration = existing.addressConfiguration()
-                        configuration.localAddress = draft.normalizedURL
-                        configuration.localLabel = draft.localLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "局域网" : draft.localLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-                        configuration.externalAddresses = draft.externalAddresses
-                        if configuration.activeAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            configuration.activeAddress = draft.normalizedURL
-                            configuration.activeLabel = configuration.localLabel
-                        }
-                        existing.setAddressConfiguration(configuration)
-                        try existing.update(db)
-                        return existing.id ?? 0
-                    }
+    private func saveLuckyStunSource() {
+        guard let rule = luckyStunRules.first(where: { $0.id == luckyRuleID }),
+              let address = LuckyStunClient.normalizeAddress(rule.address) else {
+            luckyStatusMessage = "请先登录检测并选择有效的穿透规则。"
+            return
+        }
+        let managementURL = luckyManagementURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let luckyAccount = luckyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let mediaAccount = luckyDockerUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let customDisplayName = luckySourceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = customDisplayName.isEmpty
+            ? "Lucky STUN · \(rule.name)"
+            : customDisplayName
+        guard !managementURL.isEmpty, isLuckySourceCredentialComplete else {
+            luckyStatusMessage = "请填写 Lucky 管理地址和媒体源登录信息。"
+            return
+        }
 
-                    var source = MediaSource(
-                        id: nil,
-                        name: draft.finalName,
-                        protocolType: MediaSourceProtocol.omniplayDocker.rawValue,
-                        baseUrl: draft.normalizedURL,
-                        authConfig: authConfig,
-                        isEnabled: true,
-                        disabledAt: nil
+        let luckyConfiguration = LuckyStunSourceConfiguration(
+            managementURL: managementURL,
+            username: luckyAccount,
+            password: luckyPassword,
+            ruleID: rule.id,
+            ruleName: rule.name,
+            displayName: customDisplayName,
+            autoUpdate: luckyAutoUpdate,
+            updateIntervalMinutes: luckyUpdateIntervalMinutes,
+            lastUpdatedAt: Date().timeIntervalSince1970
+        )
+
+        if luckySourceProtocol == .webdav {
+            pendingLuckyConfiguration = luckyConfiguration
+            webDAVBrowserName = finalName
+            let browserAddress = sanitizedWebDAVBrowserURL(address)
+            webDAVBrowserBaseURL = browserAddress
+            webDAVBrowserCurrentURL = browserAddress
+            webDAVBrowserUsername = mediaAccount
+            webDAVBrowserPassword = luckyDockerPassword
+            webDAVBrowserProtocol = .webdav
+            webDAVBrowserLocalLabel = ""
+            webDAVBrowserExternalAddresses = []
+            webDAVBrowserPathStack = []
+            webDAVBrowserItems = []
+            webDAVBrowserStarredFolders = []
+            webDAVBrowserMessage = nil
+            webDAVBrowserMessageIsError = false
+            webDAVBrowserIsLoading = false
+            shouldStartLuckyWebDAVAfterDismiss = true
+            isShowingLuckyStunSourceSheet = false
+            return
+        }
+
+        if luckySourceProtocol == .plex || luckySourceProtocol == .emby || luckySourceProtocol == .jellyfin {
+            isTestingLuckySource = true
+            luckyStatusMessage = "正在读取 \(mediaServerProtocolLabel(luckySourceProtocol)) 媒体库..."
+            Task {
+                do {
+                    let items = try await MediaServerLibraryBrowser().listLibraries(
+                        protocolKind: luckySourceProtocol,
+                        baseURL: address,
+                        token: luckyDockerPassword,
+                        userId: mediaAccount
                     )
-                    let localLabel = draft.localLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "局域网" : draft.localLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-                    source.setAddressConfiguration(MediaSourceAddressConfiguration(
-                        localAddress: draft.normalizedURL,
-                        localLabel: localLabel,
-                        externalAddresses: draft.externalAddresses,
-                        activeAddress: draft.normalizedURL,
-                        activeLabel: localLabel
-                    ))
-                    try source.insert(db)
-                    return db.lastInsertedRowID
-                }
-
-                let source = try await AppDatabase.shared.dbQueue.read { db in
-                    try MediaSource.fetchOne(db, key: sourceId)
-                }
-                if let source {
-                    _ = await libraryManager.syncOmniPlayDockerSourceWithResult(source)
-                }
-
-                await MainActor.run {
-                    mediaServerIsPreScanning = false
-                    mediaServerMessage = "Docker 同步完成"
-                    dismissRemoteSourceForm()
-                    loadData()
-                }
-            } catch {
-                await MainActor.run {
-                    mediaServerIsPreScanning = false
-                    mediaServerMessage = "Docker 连接失败：\(error.localizedDescription)"
+                    await MainActor.run {
+                        pendingLuckyConfiguration = luckyConfiguration
+                        webDAVBrowserProtocol = luckySourceProtocol
+                        webDAVBrowserName = finalName
+                        webDAVBrowserBaseURL = address
+                        webDAVBrowserLocalLabel = ""
+                        webDAVBrowserExternalAddresses = []
+                        webDAVBrowserUsername = ""
+                        webDAVBrowserPassword = ""
+                        webDAVBrowserCredentialID = nil
+                        webDAVBrowserCurrentURL = address
+                        webDAVBrowserPathStack = []
+                        webDAVBrowserItems = items
+                        webDAVBrowserMountedURLs = mountedRemoteBrowserKeys(from: mediaSources)
+                        webDAVBrowserStarredFolders = []
+                        webDAVBrowserMessage = items.isEmpty ? "连接成功，但当前服务器没有可挂载的媒体库。" : "请选择要挂载的媒体库。"
+                        webDAVBrowserMessageIsError = false
+                        isTestingLuckySource = false
+                        isShowingLuckyStunSourceSheet = false
+                        isShowingWebDAVFolderBrowserSheet = true
+                    }
+                } catch {
+                    await MainActor.run {
+                        isTestingLuckySource = false
+                        luckyStatusMessage = "媒体库读取失败：\(error.localizedDescription)"
+                    }
                 }
             }
+            return
         }
+
     }
 
     private func saveWebDAVSource() {
@@ -2596,7 +3254,11 @@ struct PosterWallView: View {
                         configuration.activeLabel = configuration.localLabel
                     }
                     source.setAddressConfiguration(configuration)
-                    if existingID == nil { try source.insert(db) } else { try source.update(db) }
+                    if existingID == nil {
+                        try source.insert(db)
+                    } else {
+                        try source.update(db)
+                    }
                 }
 
                 await MainActor.run {
@@ -2700,10 +3362,10 @@ struct PosterWallView: View {
             await MainActor.run {
                 checkingSourceIDs.remove(sourceID)
                 if result.isReachable && persisted {
-                    sourceConnectivityStatus[sourceID] = "连接成功：\(result.label) · \(result.address)"
+                    sourceConnectivityStatus[sourceID] = "连接成功：\(result.address)"
                     loadData()
                 } else if result.isReachable {
-                    sourceConnectivityStatus[sourceID] = "连接成功：\(result.label) · \(result.address)"
+                    sourceConnectivityStatus[sourceID] = "连接成功：\(result.address)"
                 } else {
                     sourceConnectivityStatus[sourceID] = result.message
                 }
@@ -2725,35 +3387,59 @@ struct PosterWallView: View {
         return result
     }
 
-    private func checkSourceCandidates(source: MediaSource, candidates: [SourceAddressCandidate]) async -> SourceConnectivityResult {
-        guard let protocolKind = source.protocolKind else { return SourceConnectivityResult(isReachable: false, address: source.baseUrl, label: "", message: "媒体源协议无效。") }
+    private func checkSourceCandidates(
+        source: MediaSource,
+        candidates: [SourceAddressCandidate]
+    ) async -> SourceConnectivityResult {
+        guard let protocolKind = source.protocolKind else {
+            return SourceConnectivityResult(isReachable: false, address: source.baseUrl, label: "", message: "媒体源协议无效。")
+        }
         var failures: [String] = []
         for candidate in candidates {
             do {
                 switch protocolKind {
                 case .local:
                     var isDirectory: ObjCBool = false
-                    guard FileManager.default.fileExists(atPath: candidate.address, isDirectory: &isDirectory), isDirectory.boolValue else { throw NSError(domain: "OmniPlayConnectivity", code: 1, userInfo: [NSLocalizedDescriptionKey: "目录不存在或不可访问"]) }
+                    guard FileManager.default.fileExists(atPath: candidate.address, isDirectory: &isDirectory), isDirectory.boolValue else {
+                        throw NSError(domain: "OmniPlayConnectivity", code: 1, userInfo: [NSLocalizedDescriptionKey: "目录不存在或不可访问"])
+                    }
                 case .webdav:
-                    let credential = WebDAVCredentialStore.shared.credentialID(from: source.authConfig).flatMap { WebDAVCredentialStore.shared.loadCredential(id: $0) } ?? WebDAVCredentialStore.shared.decodeLegacyCredential(from: source.authConfig)
-                    let result = await WebDAVPreflightChecker().check(baseURL: candidate.address, username: credential?.username ?? "", password: credential?.password ?? "")
+                    let credential = WebDAVCredentialStore.shared.credentialID(from: source.authConfig).flatMap { WebDAVCredentialStore.shared.loadCredential(id: $0) }
+                        ?? WebDAVCredentialStore.shared.decodeLegacyCredential(from: source.authConfig)
+                    let result = await WebDAVPreflightChecker().check(
+                        baseURL: candidate.address,
+                        username: credential?.username ?? "",
+                        password: credential?.password ?? ""
+                    )
                     guard result.isReachable else { throw NSError(domain: "OmniPlayConnectivity", code: 2, userInfo: [NSLocalizedDescriptionKey: result.message]) }
                 case .plex, .emby, .jellyfin:
                     let auth = MediaServerAuthConfig.decode(source.authConfig)
-                    let result = await MediaServerPreflightChecker().check(protocolKind: protocolKind, baseURL: candidate.address, token: auth?.token ?? "", userId: auth?.userId ?? "")
+                    let result = await MediaServerPreflightChecker().check(
+                        protocolKind: protocolKind,
+                        baseURL: candidate.address,
+                        token: auth?.token ?? "",
+                        userId: auth?.userId ?? ""
+                    )
                     guard result.isReachable else { throw NSError(domain: "OmniPlayConnectivity", code: 3, userInfo: [NSLocalizedDescriptionKey: result.message]) }
-                case .omniplayDocker:
-                    let auth = OmniPlayDockerAuthConfig.decode(source.authConfig)
-                    guard let cookie = auth?.sessionCookie, !cookie.isEmpty else { throw OmniPlayDockerClientError.authenticationRequired }
-                    let client = try OmniPlayDockerClient(baseURLString: candidate.address, sessionCookie: cookie)
-                    _ = try await client.libraryItems()
                 case .direct:
                     break
                 }
-                return SourceConnectivityResult(isReachable: true, address: protocolKind.normalizedBaseURL(candidate.address), label: candidate.label, message: "连接成功")
-            } catch { failures.append("\(candidate.label)：\(error.localizedDescription)") }
+                return SourceConnectivityResult(
+                    isReachable: true,
+                    address: protocolKind.normalizedBaseURL(candidate.address),
+                    label: candidate.label,
+                    message: "连接成功"
+                )
+            } catch {
+                failures.append("\(candidate.label)：\(error.localizedDescription)")
+            }
         }
-        return SourceConnectivityResult(isReachable: false, address: source.baseUrl, label: "", message: failures.isEmpty ? "没有可检测的媒体源地址。" : failures.joined(separator: "；"))
+        return SourceConnectivityResult(
+            isReachable: false,
+            address: source.baseUrl,
+            label: "",
+            message: failures.isEmpty ? "没有可检测的媒体源地址。" : failures.joined(separator: "；")
+        )
     }
 
     private func loadData() {
@@ -2779,6 +3465,7 @@ struct PosterWallView: View {
                     self.mediaSources = fetchedSources
                     self.webDAVBrowserMountedURLs = self.mountedRemoteBrowserKeys(from: fetchedSources)
                     self.continueWatchingMovies = fetchedContinueWatching
+                    self.refreshCategoryFolderState()
                     self.completeLoadDataCycle()
                 }
             } catch {
@@ -2807,29 +3494,6 @@ struct PosterWallView: View {
         }
     }
 
-    private func startDockerAutoSyncIfNeeded() {
-        guard dockerAutoSyncTask == nil else { return }
-        dockerAutoSyncTask = Task {
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
-            while !Task.isCancelled {
-                await syncEnabledOmniPlayDockerSourcesInBackground()
-                try? await Task.sleep(nanoseconds: 10 * 60 * 1_000_000_000)
-            }
-        }
-    }
-
-    private func syncEnabledOmniPlayDockerSourcesInBackground() async {
-        guard !isProcessing else { return }
-        let sources = (try? await AppDatabase.shared.dbQueue.read { db in
-            try MediaSource.fetchEnabledScannableSources(in: db).filter { $0.protocolKind == .omniplayDocker }
-        }) ?? []
-        guard !sources.isEmpty else { return }
-        for source in sources {
-            if Task.isCancelled { return }
-            _ = await libraryManager.syncOmniPlayDockerSourceWithResult(source)
-        }
-    }
-
     private func cancelCurrentScanRunForSource(_ sourceID: Int64) {
         removedSourceIDsDuringRun.insert(sourceID)
         ThumbnailManager.shared.cancelTasks(forSourceID: sourceID)
@@ -2843,7 +3507,7 @@ struct PosterWallView: View {
             processingMessage = ""
         }
     }
-
+    
     private func removeMediaSource(_ source: MediaSource, removeCredential: Bool) {
         let removingSourceID = source.id
         if let sid = removingSourceID {
@@ -2909,7 +3573,7 @@ struct PosterWallView: View {
             }
         }
     }
-
+    
     private func toggleMediaSourceEnabled(_ source: MediaSource) {
         guard let sid = source.id else { return }
         let enabling = !source.isEnabled
@@ -2966,6 +3630,24 @@ struct PosterWallView: View {
         }
     }
 
+    // 统一入口：按首页显示顺序补抓缺失的分集剧照。
+    // 剧照下载是后台长任务，这里不阻塞扫描流程；进度通过 ThumbnailManager.progressMessage 展示。
+    private func enqueueEpisodeStillBackfill(runID: UUID, movieIDs: [Int64]) async {
+        if !movieIDs.isEmpty, await MainActor.run(body: { self.currentScanRunID == runID }) {
+            // 显式传入的剧集优先，其余影片按首页顺序补在后面。
+            ThumbnailManager.shared.enqueueMissingEpisodeThumbnailsAcrossLibrary(orderedMovieIDs: movieIDs)
+        } else {
+            await MainActor.run {
+                guard self.currentScanRunID == runID else { return }
+                withAnimation { self.processingMessage = "补齐分集剧照..." }
+            }
+            let orderedMovieIDs = await MainActor.run {
+                self.displayedMovies.compactMap(\.id)
+            }
+            ThumbnailManager.shared.enqueueMissingEpisodeThumbnailsAcrossLibrary(orderedMovieIDs: orderedMovieIDs)
+        }
+    }
+
     private func triggerScanAndScrape(sourceID: Int64? = nil, sourceIDs: [Int64]? = nil, skipTMDBScrape: Bool = false) {
         guard !isProcessing else { return }
         currentScanTask?.cancel()
@@ -2977,7 +3659,7 @@ struct PosterWallView: View {
         }
         removedSourceIDsDuringRun = []
         activeScanningSourceID = nil
-
+        
         currentScanTask = Task(priority: .utility) {
             do {
                 if Task.isCancelled {
@@ -3000,12 +3682,19 @@ struct PosterWallView: View {
                     }
                     return try MediaSource.fetchEnabledScannableSources(in: db)
                 }
-
+                
                 if validSources.isEmpty {
-                    await MainActor.run { finishScanRun(runID: runID, reloadData: true) }
+                    await MainActor.run {
+                        finishScanRun(runID: runID, reloadData: true)
+                        // 没有任何可扫描的启用媒体源时给出可见提示
+                        if currentScanRunID == runID {
+                            scanErrorMessage = "扫描刮削失败：没有已启用且可扫描的媒体源，请先在“添加媒体源”里挂载本地目录或 WebDAV/Plex/Emby/Jellyfin。"
+                            isShowingScanErrorAlert = true
+                        }
+                    }
                     return
                 }
-
+                
                 await MainActor.run {
                     guard self.currentScanRunID == runID else { return }
                     withAnimation { self.processingMessage = "扫描目录中..." }
@@ -3028,9 +3717,7 @@ struct PosterWallView: View {
                         }
                     }
                     let result: MediaSourceScanResult
-                    if source.protocolKind == .omniplayDocker {
-                        result = await libraryManager.syncOmniPlayDockerSourceWithResult(source)
-                    } else if skipTMDBScrape {
+                    if skipTMDBScrape {
                         result = await libraryManager.scanLocalSourceWithResult(
                             source,
                             deferUnidentifiedGroups: false
@@ -3058,7 +3745,7 @@ struct PosterWallView: View {
                             await MainActor.run { finishScanRun(runID: runID, reloadData: true) }
                             return
                         }
-                        if skipTMDBScrape && source.protocolKind != .omniplayDocker {
+                        if skipTMDBScrape {
                             await MainActor.run {
                                 guard self.currentScanRunID == runID else { return }
                                 withAnimation {
@@ -3074,7 +3761,6 @@ struct PosterWallView: View {
                         }
                     }
                 }
-
                 if Task.isCancelled {
                     await MainActor.run { finishScanRun(runID: runID, reloadData: true) }
                     return
@@ -3120,9 +3806,12 @@ struct PosterWallView: View {
                 if !hasPendingScrape {
                     await MainActor.run {
                         guard self.currentScanRunID == runID else { return }
-                        withAnimation { self.processingMessage = "没有需要 TMDB 刮削的内容" }
+                        withAnimation { self.processingMessage = "没有需要 TMDB 刮削的内容，检查缺失的分集剧照..." }
                     }
+                    // 库已经全部刮削过时不能直接 return，否则缺失的分集剧照永远不会补抓。
+                    await self.enqueueEpisodeStillBackfill(runID: runID, movieIDs: [])
                     await MainActor.run {
+                        guard self.currentScanRunID == runID else { return }
                         finishScanRun(runID: runID, reloadData: true)
                     }
                     return
@@ -3131,7 +3820,10 @@ struct PosterWallView: View {
                     guard self.currentScanRunID == runID else { return }
                     withAnimation { self.processingMessage = "检测 TMDB 连通性..." }
                 }
-                let tmdbConnection = await TMDBService.shared.checkConnection()
+                // 连通性探测在全局执行器上完成，检测期间主线程仍可响应界面与指针
+                let tmdbConnection = await Task.detached(priority: .utility) {
+                    await TMDBService.probeConnection(credential: TMDBService.credentialSource())
+                }.value
                 if !tmdbConnection.isConnected {
                     await MainActor.run {
                         guard self.currentScanRunID == runID else { return }
@@ -3162,25 +3854,101 @@ struct PosterWallView: View {
                     await MainActor.run { finishScanRun(runID: runID, reloadData: true) }
                     return
                 }
-                await MainActor.run {
-                    guard self.currentScanRunID == runID else { return }
-                    withAnimation { self.processingMessage = "补齐分集剧照..." }
-                }
-                let orderedMovieIDs = await MainActor.run {
-                    self.displayedMovies.compactMap(\.id)
-                }
-                ThumbnailManager.shared.enqueueMissingEpisodeThumbnailsAcrossLibrary(orderedMovieIDs: orderedMovieIDs)
+                await self.enqueueEpisodeStillBackfill(runID: runID, movieIDs: [])
 
                 await MainActor.run {
+                    guard self.currentScanRunID == runID else { return }
                     finishScanRun(runID: runID, reloadData: true)
                 }
             } catch {
-                await MainActor.run { finishScanRun(runID: runID, reloadData: true) }
+                await MainActor.run {
+                    finishScanRun(runID: runID, reloadData: true)
+                    // 失败时弹窗显示错误，避免“点了没反应”却看不到原因
+                    if currentScanRunID == runID {
+                        scanErrorMessage = "扫描刮削失败：\(error.localizedDescription)"
+                        isShowingScanErrorAlert = true
+                    }
+                }
             }
         }
     }
-
+    
 }
 
 // 🌟 彻底删除了原先几百行的内网目录浏览器 (SourceFileBrowserView)
 // 因为我们现在全部交给原生的 Finder 来选了！
+
+
+// 首页分类文件夹卡片：封面 + 名称 + 数量；鼠标悬停到右上角时出现编辑按钮
+// 隐藏导航栏标题：macOS 15+ 用 toolbar(removing:)，macOS 14 用空标题兜底
+private struct RemoveNavTitleModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.toolbar(removing: .title)
+        } else {
+            content.navigationTitle("")
+        }
+    }
+}
+
+private struct CategoryFolderCard<D: View>: View {
+    let group: CategoryFolderGroup
+    let posterPath: String?
+    let theme: AppTheme
+    let enableFastTooltip: Bool
+    let onEdit: () -> Void
+    @ViewBuilder let destination: () -> D
+    @State private var isHovering = false
+
+    var body: some View {
+        NavigationLink(destination: destination()) {
+            VStack(alignment: .leading, spacing: 8) {
+                ZStack(alignment: .topTrailing) {
+                    CachedPosterView(posterPath: posterPath)
+                        .frame(width: 160, height: 240)
+                        .cornerRadius(12)
+                        .shadow(color: .black.opacity(0.1), radius: 8, y: 4)
+                    if isHovering {
+                        Button(action: onEdit) {
+                            Image(systemName: "pencil")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 26, height: 26)
+                                .background(Circle().fill(.black.opacity(0.55)))
+                                .overlay(Circle().stroke(.white.opacity(0.3), lineWidth: 0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(8)
+                        .transition(.opacity)
+                        .conditionalHelp("编辑该文件夹封面与名称", show: enableFastTooltip)
+                    }
+                }
+                .onHover { hovering in
+                    withAnimation(.easeInOut(duration: 0.15)) { isHovering = hovering }
+                }
+                // 名称 + 数量数字 同行显示
+                HStack(spacing: 6) {
+                    Text(group.folder.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(theme.textPrimary)
+                        .lineLimit(1)
+                    Text("\(group.movies.count)")
+                        .font(.caption.weight(.medium))
+                        .foregroundColor(theme.textSecondary)
+                        .lineLimit(1)
+                }
+                .frame(width: 160, height: 20, alignment: .center)
+            }
+        }
+        .buttonStyle(.plain)
+        .conditionalHelp("打开「\(group.folder.name)」分类下的全部影视", show: enableFastTooltip)
+    }
+}
+
+// 首页分类文件夹的视图分组：一名导演/主演 + 其名下影视
+private struct CategoryFolderGroup: Identifiable {
+    let folder: CategoryFolder
+    let movies: [Movie]
+
+    var id: String { folder.id }
+}

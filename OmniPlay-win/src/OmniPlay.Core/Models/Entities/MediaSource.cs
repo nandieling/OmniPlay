@@ -24,6 +24,39 @@ public sealed class MediaSourceExternalAddress
     public string DisplayLabel => string.IsNullOrWhiteSpace(Label) ? "外网" : Label.Trim();
 }
 
+public sealed class LuckyStunSourceConfiguration
+{
+    [JsonPropertyName("managementURL")]
+    public string ManagementUrl { get; set; } = string.Empty;
+
+    [JsonPropertyName("username")]
+    public string Username { get; set; } = string.Empty;
+
+    [JsonPropertyName("password")]
+    public string Password { get; set; } = string.Empty;
+
+    [JsonPropertyName("ruleID")]
+    public string RuleId { get; set; } = string.Empty;
+
+    [JsonPropertyName("ruleName")]
+    public string RuleName { get; set; } = string.Empty;
+
+    [JsonPropertyName("displayName")]
+    public string DisplayName { get; set; } = string.Empty;
+
+    [JsonPropertyName("autoUpdate")]
+    public bool AutoUpdate { get; set; } = true;
+
+    [JsonPropertyName("updateIntervalMinutes")]
+    public int UpdateIntervalMinutes { get; set; } = 30;
+
+    [JsonPropertyName("lastUpdatedAt")]
+    public DateTimeOffset? LastUpdatedAt { get; set; }
+
+    [JsonPropertyName("pathSuffix")]
+    public string PathSuffix { get; set; } = string.Empty;
+}
+
 public sealed class MediaSourceAddressConfiguration
 {
     [JsonPropertyName("localAddress")]
@@ -41,6 +74,9 @@ public sealed class MediaSourceAddressConfiguration
     [JsonPropertyName("activeLabel")]
     public string ActiveLabel { get; set; } = string.Empty;
 
+    [JsonPropertyName("luckyStun")]
+    public LuckyStunSourceConfiguration? LuckyStun { get; set; }
+
     public MediaSourceAddressConfiguration Clone()
     {
         return new MediaSourceAddressConfiguration
@@ -56,7 +92,20 @@ public sealed class MediaSourceAddressConfiguration
                 LuckyRuleName = item.LuckyRuleName
             }).ToList(),
             ActiveAddress = ActiveAddress,
-            ActiveLabel = ActiveLabel
+            ActiveLabel = ActiveLabel,
+            LuckyStun = LuckyStun is null ? null : new LuckyStunSourceConfiguration
+            {
+                ManagementUrl = LuckyStun.ManagementUrl,
+                Username = LuckyStun.Username,
+                Password = LuckyStun.Password,
+                RuleId = LuckyStun.RuleId,
+                RuleName = LuckyStun.RuleName,
+                DisplayName = LuckyStun.DisplayName,
+                AutoUpdate = LuckyStun.AutoUpdate,
+                UpdateIntervalMinutes = LuckyStun.UpdateIntervalMinutes,
+                LastUpdatedAt = LuckyStun.LastUpdatedAt,
+                PathSuffix = LuckyStun.PathSuffix
+            }
         };
     }
 }
@@ -99,7 +148,6 @@ public sealed class MediaSource
         MediaSourceProtocol.Plex => "Plex",
         MediaSourceProtocol.Emby => "Emby",
         MediaSourceProtocol.Jellyfin => "Jellyfin",
-        MediaSourceProtocol.OmniPlayDocker => "OmniPlay Docker",
         _ => ProtocolType
     };
 
@@ -129,7 +177,6 @@ public sealed class MediaSource
             "plex" => MediaSourceProtocol.Plex,
             "emby" => MediaSourceProtocol.Emby,
             "jellyfin" => MediaSourceProtocol.Jellyfin,
-            "omniplaydocker" or "omniplay-docker" or "omniplay_docker" => MediaSourceProtocol.OmniPlayDocker,
             _ => null
         };
 
@@ -194,8 +241,129 @@ public sealed class MediaSource
 
     public string ActiveAddressLabel => GetAddressConfiguration().ActiveLabel;
 
+    // 媒体源行第一行：文件夹名称 + 媒体源类型
+    public string DisplayNameWithType
+    {
+        get
+        {
+            var label = HasLuckyStunSourceConfig ? "WebDAV 穿透" : ProtocolLabel;
+            return string.IsNullOrWhiteSpace(Name) ? label : Name + " · " + label;
+        }
+    }
+
+    // 媒体源行第二行：当前地址（穿透源显示真实文件夹名，而非随机隧道路径）
+    public string DisplayAddress
+    {
+        get
+        {
+            var configuration = GetAddressConfiguration();
+            var address = string.IsNullOrWhiteSpace(configuration.ActiveAddress) ? BaseUrl : configuration.ActiveAddress;
+            if (HasLuckyStunSourceConfig)
+            {
+                var suffix = (configuration.LuckyStun?.PathSuffix ?? string.Empty).Trim('/');
+                if (suffix.Length > 0 && Uri.TryCreate(address, UriKind.Absolute, out var luckyUri))
+                {
+                    var decodedSuffix = Uri.UnescapeDataString(suffix).Trim();
+                    if (decodedSuffix.Length > 0)
+                    {
+                        return luckyUri.Scheme + "://" + luckyUri.Authority + "/" + decodedSuffix;
+                    }
+                }
+            }
+            return DecodeUrlPathForDisplay(address);
+        }
+    }
+
+    private static string DecodeUrlPathForDisplay(string address)
+    {
+        if (!address.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+            !address.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            return address;
+        }
+
+        try
+        {
+            if (Uri.TryCreate(address, UriKind.Absolute, out var uri))
+            {
+                var path = Uri.UnescapeDataString(uri.AbsolutePath).TrimEnd('/');
+                return uri.Scheme + "://" + uri.Authority + (path.Length == 0 ? string.Empty : "/" + path);
+            }
+        }
+        catch (UriFormatException)
+        {
+        }
+
+        return address;
+    }
+
+    [JsonIgnore]
+    public double RowOpacity => IsEnabled ? 1.0 : 0.55;
+
+    public string? LuckyStunDisplayName
+    {
+        get
+        {
+            var configuration = GetAddressConfiguration();
+            if (configuration.LuckyStun is null)
+            {
+                return null;
+            }
+
+            var displayName = configuration.LuckyStun.DisplayName.Trim();
+            return string.IsNullOrWhiteSpace(displayName) ? null : displayName;
+        }
+    }
+
+    [JsonIgnore]
+    public bool HasLuckyStunSourceConfig => GetAddressConfiguration().LuckyStun is not null;
+
+    // 媒体源行图标：Lucky STUN 穿透 > WebDAV > SMB > 本地 > 媒体服务器
+    [JsonIgnore]
+    public string ProtocolIconKey => HasLuckyStunSourceConfig
+        ? "lucky"
+        : ProtocolKind switch
+        {
+            MediaSourceProtocol.WebDav => "webdav",
+            MediaSourceProtocol.Smb => "smb",
+            MediaSourceProtocol.Local => "local",
+            _ => "server"
+        };
+
+    [JsonIgnore]
+    public bool IsLuckySourceKind => HasLuckyStunSourceConfig;
+
+    [JsonIgnore]
+    public bool IsWebDavSourceKind => !HasLuckyStunSourceConfig && ProtocolKind == MediaSourceProtocol.WebDav;
+
+    [JsonIgnore]
+    public bool IsSmbSourceKind => !HasLuckyStunSourceConfig && ProtocolKind == MediaSourceProtocol.Smb;
+
+    [JsonIgnore]
+    public bool IsLocalSourceKind => !HasLuckyStunSourceConfig && ProtocolKind == MediaSourceProtocol.Local;
+
+    [JsonIgnore]
+    public bool IsServerSourceKind => !HasLuckyStunSourceConfig
+        && ProtocolKind is not (MediaSourceProtocol.WebDav or MediaSourceProtocol.Smb or MediaSourceProtocol.Local);
+
     public bool IsValidConfiguration()
     {
         return MediaSourceNormalizer.IsValidBaseUrl(ProtocolKind, BaseUrl);
+    }
+
+    public MediaSource Clone()
+    {
+        return new MediaSource
+        {
+            Id = Id,
+            Name = Name,
+            ProtocolType = ProtocolType,
+            BaseUrl = BaseUrl,
+            AddressConfig = AddressConfig,
+            AuthConfig = AuthConfig,
+            IsEnabled = IsEnabled,
+            DisabledAt = DisabledAt,
+            RemovedAt = RemovedAt
+        };
     }
 }

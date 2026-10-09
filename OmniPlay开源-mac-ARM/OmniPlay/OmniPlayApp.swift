@@ -16,22 +16,19 @@ struct OmniPlayApp: App {
         setenv("SDL_JOYSTICK_DISABLE", "1", 1)
         
         do {
-            // 1. 找到 Mac 系统的“应用支持”文件夹 (专门用来存 App 数据的地方)
-            let appSupportURL = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            // 1. 打开本地媒体库；若 iCloud 容器中有更新的云端库，先拉取覆盖
+            let (dbURL, container) = try OmniPlayICloudSync.openDatabase()
             
-            // 2. 为我们的“觅影”创建一个专属文件夹
-            let appDirectory = appSupportURL.appendingPathComponent("OmniPlay", isDirectory: true)
-            if !FileManager.default.fileExists(atPath: appDirectory.path) {
-                try FileManager.default.createDirectory(at: appDirectory, withIntermediateDirectories: true, attributes: nil)
+            // 2. 【核心点火】让咱们的 GRDB 引擎启动并建表！
+            try AppDatabase.shared.setup(databaseURL: dbURL, icloudContainerURL: container)
+            
+            print("✅ GRDB 数据库引擎已成功启动！文件路径：\(dbURL.path)"
+                + (container != nil ? "（iCloud 同步已启用）" : "（iCloud 不可用，纯本地模式）"))
+            
+            // 3. 启动后台定时同步（本地库 -> iCloud，每 60 秒 + 退出前）
+            if container != nil {
+                OmniPlayICloudSync.startBackgroundSync()
             }
-            
-            // 3. 设定数据库文件的名字和路径
-            let dbURL = appDirectory.appendingPathComponent("omniplay.sqlite")
-            
-            // 4. 【核心点火】让咱们的 GRDB 引擎启动并建表！
-            try AppDatabase.shared.setup(databaseURL: dbURL)
-            
-            print("✅ GRDB 数据库引擎已成功启动！文件路径：\(dbURL.path)")
             
         } catch {
             print("❌ 致命错误：数据库初始化失败：\(error)")

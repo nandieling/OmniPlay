@@ -46,6 +46,51 @@ public sealed class TmdbConnectionTesterTests : IDisposable
     }
 
     [Fact]
+    public async Task TestConnectionAsync_WithProxyGateway_RewritesRequestUrl()
+    {
+        var handler = new FakeConnectionHttpMessageHandler();
+        using var httpClient = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(5)
+        };
+        var settingsService = new JsonSettingsService(storagePaths);
+        var tester = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
+
+        var result = await tester.TestConnectionAsync(new TmdbSettings
+        {
+            CustomApiKey = "custom-key",
+            ProxyUrl = "https://proxy.example.com/tmdb"
+        });
+
+        Assert.True(result.Success);
+        Assert.StartsWith("https://proxy.example.com/tmdb/3/configuration", handler.LastRequestUri, StringComparison.Ordinal);
+        Assert.Contains("api_key=custom-key", handler.LastRequestUri, StringComparison.Ordinal);
+        Assert.DoesNotContain("api.themoviedb.org", handler.LastRequestUri, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TestConnectionAsync_WithInvalidProxyGateway_ReturnsInvalidMessage()
+    {
+        var handler = new FakeConnectionHttpMessageHandler();
+        using var httpClient = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(5)
+        };
+        var settingsService = new JsonSettingsService(storagePaths);
+        var tester = new TmdbMetadataClient(httpClient, storagePaths, settingsService);
+
+        var result = await tester.TestConnectionAsync(new TmdbSettings
+        {
+            CustomApiKey = "custom-key",
+            ProxyUrl = "not a url"
+        });
+
+        Assert.False(result.Success);
+        Assert.Contains("代理网关地址无效", result.Message, StringComparison.Ordinal);
+        Assert.Equal(string.Empty, handler.LastRequestUri);
+    }
+
+    [Fact]
     public async Task TestConnectionAsync_UsesCustomAccessTokenAsBearerCredential()
     {
         var handler = new FakeConnectionHttpMessageHandler();

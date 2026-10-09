@@ -19,7 +19,6 @@ public static class MediaSourceNormalizer
             MediaSourceProtocol.Plex => NormalizeHttpUrl(trimmed, 32400),
             MediaSourceProtocol.Emby => NormalizeHttpUrl(trimmed, 8096),
             MediaSourceProtocol.Jellyfin => NormalizeHttpUrl(trimmed, 8096),
-            MediaSourceProtocol.OmniPlayDocker => NormalizeHttpUrl(trimmed, 45722),
             _ => trimmed
         };
     }
@@ -41,7 +40,7 @@ public static class MediaSourceNormalizer
             MediaSourceProtocol.Smb => normalized.StartsWith(@"\\", StringComparison.Ordinal)
                                        && normalized.Trim('\\').Length > 0,
             MediaSourceProtocol.Direct => normalized == "/",
-            MediaSourceProtocol.Plex or MediaSourceProtocol.Emby or MediaSourceProtocol.Jellyfin or MediaSourceProtocol.OmniPlayDocker =>
+            MediaSourceProtocol.Plex or MediaSourceProtocol.Emby or MediaSourceProtocol.Jellyfin =>
                 Uri.TryCreate(normalized, UriKind.Absolute, out var serverUri)
                 && (serverUri.Scheme == Uri.UriSchemeHttp || serverUri.Scheme == Uri.UriSchemeHttps)
                 && !string.IsNullOrWhiteSpace(serverUri.Host),

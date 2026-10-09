@@ -116,7 +116,7 @@ public sealed class VideoFileRepositoryTests : IDisposable
         await SeedMovieFileAsync(movieId: -1011, videoFileId: "movie-in-progress");
         await SeedMovieFileAsync(movieId: -1012, videoFileId: "movie-watched");
 
-        await repository.UpdatePlaybackStateAsync("movie-in-progress", playProgress: 1930, durationSeconds: 2000);
+        await repository.UpdatePlaybackStateAsync("movie-in-progress", playProgress: 1890, durationSeconds: 2000);
         await repository.UpdatePlaybackStateAsync("movie-watched", playProgress: 1940, durationSeconds: 2000);
 
         var states = await repository.GetLibraryPlaybackStatesAsync();

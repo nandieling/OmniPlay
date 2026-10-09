@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using OmniPlay.Core.Interfaces;
+using OmniPlay.Core.Models.Library;
 using OmniPlay.Core.Models;
 using OmniPlay.Core.Settings;
 
@@ -45,6 +46,10 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
     private readonly ConcurrentDictionary<int, int?> tvSeasonCountCache = new();
     private readonly ConcurrentDictionary<int, IReadOnlyList<TmdbSeasonSummary>> tvSeasonSummaryCache = new();
     private readonly ConcurrentDictionary<string, int?> tvSeasonAirYearCache = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, TmdbRequestLimiter> rateLimiters = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, TmdbCredits?> creditsCache = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, IReadOnlyList<TmdbFilmographyItem>?> filmographyCache = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string?> chineseTitleCache = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, TmdbSearchItem> localizedResultCache = new(StringComparer.Ordinal);
 
     public TmdbMetadataClient(HttpClient httpClient, IStoragePaths storagePaths, ISettingsService settingsService)
@@ -100,6 +105,89 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         return SearchMatchesAsync("tv", candidateTitles, year, options, cancellationToken);
     }
 
+    public async Task<TmdbCredits?> FetchCreditsAsync(
+        int tmdbId,
+        string mediaType,
+        CancellationToken cancellationToken = default)
+    {
+        var kind = string.Equals(mediaType, "tv", StringComparison.OrdinalIgnoreCase) ? "tv" : "movie";
+        var cacheKey = kind + "-" + tmdbId;
+        if (creditsCache.TryGetValue(cacheKey, out var cached))
+        {
+            return cached;
+        }
+
+        var configurations = await ResolveConfigurationsAsync(null, cancellationToken);
+        var configuration = configurations.Primary;
+        if (!configuration.IsConfigured)
+        {
+            return null;
+        }
+
+        var path = $"/{kind}/{tmdbId}/credits?language={Uri.EscapeDataString(configuration.Language)}";
+        using var response = await SendTmdbApiRequestAsync(path, configuration, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        var payload = await JsonSerializer.DeserializeAsync<TmdbCreditsResponse>(stream, SerializerOptions, cancellationToken);
+        if (payload is null)
+        {
+            return null;
+        }
+
+        // 导演取全部 director（剧集再加 creator），主演取排序靠前的演员；
+        // 与 mac 版一致：按名字去重（大小写不敏感），导演最多 5 人、主演最多 8 人。
+        var directorJobs = kind == "tv"
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "director", "creator", "created by" }
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "director" };
+
+        var directors = CollectPeople(payload.Crew ?? [], person =>
+            directorJobs.Contains(person.Job ?? string.Empty) ||
+            (kind == "tv" && string.Equals(person.Department, "Created By", StringComparison.OrdinalIgnoreCase)),
+            limit: 5);
+        var casts = CollectPeople(payload.Cast ?? [], _ => true, limit: 8);
+
+        var credits = directors.Count == 0 && casts.Count == 0
+            ? null
+            : new TmdbCredits(directors, casts);
+        creditsCache[cacheKey] = credits;
+        return credits;
+    }
+
+    private static List<TmdbPersonInfo> CollectPeople(
+        IReadOnlyList<TmdbCreditsPerson> people,
+        Func<TmdbCreditsPerson, bool> accept,
+        int limit)
+    {
+        List<TmdbPersonInfo> result = [];
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+        foreach (var person in people)
+        {
+            if (result.Count >= limit)
+            {
+                break;
+            }
+
+            if (!accept(person))
+            {
+                continue;
+            }
+
+            var name = person.Name?.Trim();
+            if (string.IsNullOrEmpty(name) || !seen.Add(name))
+            {
+                continue;
+            }
+
+            result.Add(new TmdbPersonInfo(person.Id ?? 0, name, person.ProfilePath));
+        }
+
+        return result;
+    }
+
     public async Task<TmdbConnectionTestResult> TestConnectionAsync(
         TmdbSettings settings,
         CancellationToken cancellationToken = default)
@@ -109,6 +197,11 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         if (!configuration.IsConfigured)
         {
             return new TmdbConnectionTestResult(false, "未配置 TMDB API Key 或 Read Access Token。");
+        }
+
+        if (TmdbProxyGateway.HasInvalidInput(configuration.ProxyUrl))
+        {
+            return new TmdbConnectionTestResult(false, "TMDB 代理网关地址无效。");
         }
 
         try
@@ -173,6 +266,46 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         }
 
         await DownloadBinaryAsync(posterUri, destinationPath, cancellationToken);
+        return destinationPath;
+    }
+
+    public async Task<string?> DownloadProfileImageAsync(
+        string profilePath,
+        int personId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(profilePath))
+        {
+            return null;
+        }
+
+        if (Path.IsPathRooted(profilePath) && File.Exists(profilePath))
+        {
+            return profilePath;
+        }
+
+        Uri? profileUri = ResolvePosterUri(profilePath);
+        if (profileUri is null)
+        {
+            return null;
+        }
+
+        storagePaths.EnsureCreated();
+
+        var extension = Path.GetExtension(profileUri.AbsolutePath);
+        if (string.IsNullOrWhiteSpace(extension) || extension.Length > 8)
+        {
+            extension = ".jpg";
+        }
+
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(profilePath)))[..12].ToLowerInvariant();
+        var destinationPath = Path.Combine(storagePaths.PostersDirectory, $"person-{Math.Max(personId, 0)}-{hash}{extension}");
+        if (File.Exists(destinationPath) && new FileInfo(destinationPath).Length > 0)
+        {
+            return destinationPath;
+        }
+
+        await DownloadBinaryAsync(profileUri, destinationPath, cancellationToken);
         return destinationPath;
     }
 
@@ -261,8 +394,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         CancellationToken cancellationToken)
     {
         var relativePath = $"/tv/{tmdbShowId}/season/{seasonNumber}/episode/{episodeNumber}?language={Uri.EscapeDataString(configuration.Language)}";
-        using var request = CreateRequest(relativePath, configuration);
-        using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
+        using var response = await SendTmdbApiRequestAsync(relativePath, configuration, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             return null;
@@ -349,8 +481,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         }
 
         var path = $"/tv/{tvId}?language=en-US";
-        using var request = CreateRequest(path, configuration);
-        using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
+        using var response = await SendTmdbApiRequestAsync(path, configuration, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             ThrowIfCredentialUnavailable(response.StatusCode, configuration);
@@ -385,8 +516,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
             ? "en,null"
             : "zh,null,en";
         var relativePath = $"/tv/{tmdbShowId}/season/{seasonNumber}/episode/{episodeNumber}/images?include_image_language={Uri.EscapeDataString(imageLanguage)}";
-        using var request = CreateRequest(relativePath, configuration);
-        using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
+        using var response = await SendTmdbApiRequestAsync(relativePath, configuration, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             return null;
@@ -445,6 +575,10 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
                 cancellationToken);
         }
         catch (TmdbSourceUnavailableException)
+        {
+            return [];
+        }
+        catch (InvalidTmdbProxyException)
         {
             return [];
         }
@@ -570,8 +704,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
     {
         var path =
             $"/search/{mediaType}?query={Uri.EscapeDataString(query)}&language={Uri.EscapeDataString(language)}&page={page}";
-        using var request = CreateRequest(path, configuration);
-        using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
+        using var response = await SendTmdbApiRequestAsync(path, configuration, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             ThrowIfCredentialUnavailable(response.StatusCode, configuration);
@@ -665,8 +798,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         }
 
         var path = $"/tv/{tvId}?language=en-US";
-        using var request = CreateRequest(path, configuration);
-        using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
+        using var response = await SendTmdbApiRequestAsync(path, configuration, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             ThrowIfCredentialUnavailable(response.StatusCode, configuration);
@@ -695,8 +827,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         }
 
         var path = $"/tv/{tvId}/season/{season}?language=en-US";
-        using var request = CreateRequest(path, configuration);
-        using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
+        using var response = await SendTmdbApiRequestAsync(path, configuration, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             ThrowIfCredentialUnavailable(response.StatusCode, configuration);
@@ -782,8 +913,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         }
 
         var path = $"/{mediaType}/{item.Id}?language={Uri.EscapeDataString(language)}";
-        using var request = CreateRequest(path, configuration);
-        using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
+        using var response = await SendTmdbApiRequestAsync(path, configuration, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             ThrowIfCredentialUnavailable(response.StatusCode, configuration);
@@ -834,8 +964,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         CancellationToken cancellationToken)
     {
         var path = $"/{mediaType}/{id}/translations";
-        using var request = CreateRequest(path, configuration);
-        using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
+        using var response = await SendTmdbApiRequestAsync(path, configuration, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             ThrowIfCredentialUnavailable(response.StatusCode, configuration);
@@ -883,9 +1012,365 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         return null;
     }
 
+    /// <summary>
+    /// 人物中文译名：先读 <c>/person/{id}</c> 的 zh 名称，再读 translations 里的中文译名，
+    /// 最后退到 <c>also_known_as</c> 里的中文别名。TMDB 确认没有中文条目时返回
+    /// <see cref="TmdbChineseNameResultKind.NotTranslated"/>（可负缓存），网络/凭证问题返回
+    /// <see cref="TmdbChineseNameResultKind.RequestFailed"/>（不写负缓存，下轮重试）。
+    /// </summary>
+    public async Task<TmdbChineseNameResult> FetchChinesePersonNameAsync(
+        int personId,
+        CancellationToken cancellationToken = default)
+    {
+        var configurations = await ResolveConfigurationsAsync(null, cancellationToken);
+        var configuration = configurations.Primary;
+        if (!configuration.IsConfigured || personId <= 0)
+        {
+            return TmdbChineseNameResult.RequestFailed;
+        }
+
+        var language = ShouldAttemptChineseLocalization(configuration.Language) ? configuration.Language : "zh-CN";
+        var path = $"/person/{personId}?language={Uri.EscapeDataString(language)}&append_to_response=translations";
+        using var response = await SendTmdbApiRequestAsync(path, configuration, cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            return TmdbChineseNameResult.NotTranslated;
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return TmdbChineseNameResult.RequestFailed;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        var payload = await JsonSerializer.DeserializeAsync<TmdbPersonDetailResponse>(
+            stream,
+            SerializerOptions,
+            cancellationToken);
+        if (payload is null)
+        {
+            return TmdbChineseNameResult.RequestFailed;
+        }
+
+        var chinese = PickChinesePersonName(payload, configuration.Language);
+        return chinese is null ? TmdbChineseNameResult.NotTranslated : TmdbChineseNameResult.Found(chinese);
+    }
+
+    /// <summary>
+    /// 作品中文片名：TMDB 在缺少 zh 标题时会直接回传原文，此时改查
+    /// <c>/{type}/{id}/alternative_titles</c>，按 CN/SG/TW/HK 取官方中文别名。
+    /// </summary>
+    public async Task<TmdbChineseNameResult> FetchChineseTitleAsync(
+        string? mediaType,
+        int id,
+        CancellationToken cancellationToken = default)
+    {
+        var configurations = await ResolveConfigurationsAsync(null, cancellationToken);
+        var configuration = configurations.Primary;
+        if (!configuration.IsConfigured || id <= 0)
+        {
+            return TmdbChineseNameResult.RequestFailed;
+        }
+
+        if (chineseTitleCache.TryGetValue(mediaType + "#" + id, out var cached))
+        {
+            return cached is null ? TmdbChineseNameResult.NotTranslated : TmdbChineseNameResult.Found(cached);
+        }
+
+        // mediaType 未知时（老缓存只有 id）两种类型各探测一次。
+        var candidates = string.Equals(mediaType, "tv", StringComparison.OrdinalIgnoreCase)
+            ? new[] { "tv" }
+            : string.Equals(mediaType, "movie", StringComparison.OrdinalIgnoreCase)
+                ? new[] { "movie" }
+                : new[] { "movie", "tv" };
+
+        foreach (var kind in candidates)
+        {
+            var path = $"/{kind}/{id}/alternative_titles";
+            using var response = await SendTmdbApiRequestAsync(path, configuration, cancellationToken);
+            if (response.StatusCode == HttpStatusCode.NotFound)
+            {
+                continue;
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return TmdbChineseNameResult.RequestFailed;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var payload = await JsonSerializer.DeserializeAsync<TmdbAlternativeTitlesResponse>(
+                stream,
+                SerializerOptions,
+                cancellationToken);
+            var title = PickChineseAlternativeTitle(payload);
+            if (string.IsNullOrWhiteSpace(title))
+            {
+                continue;
+            }
+
+            chineseTitleCache[mediaType + "#" + id] = title;
+            return TmdbChineseNameResult.Found(title);
+        }
+
+        chineseTitleCache[mediaType + "#" + id] = null;
+        return TmdbChineseNameResult.NotTranslated;
+    }
+
+    /// <summary>
+    /// 人物作品列表（导演取 crew 里的 director/creator，主演取 cast），
+    /// 结果按 mac 版规则去重并按出现顺序返回。
+    /// </summary>
+    public async Task<IReadOnlyList<TmdbFilmographyItem>?> FetchPersonFilmographyAsync(
+        int personId,
+        string kind,
+        CancellationToken cancellationToken = default)
+    {
+        var cacheKey = kind + "-" + personId;
+        if (filmographyCache.TryGetValue(cacheKey, out var cached))
+        {
+            return cached;
+        }
+
+        var configurations = await ResolveConfigurationsAsync(null, cancellationToken);
+        var configuration = configurations.Primary;
+        if (!configuration.IsConfigured || personId <= 0)
+        {
+            return null;
+        }
+
+        var path = $"/person/{personId}/combined_credits?language={Uri.EscapeDataString(configuration.Language)}";
+        using var response = await SendTmdbApiRequestAsync(path, configuration, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        var payload = await JsonSerializer.DeserializeAsync<TmdbCombinedCreditsResponse>(
+            stream,
+            SerializerOptions,
+            cancellationToken);
+        if (payload is null)
+        {
+            return null;
+        }
+
+        var source = string.Equals(kind, "director", StringComparison.OrdinalIgnoreCase)
+            ? payload.Crew.Where(member =>
+                string.Equals(member.Job, "director", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(member.Job, "creator", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(member.Job, "Created by", StringComparison.OrdinalIgnoreCase))
+            : payload.Cast;
+
+        var byKey = new Dictionary<string, TmdbFilmographyItem>(StringComparer.Ordinal);
+        var order = new List<string>();
+        foreach (var member in source)
+        {
+            var memberType = member.MediaType?.ToLowerInvariant();
+            var rawTitle = memberType == "tv" ? member.Name : member.Title;
+            var title = rawTitle?.Trim();
+            if (string.IsNullOrEmpty(title))
+            {
+                continue;
+            }
+
+            var key = (member.Id ?? 0) + "-" + (member.MediaType ?? "");
+            if (!byKey.TryGetValue(key, out var existing))
+            {
+                var rawDate = member.ReleaseDate ?? member.FirstAirDate;
+                existing = new TmdbFilmographyItem
+                {
+                    Title = title,
+                    Rating = member.VoteAverage,
+                    Year = TryParseYear(rawDate, out var year) ? year : null,
+                    Date = rawDate,
+                    TmdbId = member.Id,
+                    MediaType = memberType
+                };
+                byKey[key] = existing;
+                order.Add(key);
+            }
+            else if (member.VoteAverage.HasValue && (existing.Rating ?? -1) < member.VoteAverage.Value)
+            {
+                existing.Rating = member.VoteAverage;
+            }
+        }
+
+        var items = order.Select(key => byKey[key]).ToList();
+        filmographyCache[cacheKey] = items;
+        return items;
+    }
+
+    /// <summary>人物档案（中文名、头像、简介、生日、出生地、别名）。</summary>
+    public async Task<TmdbPersonDetail?> FetchPersonDetailAsync(
+        int personId,
+        CancellationToken cancellationToken = default)
+    {
+        var configurations = await ResolveConfigurationsAsync(null, cancellationToken);
+        var configuration = configurations.Primary;
+        if (!configuration.IsConfigured || personId <= 0)
+        {
+            return null;
+        }
+
+        var path = $"/person/{personId}?language={Uri.EscapeDataString(configuration.Language)}&append_to_response=translations";
+        using var response = await SendTmdbApiRequestAsync(path, configuration, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        var payload = await JsonSerializer.DeserializeAsync<TmdbPersonDetailResponse>(
+            stream,
+            SerializerOptions,
+            cancellationToken);
+        if (payload is null)
+        {
+            return null;
+        }
+
+        return new TmdbPersonDetail(
+            personId,
+            payload.Name,
+            PickChinesePersonName(payload, configuration.Language),
+            string.IsNullOrWhiteSpace(payload.Biography) ? null : payload.Biography.Trim(),
+            string.IsNullOrWhiteSpace(payload.Birthday) ? null : payload.Birthday,
+            string.IsNullOrWhiteSpace(payload.PlaceOfBirth) ? null : payload.PlaceOfBirth,
+            payload.ProfilePath,
+            (payload.AlsoKnownAs ?? []).Where(static name => !string.IsNullOrWhiteSpace(name)).Select(static name => name.Trim()).ToList());
+    }
+
+    /// <summary>从人物详情载荷里挑中文名：主名称已是中文则直接用，其次中文译名，最后中文别名。</summary>
+    public static string? PickChinesePersonName(TmdbPersonDetailResponse payload, string configuredLanguage)
+    {
+        var primary = payload.Name?.Trim();
+        if (!string.IsNullOrEmpty(primary) && PersonNames.ContainsChinese(primary))
+        {
+            return primary;
+        }
+
+        var translations = payload.Translations?.Translations ?? [];
+        var zhTranslations = translations
+            .Where(item => string.Equals(item.Iso639_1, "zh", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        foreach (var region in ChineseTranslationRegionOrder)
+        {
+            var hit = zhTranslations.FirstOrDefault(item =>
+                string.Equals(item.Iso3166_1, region, StringComparison.OrdinalIgnoreCase));
+            var name = ExtractTranslatedTitle(hit);
+            if (!string.IsNullOrWhiteSpace(name) && PersonNames.ContainsChinese(name))
+            {
+                return name;
+            }
+        }
+
+        foreach (var item in zhTranslations)
+        {
+            var name = ExtractTranslatedTitle(item);
+            if (!string.IsNullOrWhiteSpace(name) && PersonNames.ContainsChinese(name))
+            {
+                return name;
+            }
+        }
+
+        // 中文界面下 zh-CN 主名称可能已经是中文，只有配置为其他语言时才需要退到中文别名。
+        _ = ShouldAttemptChineseLocalization(configuredLanguage);
+        var alias = (payload.AlsoKnownAs ?? [])
+            .FirstOrDefault(name => !string.IsNullOrWhiteSpace(name) && PersonNames.ContainsChinese(name));
+        return alias?.Trim();
+    }
+
+    /// <summary>从官方别名载荷里挑中文片名（电影用 titles，剧集用 results）。</summary>
+    public static string? PickChineseAlternativeTitle(TmdbAlternativeTitlesResponse? payload)
+    {
+        var titles = new List<TmdbAlternativeTitle>();
+        titles.AddRange(payload?.Titles ?? []);
+        titles.AddRange(payload?.Results ?? []);
+        if (titles.Count == 0)
+        {
+            return null;
+        }
+
+        foreach (var region in ChineseTranslationRegionOrder)
+        {
+            var hit = titles.FirstOrDefault(title =>
+                string.Equals(title.Iso3166_1, region, StringComparison.OrdinalIgnoreCase));
+            var candidate = hit?.Title?.Trim();
+            if (!string.IsNullOrEmpty(candidate) && PersonNames.ContainsChinese(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        var anyChinese = titles
+            .Select(title => title.Title?.Trim())
+            .FirstOrDefault(candidate => !string.IsNullOrEmpty(candidate) && PersonNames.ContainsChinese(candidate));
+        return anyChinese;
+    }
+
+    public sealed class TmdbPersonDetailResponse
+    {
+        public int? Id { get; init; }
+
+        public string? Name { get; init; }
+
+        public string? Biography { get; init; }
+
+        public string? Birthday { get; init; }
+
+        [JsonPropertyName("place_of_birth")]
+        public string? PlaceOfBirth { get; init; }
+
+        [JsonPropertyName("profile_path")]
+        public string? ProfilePath { get; init; }
+
+        [JsonPropertyName("also_known_as")]
+        public List<string>? AlsoKnownAs { get; init; }
+
+        public TmdbPersonTranslations? Translations { get; init; }
+    }
+
+    public sealed class TmdbPersonTranslations
+    {
+        public List<TmdbTranslationItem>? Translations { get; init; }
+    }
+
+    public sealed class TmdbAlternativeTitlesResponse
+    {
+        public List<TmdbAlternativeTitle>? Titles { get; init; }
+
+        public List<TmdbAlternativeTitle>? Results { get; init; }
+    }
+
+    public sealed class TmdbAlternativeTitle
+    {
+        [JsonPropertyName("iso_3166_1")]
+        public string? Iso3166_1 { get; init; }
+
+        public string? Title { get; init; }
+
+        public string? Type { get; init; }
+    }
+
+    private sealed class TmdbCombinedCreditsResponse
+    {
+        public List<TmdbCreditsPerson> Cast { get; init; } = [];
+
+        public List<TmdbCreditsPerson> Crew { get; init; } = [];
+    }
+
     private HttpRequestMessage CreateRequest(string relativePath, TmdbResolvedConfiguration configuration)
     {
-        var uriBuilder = new StringBuilder($"{TmdbApiBaseUrl}{relativePath}");
+        var officialUrl = $"{TmdbApiBaseUrl}{relativePath}";
+        var requestedUrl = TmdbProxyGateway.ResolveRequestUrl(officialUrl, configuration.ProxyUrl);
+        if (requestedUrl is null)
+        {
+            throw new InvalidTmdbProxyException();
+        }
+
+        var uriBuilder = new StringBuilder(requestedUrl);
         if (!configuration.UseBearerToken)
         {
             var separator = relativePath.Contains('?', StringComparison.Ordinal) ? '&' : '?';
@@ -1388,6 +1873,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
     {
         var settings = overrideSettings ?? (await settingsService.LoadAsync(cancellationToken)).Tmdb;
         var language = ResolveLanguage(settings);
+        var proxyUrl = settings.ProxyUrl?.Trim() ?? string.Empty;
 
         if (!string.IsNullOrWhiteSpace(settings.CustomAccessToken))
         {
@@ -1397,7 +1883,8 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
                     UseBearerToken: true,
                     language,
                     "自定义 Access Token",
-                    TmdbSourceKind.CustomAccessToken));
+                    TmdbSourceKind.CustomAccessToken,
+                    proxyUrl));
         }
 
         if (!string.IsNullOrWhiteSpace(settings.CustomApiKey))
@@ -1408,7 +1895,8 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
                     UseBearerToken: false,
                     language,
                     "自定义 API Key",
-                    TmdbSourceKind.CustomApiKey));
+                    TmdbSourceKind.CustomApiKey,
+                    proxyUrl));
         }
 
         var envAccessToken = ResolveAccessToken();
@@ -1420,7 +1908,8 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
                     UseBearerToken: true,
                     language,
                     "环境变量 Access Token",
-                    TmdbSourceKind.EnvironmentAccessToken));
+                    TmdbSourceKind.EnvironmentAccessToken,
+                    proxyUrl));
         }
 
         var envApiKey = ResolveApiKey();
@@ -1432,7 +1921,8 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
                     UseBearerToken: false,
                     language,
                     "环境变量 API Key",
-                    TmdbSourceKind.EnvironmentApiKey));
+                    TmdbSourceKind.EnvironmentApiKey,
+                    proxyUrl));
         }
 
         return new TmdbResolvedConfigurations(TmdbResolvedConfiguration.Unconfigured(language));
@@ -1470,8 +1960,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         TmdbResolvedConfiguration configuration,
         CancellationToken cancellationToken)
     {
-        using var request = CreateRequest("/configuration", configuration);
-        using var response = await SendTmdbApiRequestAsync(request, configuration, cancellationToken);
+        using var response = await SendTmdbApiRequestAsync("/configuration", configuration, cancellationToken, maxAttempts: 1);
 
         if (response.IsSuccessStatusCode)
         {
@@ -1510,12 +1999,69 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         }
     }
 
+    /// <summary>
+    /// 发送 TMDB API 请求：先过节流器，再对 429/5xx 与传输层异常做退避重试
+    /// （对齐 mac 版 <c>performRequest</c>：<c>Retry-After</c> 优先，否则按尝试次数线性退避）。
+    /// 每次尝试都重建请求，因为 <see cref="HttpRequestMessage"/> 不能重复发送。
+    /// </summary>
     private async Task<HttpResponseMessage> SendTmdbApiRequestAsync(
-        HttpRequestMessage request,
+        string relativePath,
         TmdbResolvedConfiguration configuration,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int maxAttempts = 3)
     {
-        return await httpClient.SendAsync(request, cancellationToken);
+        var limiter = RateLimiterFor(configuration.SourceKind);
+        for (var attempt = 0; ; attempt++)
+        {
+            await limiter.AcquireAsync(cancellationToken).ConfigureAwait(false);
+            using var request = CreateRequest(relativePath, configuration);
+            HttpResponseMessage response;
+            try
+            {
+                response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+            catch (HttpRequestException) when (attempt < maxAttempts - 1)
+            {
+                await Task.Delay(RetryDelay(TimeSpan.Zero, attempt), cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            var statusCode = (int)response.StatusCode;
+            if (attempt < maxAttempts - 1 && (statusCode == 429 || statusCode >= 500))
+            {
+                var retryAfter = RetryAfterHeader(response);
+                response.Dispose();
+                await Task.Delay(RetryDelay(retryAfter, attempt), cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            return response;
+        }
+    }
+
+    private TmdbRequestLimiter RateLimiterFor(TmdbSourceKind sourceKind)
+    {
+        // 共用受限量 key 更容易触发配额，节流更保守；用户自带凭据按 3.2 RPS（同 mac 版）。
+        var key = sourceKind is TmdbSourceKind.CustomApiKey or TmdbSourceKind.CustomAccessToken ? "custom" : "shared";
+        var requestsPerSecond = key == "custom" ? 3.2 : 1.5;
+        return rateLimiters.GetOrAdd(key, static (kind, rps) => new TmdbRequestLimiter(rps), requestsPerSecond);
+    }
+
+    private static TimeSpan? RetryAfterHeader(HttpResponseMessage response)
+    {
+        var raw = response.Headers.RetryAfter?.ToString();
+        if (double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) && seconds > 0)
+        {
+            return TimeSpan.FromSeconds(Math.Min(seconds, 30));
+        }
+
+        return null;
+    }
+
+    private static TimeSpan RetryDelay(TimeSpan? retryAfter, int attempt)
+    {
+        // 1.5s / 3s / 4.5s 线性退避，服务端显式给出 Retry-After 时优先听服务端的。
+        return retryAfter ?? TimeSpan.FromSeconds(1.5 * (attempt + 1));
     }
 
     private async Task DownloadBinaryAsync(Uri sourceUri, string destinationPath, CancellationToken cancellationToken)
@@ -1602,6 +2148,42 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         public List<TmdbSeasonSummaryItem> Seasons { get; init; } = [];
     }
 
+    private sealed class TmdbCreditsResponse
+    {
+        public List<TmdbCreditsPerson> Cast { get; init; } = [];
+
+        public List<TmdbCreditsPerson> Crew { get; init; } = [];
+    }
+
+    private sealed class TmdbCreditsPerson
+    {
+        public int? Id { get; init; }
+
+        public string? Name { get; init; }
+
+        /// <summary>combined_credits 里电影用 title，剧集用 name。</summary>
+        public string? Title { get; init; }
+
+        public string? Job { get; init; }
+
+        public string? Department { get; init; }
+
+        [JsonPropertyName("profile_path")]
+        public string? ProfilePath { get; init; }
+
+        [JsonPropertyName("media_type")]
+        public string? MediaType { get; init; }
+
+        [JsonPropertyName("release_date")]
+        public string? ReleaseDate { get; init; }
+
+        [JsonPropertyName("first_air_date")]
+        public string? FirstAirDate { get; init; }
+
+        [JsonPropertyName("vote_average")]
+        public double? VoteAverage { get; init; }
+    }
+
     private sealed class TmdbSeasonSummaryItem
     {
         [JsonPropertyName("season_number")]
@@ -1623,7 +2205,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         public List<TmdbTranslationItem> Translations { get; init; } = [];
     }
 
-    private sealed class TmdbTranslationItem
+    public sealed class TmdbTranslationItem
     {
         [JsonPropertyName("iso_639_1")]
         public string? Iso639_1 { get; init; }
@@ -1635,7 +2217,7 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         public TmdbTranslationData? Data { get; init; }
     }
 
-    private sealed class TmdbTranslationData
+    public sealed class TmdbTranslationData
     {
         [JsonPropertyName("title")]
         public string? Title { get; init; }
@@ -1730,13 +2312,22 @@ public sealed class TmdbMetadataClient : ITmdbMetadataClient, ITmdbConnectionTes
         bool UseBearerToken,
         string Language,
         string SourceLabel,
-        TmdbSourceKind SourceKind)
+        TmdbSourceKind SourceKind,
+        string ProxyUrl)
     {
         public bool IsConfigured => !string.IsNullOrWhiteSpace(Credential);
 
         public static TmdbResolvedConfiguration Unconfigured(string language)
         {
-            return new TmdbResolvedConfiguration(string.Empty, false, language, "未配置", TmdbSourceKind.Unconfigured);
+            return new TmdbResolvedConfiguration(string.Empty, false, language, "未配置", TmdbSourceKind.Unconfigured, string.Empty);
+        }
+    }
+
+    private sealed class InvalidTmdbProxyException : Exception
+    {
+        internal InvalidTmdbProxyException()
+            : base("TMDB 代理网关地址无效。")
+        {
         }
     }
 

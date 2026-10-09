@@ -201,11 +201,25 @@ struct MovieSearchModalView: View {
         
         Task {
             do {
+                // 🌟 手动匹配同样补齐导演/主演名单（已有名单时不覆盖，保留用户手填内容）。
+                let credits = await TMDBService.shared.fetchCredits(id: result.id, mediaType: result.mediaType)
+                // 外文人名换成 TMDB 中文译名（无中文条目时保留原名）
+                let localizedCredits = await ChineseNameStore.localizeCredits(directors: credits.directors, casts: credits.casts)
+                PersonProfileStore.upsertFromCredits(directors: localizedCredits.directors, casts: localizedCredits.casts)
+                let resultDirectorsJSON = Movie.encodePersonList(localizedCredits.directors.map(\.name))
+                let resultCastsJSON = Movie.encodePersonList(localizedCredits.casts.map(\.name))
+
                 let generatedTasks = try await AppDatabase.shared.dbQueue.write { db -> [(String, String, Int64?, Int, Int)] in
                     var tempTasks: [(String, String, Int64?, Int, Int)] = []
-                    let newMovie = Movie(id: resultId, title: resultTitle, releaseDate: resultReleaseDate, overview: resultOverview, posterPath: resultPoster, voteAverage: resultVoteAverage, isLocked: true)
+                    var newMovie = Movie(id: resultId, title: resultTitle, releaseDate: resultReleaseDate, overview: resultOverview, posterPath: resultPoster, voteAverage: resultVoteAverage, isLocked: true, directors: resultDirectorsJSON, casts: resultCastsJSON)
                     
-                    if try Movie.fetchOne(db, key: resultId) != nil { try newMovie.update(db) } else { try newMovie.insert(db) }
+                    if let existing = try Movie.fetchOne(db, key: resultId) {
+                        if existing.directorList.isEmpty, let resultDirectorsJSON { newMovie.directors = resultDirectorsJSON }
+                        if existing.castList.isEmpty, let resultCastsJSON { newMovie.casts = resultCastsJSON }
+                        try newMovie.update(db)
+                    } else {
+                        try newMovie.insert(db)
+                    }
                     
                     let seedFiles = try VideoFile.fetchVisibleFiles(movieId: oldMovieId, in: db)
                     let sourceIds = Set(seedFiles.map(\.sourceId))

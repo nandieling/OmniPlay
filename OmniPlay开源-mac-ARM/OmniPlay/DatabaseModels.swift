@@ -3,6 +3,34 @@ import GRDB
 import LocalAuthentication
 import Security
 
+nonisolated enum PlaybackWatchState: Equatable {
+    case unplayed
+    case inProgress
+    case watched
+
+    init(progress: Double, duration: Double) {
+        let normalizedProgress = progress.isFinite ? max(0, progress) : 0
+        let normalizedDuration = duration.isFinite ? max(0, duration) : 0
+        if normalizedDuration > 0, normalizedProgress / normalizedDuration >= 0.95 {
+            self = .watched
+        } else if normalizedProgress > 0 {
+            self = .inProgress
+        } else {
+            self = .unplayed
+        }
+    }
+
+    var hasResumeProgress: Bool { self == .inProgress }
+
+    var statusLabel: String {
+        switch self {
+        case .unplayed: return "未播"
+        case .inProgress: return "未播完"
+        case .watched: return "已播"
+        }
+    }
+}
+
 enum MediaSourceProtocol: String, Codable, CaseIterable {
     case local
     case webdav
@@ -10,7 +38,6 @@ enum MediaSourceProtocol: String, Codable, CaseIterable {
     case plex
     case emby
     case jellyfin
-    case omniplayDocker
 
     nonisolated func normalizedBaseURL(_ value: String) -> String {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -24,7 +51,7 @@ enum MediaSourceProtocol: String, Codable, CaseIterable {
                 value.removeLast()
             }
             return value
-        case .webdav, .plex, .emby, .jellyfin, .omniplayDocker:
+        case .webdav, .plex, .emby, .jellyfin:
             // The address is often copied from a NAS UI as `nas:45722` or
             // `http://nas:45722/api/health`.  URL(string:) treats the former
             // as a custom URL scheme and the latter makes every subsequent
@@ -59,8 +86,6 @@ enum MediaSourceProtocol: String, Codable, CaseIterable {
                     components.port = 32400
                 case .emby, .jellyfin:
                     components.port = 8096
-                case .omniplayDocker:
-                    components.port = 45722
                 default:
                     break
                 }
@@ -80,7 +105,7 @@ enum MediaSourceProtocol: String, Codable, CaseIterable {
         switch self {
         case .local:
             return !normalized.isEmpty
-        case .webdav, .plex, .emby, .jellyfin, .omniplayDocker:
+        case .webdav, .plex, .emby, .jellyfin:
             guard let url = URL(string: normalized), let scheme = url.scheme?.lowercased() else { return false }
             return (scheme == "http" || scheme == "https") && (url.host?.isEmpty == false)
         case .direct:
@@ -509,8 +534,125 @@ struct Movie: Codable, FetchableRecord, PersistableRecord {
     var posterPath: String?
     var voteAverage: Double?  // 🌟 新增：TMDB 官方评分
     var isLocked: Bool = false
+    var directors: String? = nil  // 🌟 导演名单（JSON 字符串数组）
+    var casts: String? = nil  // 🌟 主演名单（JSON 字符串数组）
     
     static let videoFiles = hasMany(VideoFile.self)
+}
+
+extension Movie {
+    var directorList: [String] { Self.decodePersonList(directors) }
+    var castList: [String] { Self.decodePersonList(casts) }
+
+    static func encodePersonList(_ values: [String]) -> String? {
+        var normalized: [String] = []
+        var seen = Set<String>()
+        for value in values {
+            let name = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+            let key = name.lowercased()
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            normalized.append(name)
+        }
+        guard !normalized.isEmpty else { return nil }
+        guard let data = try? JSONEncoder().encode(normalized) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func decodePersonList(_ value: String?) -> [String] {
+        guard let value,
+              let data = value.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        return decoded
+    }
+
+    /// 把用户手填的导演/主演文本拆成名单，兼容中英文分隔符。
+    static func splitPersonNames(_ raw: String) -> [String] {
+        let separators = CharacterSet(charactersIn: "，,、;；/| ")
+        return raw
+            .components(separatedBy: separators)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+}
+
+// 🌟 首页分类文件夹：按导演/主演聚合影片，海报可手动指定或自定义
+enum HomeCategoryMode: String, CaseIterable, Identifiable {
+    case none
+    case director
+    case cast
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .none: return "全部影视"
+        case .director: return "按导演分类"
+        case .cast: return "按主演分类"
+        }
+    }
+
+    var shortLabel: String {
+        switch self {
+        case .none: return "全部"
+        case .director: return "导演"
+        case .cast: return "主演"
+        }
+    }
+
+    var personKind: String? {
+        switch self {
+        case .none: return nil
+        case .director: return "director"
+        case .cast: return "cast"
+        }
+    }
+
+    var kindLabel: String {
+        switch self {
+        case .none: return "分类"
+        case .director: return "导演"
+        case .cast: return "主演"
+        }
+    }
+}
+
+struct CategoryFolder: Codable, FetchableRecord, PersistableRecord, Identifiable {
+    var id: String
+    var kind: String
+    var name: String
+    var posterPath: String?
+    var updatedAt: Double?
+
+    static let databaseTableName = "categoryFolder"
+
+    static func folderID(kind: String, name: String) -> String {
+        "\(kind)#\(name)"
+    }
+
+    var kindLabel: String { kind == "director" ? "导演" : "主演" }
+}
+
+// 导演/主演人物资料：TMDB 人物 id + 头像 + 完整作品列表缓存（id 与分类文件夹一致："kind#name"）
+struct PersonProfile: Codable, FetchableRecord, PersistableRecord, Identifiable {
+    var id: String
+    var name: String
+    var kind: String
+    var tmdbPersonId: Int64?
+    var photoPath: String?
+    var filmographyJson: String?
+    var updatedAt: Double?
+
+    static let databaseTableName = "personProfile"
+
+    var filmography: [TMDBFilmographyItem] {
+        guard let filmographyJson, let data = filmographyJson.data(using: .utf8),
+              let items = try? JSONDecoder().decode([TMDBFilmographyItem].self, from: data) else { return [] }
+        return items
+    }
 }
 
 // 3. 剧集元数据
@@ -617,7 +759,7 @@ extension MediaSource {
             sql: """
             SELECT *
             FROM mediaSource
-            WHERE protocolType IN (?, ?, ?, ?, ?, ?)
+            WHERE protocolType IN (?, ?, ?, ?, ?)
             ORDER BY id DESC
             """,
             arguments: [
@@ -625,8 +767,7 @@ extension MediaSource {
                 MediaSourceProtocol.webdav.rawValue,
                 MediaSourceProtocol.plex.rawValue,
                 MediaSourceProtocol.emby.rawValue,
-                MediaSourceProtocol.jellyfin.rawValue,
-                MediaSourceProtocol.omniplayDocker.rawValue
+                MediaSourceProtocol.jellyfin.rawValue
             ]
         )
     }
@@ -637,7 +778,7 @@ extension MediaSource {
             sql: """
             SELECT *
             FROM mediaSource
-            WHERE protocolType IN (?, ?, ?, ?, ?, ?)
+            WHERE protocolType IN (?, ?, ?, ?, ?)
               AND COALESCE(isEnabled, 1) = 1
             ORDER BY id ASC
             """,
@@ -646,8 +787,7 @@ extension MediaSource {
                 MediaSourceProtocol.webdav.rawValue,
                 MediaSourceProtocol.plex.rawValue,
                 MediaSourceProtocol.emby.rawValue,
-                MediaSourceProtocol.jellyfin.rawValue,
-                MediaSourceProtocol.omniplayDocker.rawValue
+                MediaSourceProtocol.jellyfin.rawValue
             ]
         )
     }
@@ -659,7 +799,7 @@ extension MediaSource {
             SELECT *
             FROM mediaSource
             WHERE id = ?
-              AND protocolType IN (?, ?, ?, ?, ?, ?)
+              AND protocolType IN (?, ?, ?, ?, ?)
               AND COALESCE(isEnabled, 1) = 1
             LIMIT 1
             """,
@@ -669,8 +809,7 @@ extension MediaSource {
                 MediaSourceProtocol.webdav.rawValue,
                 MediaSourceProtocol.plex.rawValue,
                 MediaSourceProtocol.emby.rawValue,
-                MediaSourceProtocol.jellyfin.rawValue,
-                MediaSourceProtocol.omniplayDocker.rawValue
+                MediaSourceProtocol.jellyfin.rawValue
             ]
         )
     }
@@ -713,10 +852,6 @@ extension VideoFile {
         let fallback = relative.isEmpty ? fileName : relative
         guard let source, source.protocolKind != .direct else {
             return fallback
-        }
-        if source.protocolKind == .omniplayDocker {
-            let displayName = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
-            return displayName.isEmpty ? fallback : displayName
         }
         if (source.protocolKind == .plex || source.protocolKind == .emby || source.protocolKind == .jellyfin),
            isMediaServerPlaybackEndpointPath(relative),

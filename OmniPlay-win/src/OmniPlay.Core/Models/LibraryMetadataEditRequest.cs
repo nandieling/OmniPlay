@@ -6,4 +6,6 @@ public sealed record LibraryMetadataEditRequest(
     string? Overview,
     string? PosterPath,
     double? VoteAverage,
-    bool IsLocked = true);
+    bool IsLocked = true,
+    string? Director = null,
+    string? MainCast = null);

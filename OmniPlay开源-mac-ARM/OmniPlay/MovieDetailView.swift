@@ -60,7 +60,7 @@ struct MovieDetailView: View {
 
         let unfinished = videoFiles
             .filter { file in
-                guard file.playProgress > 5 else { return false }
+                guard file.playProgress > 0 else { return false }
                 return file.duration <= 0 || file.playProgress / file.duration < 0.95
             }
             .max { lhs, rhs in
@@ -165,6 +165,31 @@ struct MovieDetailView: View {
                             .font(.title3.bold())
                             .foregroundColor(theme.textSecondary)
                             
+                            VStack(alignment: .leading, spacing: 8) {
+                                if !fusedDirectorLine.isEmpty {
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Text("导演")
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundColor(theme.textSecondary)
+                                            .frame(width: 34, alignment: .leading)
+                                        Text(fusedDirectorLine)
+                                            .font(.subheadline)
+                                            .foregroundColor(theme.textPrimary)
+                                    }
+                                }
+                                if !fusedCastLine.isEmpty {
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Text("主演")
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundColor(theme.textSecondary)
+                                            .frame(width: 34, alignment: .leading)
+                                        Text(fusedCastLine)
+                                            .font(.subheadline)
+                                            .foregroundColor(theme.textPrimary)
+                                    }
+                                }
+                            }
+                            
                             Text(fusedOverview)
                                 .font(.body)
                                 .foregroundColor(theme.textPrimary.opacity(0.85))
@@ -178,12 +203,10 @@ struct MovieDetailView: View {
                                 let timeline = isMultipartMovie ? multipartMovieTimeline : (progress: file.playProgress, duration: file.duration)
                                 let mainPlayProgress = timeline.progress
                                 let mainVideoDuration = timeline.duration
-                                let isWatched = mainVideoDuration > 0 && (mainPlayProgress / mainVideoDuration) >= 0.95
                                 let currentBtnLabel = getPlayButtonLabel(fileId: file.id, progress: mainPlayProgress)
                                 
                                 mainPlaybackControls(
                                     file: file,
-                                    isWatched: isWatched,
                                     buttonLabel: currentBtnLabel,
                                     progress: mainPlayProgress,
                                     duration: mainVideoDuration
@@ -336,7 +359,9 @@ struct MovieDetailView: View {
     }
     
     private func getPlayButtonLabel(fileId: String, progress: Double) -> String {
-        let prefix = progress > 5.0 ? "继续播放" : "开始播放"
+        let duration = isMultipartMovie ? multipartMovieTimeline.duration : (videoFiles.first { $0.id == fileId }?.duration ?? 0)
+        let state = PlaybackWatchState(progress: progress, duration: duration)
+        let prefix = state.hasResumeProgress ? "继续播放" : "开始播放"
         if isTVShow, let ep = allEpisodes.first(where: { $0.id == fileId }) {
             return "\(prefix) \(ep.displayName)"
         }
@@ -350,6 +375,18 @@ struct MovieDetailView: View {
         let countries = Array(doubanMetadata?.countryList.prefix(2) ?? [])
         if !countries.isEmpty { parts.append(countries.joined(separator: " / ")) }
         return parts
+    }
+
+    private var fusedDirectorLine: String {
+        let fromMovie = displayedMovie.directorList
+        if !fromMovie.isEmpty { return fromMovie.joined(separator: "、") }
+        return (doubanMetadata?.directorList ?? []).joined(separator: "、")
+    }
+
+    private var fusedCastLine: String {
+        let fromMovie = displayedMovie.castList
+        let list = fromMovie.isEmpty ? (doubanMetadata?.castList ?? []) : fromMovie
+        return list.prefix(6).joined(separator: "、")
     }
 
     private var preferredYear: String? {
@@ -587,9 +624,7 @@ struct MovieDetailView: View {
     }
 
     private func hasUnfinishedPlaybackProgress(_ file: VideoFile) -> Bool {
-        guard file.playProgress > 5.0 else { return false }
-        guard file.duration > 0 else { return true }
-        return (file.playProgress / file.duration) < 0.95
+        PlaybackWatchState(progress: file.playProgress, duration: file.duration) == .inProgress
     }
 
     private func isNotFullyWatched(_ file: VideoFile) -> Bool {
@@ -795,7 +830,7 @@ struct MovieDetailView: View {
                     return (current, source, files)
                 }
 
-                let selectedFile = await refreshDockerProgressIfNeeded(file: snapshot.0, source: snapshot.1)
+                let selectedFile = snapshot.0
 
                 let selectedSourceId = selectedFile.sourceId
                 let source = try await AppDatabase.shared.dbQueue.read { db in
@@ -803,6 +838,7 @@ struct MovieDetailView: View {
                 }
                 let playlistFiles = try await AppDatabase.shared.dbQueue.read { db in
                     try VideoFile.fetchVisibleFiles(movieId: movieId, in: db)
+                        .filter { $0.sourceId == selectedSourceId }
                 }
                 let isMissing = OfflineCacheManager.shared.hasMissingSource(for: selectedFile, mediaSource: source)
                 await MainActor.run {
@@ -834,39 +870,6 @@ struct MovieDetailView: View {
         }
     }
 
-    private func refreshDockerProgressIfNeeded(file: VideoFile, source: MediaSource?) async -> VideoFile {
-        guard let source,
-              source.protocolKind == .omniplayDocker,
-              let remoteFileId = Self.omniPlayDockerRemoteFileId(from: file) else {
-            return file
-        }
-
-        let selectedFileId = file.id
-        do {
-            let config = OmniPlayDockerAuthConfig.decode(source.authConfig)
-            let client = try OmniPlayDockerClient(baseURLString: source.baseUrl, sessionCookie: config?.sessionCookie)
-            let remote = try await client.playbackProgress(videoFileId: remoteFileId)
-            guard remote.positionSeconds > 0 || file.playProgress <= 5 else {
-                return file
-            }
-
-            try await AppDatabase.shared.dbQueue.write { db in
-                guard var current = try VideoFile.fetchOne(db, key: selectedFileId) else { return }
-                current.playProgress = max(0, remote.positionSeconds)
-                current.duration = max(current.duration, remote.durationSeconds)
-                current.lastPlayedAt = current.playProgress > 5 ? Date().timeIntervalSince1970 : nil
-                try current.update(db)
-            }
-
-            return try await AppDatabase.shared.dbQueue.read { db in
-                try VideoFile.fetchOne(db, key: selectedFileId)
-            } ?? file
-        } catch {
-            // 本地缓存的进度仍可播放；远端刷新失败不应阻止打开媒体。
-            return file
-        }
-    }
-    
     private func formatTime(_ time: Double) -> String { if time.isNaN || time < 0 { return "00:00" }; let t = Int(time); return t / 3600 > 0 ? String(format: "%02d:%02d:%02d", t/3600, (t%3600)/60, t%60) : String(format: "%02d:%02d", (t%3600)/60, t%60) }
 
     private var movieVersionList: some View {
@@ -910,55 +913,34 @@ struct MovieDetailView: View {
         .frame(maxWidth: 900, alignment: .leading)
     }
 
-    private static func omniPlayDockerRemoteFileId(from file: VideoFile) -> String? {
-        let idParts = file.id.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
-        if idParts.count == 3,
-           idParts[0] == "omniplay-docker",
-           !idParts[2].isEmpty {
-            return idParts[2].removingPercentEncoding ?? idParts[2]
-        }
-
-        let parts = file.relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            .split(separator: "/")
-            .map(String.init)
-        guard parts.count >= 5,
-              parts[0] == "api",
-              parts[1] == "playback",
-              parts[2] == "files",
-              parts[4] == "stream" else {
-            return nil
-        }
-        return parts[3].removingPercentEncoding ?? parts[3]
-    }
-
     @ViewBuilder
     private func mainPlaybackControls(
         file: VideoFile,
-        isWatched: Bool,
         buttonLabel: String,
         progress: Double,
         duration: Double
     ) -> some View {
-        let hasProgress = duration > 0 && progress > 0 && !isWatched
-        if hasProgress {
+        let state = PlaybackWatchState(progress: progress, duration: duration)
+        let hasProgressBar = state.hasResumeProgress && duration > 0
+        if hasProgressBar {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 12) {
-                    mainPlaybackButtons(file: file, isWatched: isWatched, buttonLabel: buttonLabel)
+                    mainPlaybackButtons(file: file, state: state, buttonLabel: buttonLabel)
                     mainPlaybackProgress(progress: progress, duration: duration)
                         .frame(width: 320, alignment: .leading)
                 }
                 VStack(alignment: .leading, spacing: 12) {
-                    mainPlaybackButtons(file: file, isWatched: isWatched, buttonLabel: buttonLabel)
+                    mainPlaybackButtons(file: file, state: state, buttonLabel: buttonLabel)
                     mainPlaybackProgress(progress: progress, duration: duration)
                         .frame(maxWidth: 360, alignment: .leading)
                 }
             }
         } else {
-            mainPlaybackButtons(file: file, isWatched: isWatched, buttonLabel: buttonLabel)
+            mainPlaybackButtons(file: file, state: state, buttonLabel: buttonLabel)
         }
     }
 
-    private func mainPlaybackButtons(file: VideoFile, isWatched: Bool, buttonLabel: String) -> some View {
+    private func mainPlaybackButtons(file: VideoFile, state: PlaybackWatchState, buttonLabel: String) -> some View {
         HStack(spacing: 12) {
             Button(action: { attemptPlayback(for: file) }) {
                 HStack(spacing: 8) {
@@ -978,8 +960,8 @@ struct MovieDetailView: View {
 
             Button(action: { toggleWatchedStatus(for: file.id) }) {
                 HStack(spacing: 8) {
-                    Image(systemName: isWatched ? "checkmark.circle.fill" : "circle").font(.title3)
-                    Text(isWatched ? "已播" : "未播")
+                    Image(systemName: state == .watched ? "checkmark.circle.fill" : (state == .inProgress ? "circle.lefthalf.filled" : "circle")).font(.title3)
+                    Text(state.statusLabel)
                         .font(.title3.bold())
                         .lineLimit(1)
                         .minimumScaleFactor(0.86)
@@ -1098,12 +1080,8 @@ struct EpisodeCardView: View {
     var body: some View {
         let duration = ep.file.duration
         let progress = duration > 0 ? (ep.file.playProgress / duration) : 0
-        let isEpWatched = duration > 0 && progress >= 0.95
-        let isPartiallyWatched = ep.file.playProgress > 5.0 && progress < 0.95
+        let watchState = PlaybackWatchState(progress: ep.file.playProgress, duration: duration)
         let isSelected = currentVideoFileId == ep.file.id
-        
-        let maskOpacity: Double = isEpWatched ? 0.06 : (isSelected ? 0.12 : (isPartiallyWatched ? 0.2 : 0.3))
-        let cardBrightness: Double = isEpWatched ? 0.12 : -0.12
         let isCached = cacheManager.isCached(ep.file)
         
         VStack(alignment: .leading, spacing: 10) {
@@ -1116,8 +1094,6 @@ struct EpisodeCardView: View {
                             width: cardWidth,
                             height: thumbnailHeight
                         )
-                            .brightness(cardBrightness)
-                        Color.black.opacity(maskOpacity)
                         if isSelected { RoundedRectangle(cornerRadius: 10).stroke(theme.accent, lineWidth: 1.5) }
                     }
                     .frame(width: cardWidth, height: thumbnailHeight)
@@ -1153,14 +1129,19 @@ struct EpisodeCardView: View {
             }
             .onHover { isHovering = $0 }
             
-            Text(ep.displayName)
-                .font(.subheadline.bold())
-                .foregroundColor(theme.textPrimary.opacity(isSelected ? 1.0 : 0.8))
-                .lineLimit(2)
-                .frame(width: cardWidth, alignment: .center)
-                .multilineTextAlignment(.center)
+            HStack(spacing: 6) {
+                Image(systemName: watchState == .watched ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(watchState == .watched ? theme.accent : theme.textSecondary)
+                    .accessibilityLabel(watchState == .watched ? "已看" : "未看")
+                Text(ep.displayName)
+                    .font(.subheadline.bold())
+                    .foregroundColor(theme.textPrimary.opacity(isSelected ? 1.0 : 0.8))
+                    .lineLimit(2)
+            }
+            .frame(width: cardWidth, alignment: .center)
+            .multilineTextAlignment(.center)
             
-            if duration > 0 && !isEpWatched && ep.file.playProgress > 0 {
+            if duration > 0 && watchState == .inProgress {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         Rectangle().fill(theme.surface).frame(height: 4).cornerRadius(2)

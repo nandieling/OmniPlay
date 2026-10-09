@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using OmniPlay.Core.Models;
 using OmniPlay.Core.Models.Entities;
 
 namespace OmniPlay.Infrastructure.Library;
@@ -58,6 +59,20 @@ public sealed record LocalSidecarMetadata
 
     public int? EpisodeNumber { get; init; }
 
+    /// <summary>NFO 里的导演名单(<c>&lt;director&gt;</c> 可重复)。</summary>
+    public IReadOnlyList<string> Directors { get; init; } = [];
+
+    /// <summary>NFO 里的主演名单(<c>&lt;actor&gt;&lt;name&gt;</c>)。</summary>
+    public IReadOnlyList<string> Casts { get; init; } = [];
+
+    public string? DirectorText => Directors.Count > 0 ? string.Join("、", Directors) : null;
+
+    public string? CastText => Casts.Count > 0 ? string.Join("、", Casts) : null;
+
+    public string? EncodedDirectors => Directors.Count > 0 ? PersonNames.Encode(Directors) : null;
+
+    public string? EncodedCasts => Casts.Count > 0 ? PersonNames.Encode(Casts) : null;
+
     public bool HasAnyValue =>
         !string.IsNullOrWhiteSpace(Title) ||
         !string.IsNullOrWhiteSpace(Date) ||
@@ -68,7 +83,9 @@ public sealed record LocalSidecarMetadata
         VoteAverage.HasValue ||
         TmdbId.HasValue ||
         SeasonNumber.HasValue ||
-        EpisodeNumber.HasValue;
+        EpisodeNumber.HasValue ||
+        Directors.Count > 0 ||
+        Casts.Count > 0;
 }
 
 public sealed class LocalMetadataSidecarService : ILocalMetadataSidecarService
@@ -241,7 +258,18 @@ public sealed class LocalMetadataSidecarService : ILocalMetadataSidecarService
                 VoteAverage = ParseDouble(FirstElementValue(root, "rating", "userrating")),
                 TmdbId = ParseInt(ResolveTmdbId(root)),
                 SeasonNumber = ParseInt(FirstElementValue(root, "season")),
-                EpisodeNumber = ParseInt(FirstElementValue(root, "episode"))
+                EpisodeNumber = ParseInt(FirstElementValue(root, "episode")),
+                Directors = PersonNames.Normalize(
+                    from element in root.Descendants()
+                    where string.Equals(element.Name.LocalName, "director", StringComparison.OrdinalIgnoreCase)
+                    select element.Value),
+                Casts = PersonNames.Normalize(
+                    from actor in root.Descendants()
+                    where string.Equals(actor.Name.LocalName, "actor", StringComparison.OrdinalIgnoreCase) ||
+                          string.Equals(actor.Name.LocalName, "cast", StringComparison.OrdinalIgnoreCase)
+                    from name in actor.Elements()
+                    where string.Equals(name.Name.LocalName, "name", StringComparison.OrdinalIgnoreCase)
+                    select name.Value)
             };
         }
         catch
@@ -266,6 +294,16 @@ public sealed class LocalMetadataSidecarService : ILocalMetadataSidecarService
         AddElement(root, "title", metadata.Title);
         AddElement(root, rootName == "tvshow" ? "premiered" : "releasedate", metadata.Date);
         AddElement(root, "plot", metadata.Overview);
+        foreach (var director in metadata.Directors)
+        {
+            AddElement(root, "director", director);
+        }
+
+        foreach (var actor in metadata.Casts)
+        {
+            root.Add(new XElement("actor", new XElement("name", actor.Trim())));
+        }
+
         if (metadata.VoteAverage.HasValue)
         {
             AddElement(root, "rating", metadata.VoteAverage.Value.ToString("0.0", CultureInfo.InvariantCulture));

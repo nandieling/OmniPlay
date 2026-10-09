@@ -56,14 +56,13 @@ struct DiscoveredDevice: Identifiable, Hashable {
         case plex = "Plex"
         case emby = "Emby"
         case jellyfin = "Jellyfin"
-        case omniplayDocker = "OmniPlay Docker"
 
         var isWebDAV: Bool {
             self == .webdavHTTP || self == .webdavHTTPS
         }
 
         var isMediaServer: Bool {
-            self == .plex || self == .emby || self == .jellyfin || self == .omniplayDocker
+            self == .plex || self == .emby || self == .jellyfin
         }
 
         var scheme: String {
@@ -117,7 +116,6 @@ class LANScanner: NSObject, ObservableObject, NetServiceBrowserDelegate, NetServ
         }
 
         probeLocalMediaServerPorts()
-        probeLANOmniPlayDockerPorts()
         probeLANMediaServerPorts()
         probeEmbyUdpDiscovery()
         
@@ -217,12 +215,6 @@ class LANScanner: NSObject, ObservableObject, NetServiceBrowserDelegate, NetServ
             ("http://127.0.0.1:8098", "127.0.0.1", 8098),
             ("http://localhost:8098", "localhost", 8098),
             ("http://[::1]:8098", "localhost", 8098),
-            ("http://127.0.0.1:45722", "127.0.0.1", 45722),
-            ("http://localhost:45722", "localhost", 45722),
-            ("http://[::1]:45722", "localhost", 45722),
-            ("http://127.0.0.1:45721", "127.0.0.1", 45721),
-            ("http://localhost:45721", "localhost", 45721),
-            ("http://[::1]:45721", "localhost", 45721),
             ("https://127.0.0.1:8920", "127.0.0.1", 8920),
             ("https://localhost:8920", "localhost", 8920),
             ("https://[::1]:8920", "localhost", 8920)
@@ -283,54 +275,6 @@ class LANScanner: NSObject, ObservableObject, NetServiceBrowserDelegate, NetServ
                         guard !Task.isCancelled else { return }
                         await MainActor.run {
                             self.addDevice(DiscoveredDevice(name: "\(type.rawValue) · \(endpoint.host)", ipAddress: endpoint.host, port: endpoint.port, type: type))
-                        }
-                    }
-                }
-
-                for _ in 0..<min(maxConcurrent, endpoints.count) {
-                    addNext()
-                }
-
-                while await group.next() != nil {
-                    if Task.isCancelled { break }
-                    addNext()
-                }
-            }
-        }
-        probeTasks.append(task)
-    }
-
-    private func probeLANOmniPlayDockerPorts() {
-        let hosts = privateIPv4SubnetHosts()
-        guard !hosts.isEmpty else { return }
-
-        struct Endpoint {
-            let url: URL
-            let host: String
-            let port: Int
-        }
-
-        let endpoints = hosts.flatMap { host in
-            [45722, 45721].compactMap { port -> Endpoint? in
-                guard let url = URL(string: "http://\(host):\(port)") else { return nil }
-                return Endpoint(url: url, host: host, port: port)
-            }
-        }
-
-        let task = Task { [weak self] in
-            guard let self else { return }
-            var iterator = endpoints.makeIterator()
-            let maxConcurrent = 256
-
-            await withTaskGroup(of: Void.self) { group in
-                func addNext() {
-                    guard let endpoint = iterator.next() else { return }
-                    group.addTask { [weak self] in
-                        guard let self else { return }
-                        guard await self.probeOmniPlayDocker(baseURL: endpoint.url) else { return }
-                        guard !Task.isCancelled else { return }
-                        await MainActor.run {
-                            self.addDevice(DiscoveredDevice(name: "OmniPlay Docker · \(endpoint.host)", ipAddress: endpoint.host, port: endpoint.port, type: .omniplayDocker))
                         }
                     }
                 }
@@ -541,7 +485,11 @@ class LANScanner: NSObject, ObservableObject, NetServiceBrowserDelegate, NetServ
             let network = ipValue & maskValue
             let broadcast = network | ~maskValue
             guard broadcast > network + 1 else { continue }
+
             let hostCount = broadcast - network - 1
+            // Avoid expanding a VPN or a corporate /16 into tens of
+            // thousands of requests.  A normal home LAN (/24) is scanned
+            // completely; larger networks retain the old bounded behaviour.
             if hostCount <= 1022 {
                 for value in (network + 1)..<broadcast {
                     hosts.insert(ipv4String(value))
@@ -610,15 +558,11 @@ class LANScanner: NSObject, ObservableObject, NetServiceBrowserDelegate, NetServ
     }
 
     private func probeMediaServer(baseURL: URL, serviceName: String) async -> DiscoveredDevice.DeviceType? {
-        if await probeOmniPlayDocker(baseURL: baseURL) {
-            return .omniplayDocker
-        }
-
         if baseURL.port == 32400 {
             return await probePlex(baseURL: baseURL) ? .plex : nil
         }
 
-        if let port = baseURL.port, [8096, 8097, 8098, 45722, 45721, 8920, 5006].contains(port) {
+        if let port = baseURL.port, [8096, 8097, 8098, 8920, 5006].contains(port) {
             if let embyCompatibleType = await probeEmbyCompatible(baseURL: baseURL, serviceName: serviceName) {
                 return embyCompatibleType
             }
@@ -635,49 +579,6 @@ class LANScanner: NSObject, ObservableObject, NetServiceBrowserDelegate, NetServ
         }
 
         return nil
-    }
-
-    private func probeOmniPlayDocker(baseURL: URL) async -> Bool {
-        for path in ["api/health", "api/auth/status"] {
-            if await probeOmniPlayDockerEndpoint(baseURL: baseURL, path: path) {
-                return true
-            }
-        }
-        return false
-    }
-
-    private func probeOmniPlayDockerEndpoint(baseURL: URL, path: String) async -> Bool {
-        guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else { return false }
-        let basePath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        components.path = "/" + [basePath, path].filter { !$0.isEmpty }.joined(separator: "/")
-        guard let url = components.url else { return false }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 2.5
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        do {
-            let (data, response) = try await probeSession.data(for: request)
-            guard let http = response as? HTTPURLResponse else { return false }
-            let body = String(data: data, encoding: .utf8)?.lowercased() ?? ""
-            guard (200...299).contains(http.statusCode) || [401, 403].contains(http.statusCode) else { return false }
-            if path == "api/health",
-               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let service = object["service"] as? String,
-               service.lowercased().contains("omniplay") {
-                return true
-            }
-            if path == "api/auth/status",
-               (body.contains("\"issetuprequired\"") || body.contains("\"isauthenticated\"")) {
-                return true
-            }
-            return body.contains("omniplay.server")
-                || body.contains("\"omniplay\"")
-                || (body.contains("\"service\"") && body.contains("omniplay"))
-                || (body.contains("\"servicename\"") && body.contains("omniplay"))
-                || http.value(forHTTPHeaderField: "Server")?.lowercased().contains("kestrel") == true && body.contains("database")
-        } catch {
-            return false
-        }
     }
 
     private func probePlex(baseURL: URL) async -> Bool {

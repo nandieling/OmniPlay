@@ -2,22 +2,6 @@ import SwiftUI
 import GRDB
 import AppKit
 
-private struct OmniPlayDockerDoubanSyncTarget {
-    let source: MediaSource
-    let localFileIds: [String]
-}
-
-private enum OmniPlayDockerDoubanSyncError: LocalizedError {
-    case remoteItemNotFound
-
-    var errorDescription: String? {
-        switch self {
-        case .remoteItemNotFound:
-            return "未在 OmniPlay Docker 中找到对应条目，豆瓣信息没有同步到 Docker 版。"
-        }
-    }
-}
-
 struct DoubanBindModalView: View {
     let movie: Movie
     let existingMetadata: DoubanMetadata?
@@ -203,7 +187,6 @@ struct DoubanBindingPanel: View {
                 }
                 if let cached = try await cachedMetadataIfFresh(movieId: movieId, input: input) {
                     try await applyDoubanPosterIfAvailable(cached, movieId: movieId)
-                    try await syncDoubanMetadataToOmniPlayDockerIfNeeded(cached, movieId: movieId)
                     await MainActor.run {
                         onSaved(cached)
                         NotificationCenter.default.post(name: .libraryUpdated, object: nil)
@@ -224,7 +207,6 @@ struct DoubanBindingPanel: View {
                 if let posterURL = metadata.posterURL, DoubanMetadata.isUsablePosterURL(posterURL) {
                     PosterManager.shared.downloadPoster(posterPath: posterURL)
                 }
-                try await syncDoubanMetadataToOmniPlayDockerIfNeeded(metadata, movieId: movieId)
                 await MainActor.run {
                     onSaved(metadata)
                     NotificationCenter.default.post(name: .libraryUpdated, object: nil)
@@ -250,104 +232,6 @@ struct DoubanBindingPanel: View {
         if let posterURL = metadata.posterURL, DoubanMetadata.isUsablePosterURL(posterURL) {
             PosterManager.shared.downloadPoster(posterPath: posterURL)
         }
-    }
-
-    private func syncDoubanMetadataToOmniPlayDockerIfNeeded(_ metadata: DoubanMetadata, movieId: Int64) async throws {
-        do {
-            let target = try await AppDatabase.shared.dbQueue.read { db -> OmniPlayDockerDoubanSyncTarget? in
-                guard let source = try MediaSource.fetchOne(
-                    db,
-                    sql: """
-                    SELECT mediaSource.*
-                    FROM mediaSource
-                    JOIN videoFile ON videoFile.sourceId = mediaSource.id
-                    WHERE mediaSource.protocolType = ?
-                      AND videoFile.movieId = ?
-                      AND videoFile.id LIKE 'omniplay-docker:%'
-                    LIMIT 1
-                    """,
-                    arguments: [MediaSourceProtocol.omniplayDocker.rawValue, movieId]
-                ) else {
-                    return nil
-                }
-
-                guard let sourceId = source.id else {
-                    return nil
-                }
-
-                let localFileIds = try String.fetchAll(
-                    db,
-                    sql: """
-                    SELECT id
-                    FROM videoFile
-                    WHERE movieId = ?
-                      AND sourceId = ?
-                      AND id LIKE 'omniplay-docker:%'
-                    """,
-                    arguments: [movieId, sourceId]
-                )
-                return OmniPlayDockerDoubanSyncTarget(source: source, localFileIds: localFileIds)
-            }
-
-            guard let target,
-                  target.source.protocolKind == .omniplayDocker else {
-                return
-            }
-
-            let config = OmniPlayDockerAuthConfig.decode(target.source.authConfig)
-            let client = try OmniPlayDockerClient(baseURLString: target.source.baseUrl, sessionCookie: config?.sessionCookie)
-            let remoteItems = try await client.libraryItems()
-            let remoteItem = try await matchingOmniPlayDockerItem(
-                movieId: movieId,
-                localFileIds: target.localFileIds,
-                remoteItems: remoteItems,
-                client: client
-            )
-            guard let remoteItem else {
-                throw OmniPlayDockerDoubanSyncError.remoteItemNotFound
-            }
-            _ = try await client.importDoubanMetadata(libraryItemId: remoteItem.id, metadata: metadata)
-        } catch {
-            print("⚠️ 同步豆瓣元数据到 OmniPlay Docker 失败：\(error.localizedDescription)")
-            throw error
-        }
-    }
-
-    private func matchingOmniPlayDockerItem(
-        movieId: Int64,
-        localFileIds: [String],
-        remoteItems: [OmniPlayDockerLibraryItem],
-        client: OmniPlayDockerClient
-    ) async throws -> OmniPlayDockerLibraryItem? {
-        if let item = remoteItems.first(where: { MediaLibraryManager.omniPlayDockerMovieId(for: $0.id) == movieId }) {
-            return item
-        }
-
-        let remoteFileIds = Set(localFileIds.compactMap(omniPlayDockerRemoteFileId(from:)))
-        guard !remoteFileIds.isEmpty else { return nil }
-
-        for item in remoteItems {
-            let detail = try await client.libraryDetail(id: item.id)
-            let detailFileIds = Set(omniPlayDockerRemoteFileIds(from: detail))
-            if !detailFileIds.isDisjoint(with: remoteFileIds) {
-                return item
-            }
-        }
-        return nil
-    }
-
-    private func omniPlayDockerRemoteFileId(from localFileId: String) -> String? {
-        let parts = localFileId.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
-        guard parts.count == 3, parts[0] == "omniplay-docker", !parts[2].isEmpty else { return nil }
-        return parts[2].removingPercentEncoding ?? parts[2]
-    }
-
-    private func omniPlayDockerRemoteFileIds(from detail: OmniPlayDockerLibraryDetail) -> [String] {
-        var ids = detail.videoFiles.map(\.id)
-        for season in detail.seasons {
-            ids.append(contentsOf: season.episodes.compactMap(\.videoFile?.id))
-        }
-        return ids
     }
 
     private func cachedMetadataIfFresh(movieId: Int64, input: String) async throws -> DoubanMetadata? {

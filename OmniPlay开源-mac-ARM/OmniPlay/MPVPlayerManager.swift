@@ -52,6 +52,10 @@ class MPVPlayerManager: ObservableObject {
         }
     }
     @Published var position: Float = 0.0
+    // Cached on the main thread by the state poll. Reading mpv synchronously
+    // from SwiftUI can observe a transient zero/NaN while a file is loading or
+    // after a seek, which makes the playback timeline appear stuck.
+    @Published private(set) var currentTimePosition: Double = 0.0
     @Published var currentTime: String = "00:00"
     @Published var remainingTime: String = "00:00"
     @Published var currentSubtitleSize: Int = 16
@@ -83,6 +87,9 @@ class MPVPlayerManager: ObservableObject {
     private var pendingInitialSeekAttempts = 0
     private var pendingInitialSeekDeadline: Date?
     private let initialSeekTimeout: TimeInterval = 8.0
+    // mpv applies pause changes asynchronously. Keep the button responsive
+    // until the next poll observes the same engine state.
+    private var pendingIsPlayingOverride: (value: Bool, until: Date)?
     var duration: Double = 0.0
     
     private func log(_ message: String) {
@@ -122,16 +129,7 @@ class MPVPlayerManager: ObservableObject {
     }
     
     var currentTimePos: Double {
-        if DispatchQueue.getSpecific(key: controlQueueKey) == true {
-            var timePos: Double = 0.0
-            mpv_get_property(mpv, "time-pos", MPV_FORMAT_DOUBLE, &timePos)
-            return timePos
-        }
-        return mpvControlQueue.sync {
-            var timePos: Double = 0.0
-            mpv_get_property(mpv, "time-pos", MPV_FORMAT_DOUBLE, &timePos)
-            return timePos
-        }
+        currentTimePosition
     }
 
     var playbackEngineSnapshot: PlaybackEngineSnapshot {
@@ -473,10 +471,13 @@ class MPVPlayerManager: ObservableObject {
             mpv_set_property_string(self.mpv, "hwdec", "videotoolbox")
             let shouldStripUserInfo = self.applyRemotePlaybackHeaders(for: urls)
             self.log("decode profile isDVLike=\(isDolbyVisionLike) hwdec=videotoolbox")
-            self.pendingInitialSeekPosition = startPosition > 5.0 ? startPosition : nil
-            self.pendingInitialSeekFilename = (startPosition > 5.0 && urls[0].isFileURL) ? urls[0].lastPathComponent : nil
+            self.pendingInitialSeekPosition = startPosition > 0 ? startPosition : nil
+            // bd:// exposes an internal playlist filename that does not match
+            // the source m2ts path, so filename matching would discard a valid
+            // resume seek for Blu-ray folders/ISO images.
+            self.pendingInitialSeekFilename = (startPosition > 0 && urls[0].isFileURL && !isBluRay) ? urls[0].lastPathComponent : nil
             self.pendingInitialSeekAttempts = 0
-            self.pendingInitialSeekDeadline = startPosition > 5.0
+            self.pendingInitialSeekDeadline = startPosition > 0
                 ? Date().addingTimeInterval(self.initialSeekTimeout)
                 : nil
             mpv_set_property_string(self.mpv, "start", "0")
@@ -486,7 +487,11 @@ class MPVPlayerManager: ObservableObject {
                 mpv_set_property_string(self.mpv, "bluray-device", rootArgument)
                 self.executeMpvCommand(["loadfile", "bd://", "replace"])
             } else {
-                self.executeMpvCommand(["loadfile", self.mpvLoadArgument(for: urls[0], stripUserInfo: shouldStripUserInfo), "replace"])
+                var firstLoadCommand = ["loadfile", self.mpvLoadArgument(for: urls[0], stripUserInfo: shouldStripUserInfo), "replace"]
+                if startPosition > 0 {
+                    firstLoadCommand.append(contentsOf: ["-1", String(format: "start=%.3f", startPosition)])
+                }
+                self.executeMpvCommand(firstLoadCommand)
                 for url in urls.dropFirst() {
                     self.executeMpvCommand(["loadfile", self.mpvLoadArgument(for: url, stripUserInfo: shouldStripUserInfo), "append"])
                 }
@@ -497,6 +502,11 @@ class MPVPlayerManager: ObservableObject {
             
             DispatchQueue.main.async {
                 self.isPlaying = true
+                self.currentTimePosition = 0
+                self.position = 0
+                self.currentTime = "00:00"
+                self.remainingTime = "00:00"
+                self.duration = 0
                 self.lastTrackCount = 0
                 self.currentPlaylistIndex = 0
             }
@@ -530,28 +540,34 @@ class MPVPlayerManager: ObservableObject {
     }
     
     func playOrPause() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.playOrPause() }
+            return
+        }
+        // Decide the target from the published state on the main thread. The
+        // mpv `pause` property can lag behind a previous command, so deriving
+        // a toggle from it may issue the wrong transition and make the button
+        // flicker when the next poll arrives.
+        let targetIsPlaying = !isPlaying
+        pendingIsPlayingOverride = (targetIsPlaying, Date().addingTimeInterval(0.75))
+        isPlaying = targetIsPlaying
         runOnControlQueue { [weak self] in
             guard let self else { return }
-            var pause: Int32 = 0
-            mpv_get_property(self.mpv, "pause", MPV_FORMAT_FLAG, &pause)
-            var newPause: Int32 = (pause == 1) ? 0 : 1
-            mpv_set_property(self.mpv, "pause", MPV_FORMAT_FLAG, &newPause)
-            DispatchQueue.main.async {
-                self.isPlaying = (newPause == 0)
-            }
+            mpv_set_property_string(self.mpv, "pause", targetIsPlaying ? "no" : "yes")
         }
     }
 
     func setPaused(_ paused: Bool) {
         guard !isStopping else { return }
         DispatchQueue.main.async {
+            self.pendingIsPlayingOverride = (!paused, Date().addingTimeInterval(0.75))
             self.isPlaying = !paused
         }
         runOnControlQueue { [weak self] in
             guard let self else { return }
-            var pause: Int32 = paused ? 1 : 0
-            mpv_set_property(self.mpv, "pause", MPV_FORMAT_FLAG, &pause)
+            mpv_set_property_string(self.mpv, "pause", paused ? "yes" : "no")
             DispatchQueue.main.async {
+                self.pendingIsPlayingOverride = (!paused, Date().addingTimeInterval(0.75))
                 self.isPlaying = !paused
             }
         }
@@ -571,6 +587,7 @@ class MPVPlayerManager: ObservableObject {
         }
 
         DispatchQueue.main.async {
+            self.pendingIsPlayingOverride = nil
             self.lastDrawablePointer = nil
             self.pendingDrawablePointer = nil
             self.retainedDrawableLayer = nil
@@ -714,7 +731,6 @@ class MPVPlayerManager: ObservableObject {
     
     private func updatePlaybackState() {
         guard !isStopping else { return }
-        guard isPlaying else { return }
         guard !isPollingState else { return }
         isPollingState = true
 
@@ -732,6 +748,8 @@ class MPVPlayerManager: ObservableObject {
             var sid: Int64 = -1
             var delay: Double = 0.0
             var playlistPos: Int64 = 0
+            var isPaused: Int32 = 0
+            var isIdleActive: Int32 = 0
 
             mpv_get_property(mpv, "time-pos", MPV_FORMAT_DOUBLE, &timePos)
             mpv_get_property(mpv, "duration", MPV_FORMAT_DOUBLE, &dur)
@@ -740,16 +758,40 @@ class MPVPlayerManager: ObservableObject {
             mpv_get_property(mpv, "sid", MPV_FORMAT_INT64, &sid)
             mpv_get_property(mpv, "sub-delay", MPV_FORMAT_DOUBLE, &delay)
             mpv_get_property(mpv, "playlist-pos", MPV_FORMAT_INT64, &playlistPos)
+            mpv_get_property(mpv, "pause", MPV_FORMAT_FLAG, &isPaused)
+            mpv_get_property(mpv, "idle-active", MPV_FORMAT_FLAG, &isIdleActive)
             let filename = self.getMpvStringProperty("filename")
             self.applyPendingInitialSeekIfNeeded(timePos: timePos, duration: dur, playlistPos: playlistPos, filename: filename)
 
             DispatchQueue.main.async {
                 defer { self.isPollingState = false }
-                self.duration = dur
-                if dur > 0 {
-                    self.position = Float(timePos / dur)
-                    self.currentTime = self.formatTime(timePos)
-                    self.remainingTime = "-" + self.formatTime(dur - timePos)
+                let validTimePos = timePos.isFinite && timePos >= 0 ? timePos : self.currentTimePosition
+                let validDuration = dur.isFinite && dur > 0 ? dur : 0
+                self.currentTimePosition = validTimePos
+                // `idle` is not a reliable playback-state signal for bd:// and
+                // some remote/ISO sources: it may remain set while the active
+                // file is still playing. The pause property is authoritative
+                // for the play/pause button.
+                // 播放结束后 mpv 会回到 idle 且不再有任何当前文件，此时必须复位
+                // isPlaying，否则息屏断言不会释放。bd:// 等源播放途中也可能报告 idle，
+                // 所以只在「没有当前文件」时才当作播放结束。
+                let playbackEnded = isIdleActive == 1 && (filename?.isEmpty ?? true)
+                let observedIsPlaying = isPaused == 0 && !playbackEnded
+                if let pending = self.pendingIsPlayingOverride {
+                    if observedIsPlaying == pending.value || Date() >= pending.until {
+                        self.pendingIsPlayingOverride = nil
+                        self.isPlaying = observedIsPlaying
+                    } else {
+                        self.isPlaying = pending.value
+                    }
+                } else {
+                    self.isPlaying = observedIsPlaying
+                }
+                if validDuration > 0 {
+                    self.duration = validDuration
+                    self.position = Float(min(max(validTimePos / validDuration, 0), 1))
+                    self.currentTime = self.formatTime(validTimePos)
+                    self.remainingTime = "-" + self.formatTime(max(0, validDuration - validTimePos))
                 }
                 if let name = filename, name != self.currentFilename {
                     self.currentFilename = name

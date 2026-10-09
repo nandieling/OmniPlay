@@ -22,15 +22,16 @@ public sealed class PlayerViewModelTests
     }
 
     [Fact]
-    public async Task OpenAsync_WithSmallResumePosition_DoesNotSeek()
+    public async Task OpenAsync_WithSmallResumePosition_SeeksAfterStartup()
     {
         var mediaPlayer = new RecordingMediaPlayer();
         var viewModel = new PlayerViewModel(mediaPlayer);
 
+        // 只要有有效进度就续播（对齐 mac 版），哪怕只有几秒。
         await viewModel.OpenAsync("sample.mkv", 3);
-        await Task.Delay(300);
+        await Task.Delay(450);
 
-        Assert.Null(mediaPlayer.LastSeekPositionSeconds);
+        Assert.Equal(3, mediaPlayer.LastSeekPositionSeconds);
 
         await viewModel.StopAsync();
     }

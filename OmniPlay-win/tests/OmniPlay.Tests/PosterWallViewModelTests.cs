@@ -9,13 +9,16 @@ using OmniPlay.Core.ViewModels.Library;
 using OmniPlay.Core.ViewModels.Player;
 using OmniPlay.Core.ViewModels.Settings;
 using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 
 namespace OmniPlay.Tests;
 
+[Collection("Locale")]
 public sealed class PosterWallViewModelTests
 {
     [Fact]
-    public void MediaServerProtocolSelection_UsesRecommendedDockerDefaults()
+    public void MediaServerProtocolSelection_UsesPlexDefaults()
     {
         var viewModel = CreateViewModel(
             new FakeVideoFileRepository(),
@@ -25,10 +28,9 @@ public sealed class PosterWallViewModelTests
 
         viewModel.OpenMediaServerPanelCommand.Execute(null);
 
-        Assert.Equal("http://127.0.0.1:45722", viewModel.PendingMediaServerBaseUrl);
-        Assert.Contains("OmniPlay Docker", viewModel.PendingMediaServerTokenWatermark, StringComparison.Ordinal);
-        Assert.False(viewModel.PendingMediaServerUsesUserId);
+        Assert.Equal(string.Empty, viewModel.PendingMediaServerBaseUrl);
         Assert.False(viewModel.PendingMediaServerUsesPlex);
+        Assert.True(viewModel.PendingMediaServerUsesUserId);
 
         viewModel.SelectedMediaServerProtocolOption = viewModel.MediaServerProtocolOptions.Single(option => option.Value == "plex");
 
@@ -37,6 +39,13 @@ public sealed class PosterWallViewModelTests
         Assert.False(viewModel.PendingMediaServerUsesUserId);
         Assert.True(viewModel.PendingMediaServerUsesPlex);
         Assert.Equal("登录 Plex", viewModel.PlexAuthorizeButtonText);
+
+        viewModel.SelectedMediaServerProtocolOption = viewModel.MediaServerProtocolOptions.Single(option => option.Value == "emby");
+
+        Assert.Equal("http://127.0.0.1:8096", viewModel.PendingMediaServerBaseUrl);
+        Assert.True(viewModel.PendingMediaServerUsesUserId);
+        Assert.False(viewModel.PendingMediaServerUsesPlex);
+        Assert.DoesNotContain("X-Plex-Token", viewModel.PendingMediaServerTokenWatermark, StringComparison.Ordinal);
 
         viewModel.SelectedMediaServerProtocolOption = viewModel.MediaServerProtocolOptions.Single(option => option.Value == "jellyfin");
 
@@ -189,6 +198,244 @@ public sealed class PosterWallViewModelTests
         Assert.Equal("降序", viewModel.SortDirectionLabel);
         Assert.False(viewModel.IsSortAscending);
         Assert.Equal(["High Rating", "Low Rating", "No Rating"], viewModel.LibraryItems.Select(item => item.Title).ToArray());
+    }
+
+    [Fact]
+    public async Task HomeCategoryFolders_SortByNameAndKeepUnlabeledLast()
+    {
+        var movieRepository = new FakeMovieRepository();
+        movieRepository.Movies.AddRange(
+        [
+            new Movie { Id = 1, Title = "Inception", Director = "Nolan", ReleaseDate = "2010-07-16", PosterPath = "/p/1.jpg" },
+            new Movie { Id = 2, Title = "Interstellar", Director = "Nolan", ReleaseDate = "2014-11-07", PosterPath = "/p/2.jpg" },
+            new Movie { Id = 3, Title = "Moonrise", Director = "Wes", ReleaseDate = "2012-05-23", PosterPath = "/p/3.jpg" },
+            new Movie { Id = 4, Title = "Unlabeled", ReleaseDate = "2020-01-01", PosterPath = "/p/4.jpg" }
+        ]);
+        var viewModel = CreateViewModel(
+            new FakeVideoFileRepository(),
+            new FakePlaybackLauncher(),
+            new SettingsViewModel(new FakeSettingsService(), new FakeTmdbConnectionTester()),
+            new PlayerViewModel(new FakeMediaPlayer()),
+            movieRepository: movieRepository,
+            categoryFolderStore: new FakeCategoryFolderStore());
+
+        await viewModel.LoadAsync();
+        await viewModel.SelectHomeCategoryCommand.ExecuteAsync("director");
+
+        var folders = viewModel.LibraryItems.Where(item => item.IsFolder).ToArray();
+        Assert.Equal(["Nolan", "Wes", "未标注"], folders.Select(item => item.Title).ToArray());
+        Assert.Equal(new int?[] { 2, 1, 1 }, folders.Select(item => item.FolderItemCount).ToArray());
+        Assert.All(folders, item => Assert.Null(item.Subtitle));
+
+        viewModel.ToggleSortDirectionCommand.Execute(null);
+
+        Assert.Equal(
+            ["Wes", "Nolan", "未标注"],
+            viewModel.LibraryItems.Where(item => item.IsFolder).Select(item => item.Title).ToArray());
+    }
+
+    [Fact]
+    public async Task FolderDetailBio_MergesLibraryWithPersonFilmography()
+    {
+        var movieRepository = new FakeMovieRepository();
+        movieRepository.Movies.AddRange(
+        [
+            new Movie { Id = 1, Title = "盗梦空间", Director = "诺兰", TmdbId = 27205, ReleaseDate = "2010-07-16", VoteAverage = 8.1, PosterPath = "/p/1.jpg" },
+            new Movie { Id = 2, Title = "星际穿越", Director = "诺兰", TmdbId = 157336, ReleaseDate = "2014-11-07", VoteAverage = 8.4, PosterPath = "/p/2.jpg" }
+        ]);
+        var fakeStore = new FakeCategoryFolderStore();
+        var viewModel = CreateViewModel(
+            new FakeVideoFileRepository(),
+            new FakePlaybackLauncher(),
+            new SettingsViewModel(new FakeSettingsService(), new FakeTmdbConnectionTester()),
+            new PlayerViewModel(new FakeMediaPlayer()),
+            movieRepository: movieRepository,
+            categoryFolderStore: fakeStore);
+
+        await viewModel.LoadAsync();
+        await viewModel.SelectHomeCategoryCommand.ExecuteAsync("director");
+
+        var folder = viewModel.LibraryItems.Single(item => item.IsFolder);
+        await viewModel.OpenDetailCommand.ExecuteAsync(folder);
+
+        Assert.Equal("诺兰共执导过 4 部影视", viewModel.OpenFolderBioHeader);
+        Assert.True(viewModel.HasOpenFolderBioRows);
+        // 详情页封面用人物照片（懒下载到本地后），卡片封面才用影视海报
+        Assert.Contains("director#诺兰", fakeStore.PhotoEnsureCalls);
+        Assert.Equal(FakeCategoryFolderStore.LocalPersonPhotoPath, viewModel.OpenFolderCoverPath);
+        Assert.Equal("人物照片", viewModel.OpenFolderCoverTip);
+        Assert.False(viewModel.IsOpenFolderFilmographyLoading);
+
+        // 年表固定六列，作品少时每列一条
+        Assert.Equal(6, viewModel.OpenFolderBioColumns.Count);
+        Assert.All(viewModel.OpenFolderBioColumns, column => Assert.True(column.Count <= 1));
+        var rows = viewModel.OpenFolderBioColumns.SelectMany(column => column).ToArray();
+        Assert.Equal(["2000：", "2010：", "2014：", "2023："], rows.Select(row => row.YearLabel).ToArray());
+        Assert.Equal([false, true, true, false], rows.Select(row => row.IsLocal).ToArray());
+        Assert.Equal("《记忆碎片》8.0", rows[0].Text, StringComparer.Ordinal);
+        Assert.Equal("《星际穿越》8.4", rows[2].Text, StringComparer.Ordinal);
+
+        viewModel.CloseHomeFolderCommand.Execute(null);
+        Assert.Equal(string.Empty, viewModel.OpenFolderBioHeader);
+        Assert.False(viewModel.HasOpenFolderBioRows);
+    }
+
+    [Fact]
+    public async Task FolderDetail_TakesOverTheWholeHomeView()
+    {
+        var movieRepository = new FakeMovieRepository();
+        movieRepository.Movies.Add(new Movie
+        {
+            Id = 1,
+            Title = "盗梦空间",
+            Director = "诺兰",
+            ReleaseDate = "2010-07-16",
+            PosterPath = "/p/1.jpg"
+        });
+        var videoFileRepository = new FakeVideoFileRepository();
+        videoFileRepository.ContinueWatching.Add(new LibraryPosterItem
+        {
+            Id = "movie-1",
+            Title = "盗梦空间",
+            MediaKind = "电影"
+        });
+        var viewModel = CreateViewModel(
+            videoFileRepository,
+            new FakePlaybackLauncher(),
+            new SettingsViewModel(new FakeSettingsService(), new FakeTmdbConnectionTester()),
+            new PlayerViewModel(new FakeMediaPlayer()),
+            movieRepository: movieRepository,
+            categoryFolderStore: new FakeCategoryFolderStore());
+
+        await viewModel.LoadAsync();
+        await viewModel.SelectHomeCategoryCommand.ExecuteAsync("director");
+
+        Assert.True(viewModel.HasContinueWatching);
+        Assert.True(viewModel.ShowContinueWatching);
+
+        await viewModel.OpenDetailCommand.ExecuteAsync(viewModel.LibraryItems.Single(item => item.IsFolder));
+
+        // 详情页占满整页：继续播放区块让位，搜索/排序/分类按钮也不再可用
+        Assert.True(viewModel.HasContinueWatching);
+        Assert.False(viewModel.ShowContinueWatching);
+
+        viewModel.CloseHomeFolderCommand.Execute(null);
+
+        Assert.True(viewModel.ShowContinueWatching);
+    }
+
+    [Fact]
+    public async Task FolderPosterEditor_OfferScrapedPostersAndPersistChoice()
+    {
+        var movieRepository = new FakeMovieRepository();
+        movieRepository.Movies.AddRange(
+        [
+            new Movie { Id = 1, Title = "盗梦空间", Director = "诺兰", ReleaseDate = "2010-07-16", PosterPath = "/p/1.jpg" },
+            new Movie { Id = 2, Title = "星际穿越", Director = "诺兰", ReleaseDate = "2014-11-07", PosterPath = "/p/2.jpg" },
+            new Movie { Id = 3, Title = "月升王国", Director = "韦斯", ReleaseDate = "2012-05-23", PosterPath = "/p/3.jpg" }
+        ]);
+        var fakeStore = new FakeCategoryFolderStore();
+        var viewModel = CreateViewModel(
+            new FakeVideoFileRepository(),
+            new FakePlaybackLauncher(),
+            new SettingsViewModel(new FakeSettingsService(), new FakeTmdbConnectionTester()),
+            new PlayerViewModel(new FakeMediaPlayer()),
+            movieRepository: movieRepository,
+            categoryFolderStore: fakeStore);
+
+        await viewModel.LoadAsync();
+        await viewModel.SelectHomeCategoryCommand.ExecuteAsync("director");
+
+        var nolan = viewModel.LibraryItems.Single(item => item.IsFolder && item.Title == "诺兰");
+        await viewModel.EditHomeFolderPosterCommand.ExecuteAsync(nolan);
+
+        Assert.True(viewModel.IsFolderPosterEditorOpen);
+        Assert.Equal("诺兰", viewModel.FolderPosterEditorTitle);
+        // 候选海报只来自该分类内的影视，当前封面置顶且只标记一张
+        Assert.Equal(
+            ["/p/1.jpg", "/p/2.jpg"],
+            viewModel.FolderPosterCandidates.Select(item => item.PosterPath).OrderBy(path => path, StringComparer.Ordinal).ToArray());
+        Assert.Equal(1, viewModel.FolderPosterCandidates.Count(item => item.IsCurrent));
+        Assert.True(viewModel.FolderPosterCandidates[0].IsCurrent);
+
+        var pick = viewModel.FolderPosterCandidates.Single(item => item.PosterPath == "/p/1.jpg");
+        await viewModel.SelectFolderPosterCommand.ExecuteAsync(pick);
+
+        Assert.Equal("/p/1.jpg", fakeStore.FolderPosters["director#诺兰"]);
+        Assert.Equal("/p/1.jpg", viewModel.LibraryItems.Single(item => item.IsFolder && item.Title == "诺兰").PosterPath);
+        Assert.True(viewModel.FolderPosterCandidates.Single(item => item.PosterPath == "/p/1.jpg").IsCurrent);
+        Assert.False(viewModel.FolderPosterCandidates.Single(item => item.PosterPath == "/p/2.jpg").IsCurrent);
+
+        await viewModel.ResetFolderPosterCommand.ExecuteAsync(null);
+
+        Assert.Null(fakeStore.FolderPosters["director#诺兰"]);
+        // 恢复默认后回到"分类内随机海报"，两张都有可能
+        Assert.Contains(
+            viewModel.LibraryItems.Single(item => item.IsFolder && item.Title == "诺兰").PosterPath,
+            new[] { "/p/1.jpg", "/p/2.jpg" });
+    }
+
+    [Fact]
+    public async Task FolderPosterEditor_RenamesPersonAndMovesFolder()
+    {
+        var movieRepository = new FakeMovieRepository();
+        movieRepository.Movies.AddRange(
+        [
+            new Movie { Id = 1, Title = "盗梦空间", Director = "Nolan", ReleaseDate = "2010-07-16", PosterPath = "/p/1.jpg" },
+            new Movie { Id = 2, Title = "月升王国", Director = "韦斯", ReleaseDate = "2012-05-23", PosterPath = "/p/3.jpg" }
+        ]);
+        var fakeStore = new FakeCategoryFolderStore { MovieRepository = movieRepository };
+        var viewModel = CreateViewModel(
+            new FakeVideoFileRepository(),
+            new FakePlaybackLauncher(),
+            new SettingsViewModel(new FakeSettingsService(), new FakeTmdbConnectionTester()),
+            new PlayerViewModel(new FakeMediaPlayer()),
+            movieRepository: movieRepository,
+            categoryFolderStore: fakeStore);
+
+        await viewModel.LoadAsync();
+        await viewModel.SelectHomeCategoryCommand.ExecuteAsync("director");
+
+        var nolan = viewModel.LibraryItems.Single(item => item.IsFolder && item.Title == "Nolan");
+        await viewModel.EditHomeFolderPosterCommand.ExecuteAsync(nolan);
+
+        Assert.True(viewModel.IsFolderPersonRenameVisible);
+        Assert.Equal("导演名称", viewModel.FolderPosterEditorNameLabel);
+        Assert.Equal("Nolan", viewModel.FolderPosterEditorDraftName);
+
+        viewModel.FolderPosterEditorDraftName = "诺兰";
+        await viewModel.RenameFolderPersonCommand.ExecuteAsync(null);
+
+        Assert.Equal(("director", "Nolan", "诺兰"), fakeStore.RenameCalls.Single());
+        Assert.Equal(["诺兰", "韦斯"], viewModel.LibraryItems.Where(item => item.IsFolder).Select(item => item.Title).ToArray());
+        Assert.True(viewModel.IsFolderPosterEditorOpen);
+        Assert.Equal("诺兰", viewModel.FolderPosterEditorTitle);
+        Assert.Equal("director|诺兰", viewModel.FolderPosterEditorFolderKey);
+    }
+
+    [Fact]
+    public async Task FolderDetailBio_ForUnlabeledFolderExplainsMissingPeople()
+    {
+        var movieRepository = new FakeMovieRepository();
+        movieRepository.Movies.Add(new Movie { Id = 1, Title = "无名电影", ReleaseDate = "2020-01-01", PosterPath = "/p/1.jpg" });
+        var viewModel = CreateViewModel(
+            new FakeVideoFileRepository(),
+            new FakePlaybackLauncher(),
+            new SettingsViewModel(new FakeSettingsService(), new FakeTmdbConnectionTester()),
+            new PlayerViewModel(new FakeMediaPlayer()),
+            movieRepository: movieRepository,
+            categoryFolderStore: new FakeCategoryFolderStore());
+
+        await viewModel.LoadAsync();
+        await viewModel.SelectHomeCategoryCommand.ExecuteAsync("director");
+
+        await viewModel.OpenDetailCommand.ExecuteAsync(viewModel.LibraryItems.Single(item => item.IsFolder));
+
+        Assert.Equal("未标注", viewModel.OpenFolderDisplayName);
+        Assert.Equal(
+            "这些 1 部影视尚未补充导演/主演信息，补充后将自动归入对应文件夹。",
+            viewModel.OpenFolderBioHeader);
+        Assert.False(viewModel.HasOpenFolderBioRows);
     }
 
     [Fact]
@@ -387,12 +634,12 @@ public sealed class PosterWallViewModelTests
         await viewModel.OpenDetailCommand.ExecuteAsync(posterItem);
 
         Assert.Equal("ep-2", viewModel.DetailPrimaryFile?.Id);
-        Assert.Contains("\u672A\u770B\u5B8C", viewModel.DetailProgressSummary, StringComparison.Ordinal);
+        Assert.Contains("\u672A\u64AD\u5B8C", viewModel.DetailProgressSummary, StringComparison.Ordinal);
         Assert.InRange(viewModel.DetailPrimaryProgressRatio, 0.49, 0.51);
 
         await viewModel.ToggleDetailWatchedCommand.ExecuteAsync(viewModel.DetailPrimaryFile);
 
-        Assert.Equal("\u5DF2\u770B", viewModel.DetailProgressSummary);
+        Assert.Equal("\u5DF2\u64AD", viewModel.DetailProgressSummary);
         Assert.Equal(1, viewModel.DetailPrimaryProgressRatio);
     }
 
@@ -441,7 +688,7 @@ public sealed class PosterWallViewModelTests
         viewModel.OpenPosterWatchStateConfirmationCommand.Execute(posterItem);
 
         Assert.True(viewModel.IsPosterWatchStateConfirmationOpen);
-        Assert.Contains("\u5DF2\u770B", viewModel.PosterWatchStateConfirmationActionText, StringComparison.Ordinal);
+        Assert.Contains("\u5DF2\u64AD", viewModel.PosterWatchStateConfirmationActionText, StringComparison.Ordinal);
         Assert.False(videoRepository.FindVideo("ep-2")!.IsWatched);
 
         await viewModel.ConfirmPosterWatchStateCommand.ExecuteAsync(null);
@@ -2044,7 +2291,8 @@ public sealed class PosterWallViewModelTests
         FakeTvShowRepository? tvShowRepository = null,
         FakeLibraryMetadataEditor? metadataEditor = null,
         FakeLibraryMetadataEnricher? metadataEnricher = null,
-        FakeLibraryThumbnailEnricher? thumbnailEnricher = null)
+        FakeLibraryThumbnailEnricher? thumbnailEnricher = null,
+        ICategoryFolderStore? categoryFolderStore = null)
     {
         return new PosterWallViewModel(
             movieRepository ?? new FakeMovieRepository(),
@@ -2062,7 +2310,8 @@ public sealed class PosterWallViewModelTests
             new FakeNetworkCredentialStore(),
             playbackLauncher,
             settings,
-            player);
+            player,
+            categoryFolderStore: categoryFolderStore);
     }
 
     private static LibraryVideoItem CreateVideoItem(
@@ -2184,6 +2433,8 @@ public sealed class PosterWallViewModelTests
 
         public int GetContinueWatchingCallCount { get; private set; }
 
+        public List<LibraryPosterItem> ContinueWatching { get; } = [];
+
         public Task<IReadOnlyList<LibraryVideoItem>> GetByMovieAsync(long movieId, CancellationToken cancellationToken = default)
         {
             return Task.FromResult<IReadOnlyList<LibraryVideoItem>>(CloneFiles(MovieFilesById, movieId));
@@ -2198,7 +2449,7 @@ public sealed class PosterWallViewModelTests
         public Task<IReadOnlyList<LibraryPosterItem>> GetContinueWatchingAsync(CancellationToken cancellationToken = default)
         {
             GetContinueWatchingCallCount++;
-            return Task.FromResult<IReadOnlyList<LibraryPosterItem>>([]);
+            return Task.FromResult<IReadOnlyList<LibraryPosterItem>>(ContinueWatching);
         }
 
         public Task<IReadOnlyDictionary<string, PlaybackWatchState>> GetLibraryPlaybackStatesAsync(CancellationToken cancellationToken = default)
@@ -2388,6 +2639,16 @@ public sealed class PosterWallViewModelTests
         {
             return Task.FromResult<IReadOnlyList<Movie>>(Movies);
         }
+
+        public Task UpdatePosterPathAsync(long id, string? posterPath, CancellationToken cancellationToken = default)
+        {
+            var movie = Movies.FirstOrDefault((item) => item.Id == id);
+            if (movie is not null)
+            {
+                movie.PosterPath = posterPath;
+            }
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class FakeTvShowRepository : ITvShowRepository
@@ -2397,6 +2658,16 @@ public sealed class PosterWallViewModelTests
         public Task<IReadOnlyList<TvShow>> GetAllAsync(CancellationToken cancellationToken = default)
         {
             return Task.FromResult<IReadOnlyList<TvShow>>(Shows);
+        }
+
+        public Task UpdatePosterPathAsync(long id, string? posterPath, CancellationToken cancellationToken = default)
+        {
+            var show = Shows.FirstOrDefault((item) => item.Id == id);
+            if (show is not null)
+            {
+                show.PosterPath = posterPath;
+            }
+            return Task.CompletedTask;
         }
     }
 
@@ -2707,6 +2978,161 @@ public sealed class PosterWallViewModelTests
         }
     }
 
+    private sealed class FakeCategoryFolderStore : ICategoryFolderStore
+    {
+        /// <summary>模拟头像懒下载后的本地文件（Windows 端图片只认本地路径）。</summary>
+        public static readonly string LocalPersonPhotoPath = CreateLocalPersonPhoto();
+
+        /// <summary>测试里写入过的文件夹封面，键为 <c>kind#name</c>，值为 null 表示恢复默认。</summary>
+        public Dictionary<string, string?> FolderPosters { get; } = [];
+
+        public List<string> PhotoEnsureCalls { get; } = [];
+
+        private static string CreateLocalPersonPhoto()
+        {
+            string path = Path.Combine(Path.GetTempPath(), "omniplay-test-person-photo.jpg");
+            File.WriteAllText(path, "photo");
+            return path;
+        }
+
+        public List<PersonProfile> Profiles { get; } =
+        [
+            new()
+            {
+                Id = "director#诺兰",
+                Name = "诺兰",
+                Kind = "director",
+                TmdbPersonId = 108,
+                PhotoPath = "/person-photo.jpg",
+                FilmographyJson = PersonProfile.EncodeFilmography(
+                [
+                    new TmdbFilmographyItem { Title = "盗梦空间", Rating = 8.1, Year = 2010, Date = "2010-07-16", TmdbId = 27205 },
+                    new TmdbFilmographyItem { Title = "记忆碎片", Rating = 8.0, Year = 2000, Date = "2000-10-11", TmdbId = 173494 },
+                    new TmdbFilmographyItem { Title = "奥本海默", Rating = 8.3, Year = 2023, Date = "2023-07-20", TmdbId = 872585 }
+                ])
+            }
+        ];
+
+        public Task<IReadOnlyList<CategoryFolder>> LoadFoldersAsync(string kind, CancellationToken cancellationToken = default)
+        {
+            List<CategoryFolder> folders =
+            [
+                .. FolderPosters
+                    .Where(pair => pair.Key.StartsWith(kind + "#", StringComparison.Ordinal) &&
+                                   !string.IsNullOrWhiteSpace(pair.Value))
+                    .Select(pair => new CategoryFolder
+                    {
+                        Id = CategoryFolder.FolderId(kind, pair.Key[(kind.Length + 1)..]),
+                        Kind = kind,
+                        Name = pair.Key[(kind.Length + 1)..],
+                        PosterPath = pair.Value
+                    })
+            ];
+            return Task.FromResult<IReadOnlyList<CategoryFolder>>(folders);
+        }
+
+        public Task<IReadOnlyList<PersonProfile>> LoadProfilesAsync(string kind, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<PersonProfile>>(Profiles);
+        }
+
+        public Task<TmdbCredits?> LocalizeCreditsAsync(TmdbCredits? credits, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(credits);
+        }
+
+        public Task RegisterCreditsAsync(TmdbCredits? credits, CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
+
+        public List<(string Kind, string From, string To)> RenameCalls { get; } = [];
+
+        /// <summary>改名时顺带改写名单，模拟真实实现里的跨表迁移。</summary>
+        public FakeMovieRepository? MovieRepository { get; init; }
+
+        public Task<bool> RenamePersonAsync(string kind, string currentName, string newName, CancellationToken cancellationToken = default)
+        {
+            RenameCalls.Add((kind, currentName, newName));
+            foreach (PersonProfile profile in Profiles.Where((PersonProfile item) => item.Name == currentName))
+            {
+                profile.Name = newName;
+            }
+
+            foreach (string key in FolderPosters.Keys.ToArray())
+            {
+                if (key.EndsWith("#" + currentName, StringComparison.Ordinal))
+                {
+                    FolderPosters[CategoryFolder.FolderId(kind, newName)] = FolderPosters[key];
+                    FolderPosters.Remove(key);
+                }
+            }
+
+            foreach (Movie movie in MovieRepository?.Movies ?? [])
+            {
+                movie.Directors = RenameCredits(movie.Directors, currentName, newName);
+                movie.Director = RenameCredits(movie.Director, currentName, newName);
+                movie.Casts = RenameCredits(movie.Casts, currentName, newName);
+                movie.MainCast = RenameCredits(movie.MainCast, currentName, newName);
+            }
+
+            return Task.FromResult(true);
+        }
+
+        private static string? RenameCredits(string? names, string from, string to)
+        {
+            if (string.IsNullOrWhiteSpace(names))
+            {
+                return names;
+            }
+
+            if (names.TrimStart().StartsWith('['))
+            {
+                List<string> items = System.Text.Json.JsonSerializer.Deserialize<List<string>>(names) ?? [];
+                for (int index = 0; index < items.Count; index++)
+                {
+                    if (items[index] == from)
+                    {
+                        items[index] = to;
+                    }
+                }
+
+                return System.Text.Json.JsonSerializer.Serialize(items);
+            }
+
+            return string.Join("、", names.Split('、').Select(part => part == from ? to : part));
+        }
+
+        public Task SetFolderPosterAsync(string kind, string name, string? posterPath, CancellationToken cancellationToken = default)
+        {
+            FolderPosters[CategoryFolder.FolderId(kind, name)] = posterPath;
+            return Task.CompletedTask;
+        }
+
+        public Task<string?> EnsureProfilePhotoAsync(string kind, string name, CancellationToken cancellationToken = default)
+        {
+            PhotoEnsureCalls.Add(kind + "#" + name);
+            PersonProfile? profile = Profiles.FirstOrDefault((PersonProfile item) => item.Name == name);
+            if (profile is not null)
+            {
+                // 真实实现会把 TMDB 相对路径换成本地文件并写回档案。
+                profile.PhotoPath = LocalPersonPhotoPath;
+            }
+
+            return Task.FromResult<string?>(profile?.PhotoPath);
+        }
+
+        public Task<IReadOnlyList<TmdbFilmographyItem>?> FilmographyAsync(string kind, string name, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<TmdbFilmographyItem>?>(Profiles[0].Filmography);
+        }
+
+        public Task<int> BackfillChineseNamesAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(0);
+        }
+    }
+
     private sealed class FakeSettingsService : ISettingsService
     {
         public FakeSettingsService(AppSettings? settings = null)
@@ -2854,4 +3280,226 @@ public sealed class PosterWallViewModelTests
             return Task.CompletedTask;
         }
     }
+
+    [Fact]
+    public async Task CachePosterItemCommand_CancelConfirmation_RemovesPartialFileAndKeepsStatus()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"omniplay-cache-cancel-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var sourcePath = Path.Combine(tempRoot, "source.mkv");
+            var sourceBytes = new byte[8 * 1024 * 1024];
+            Random.Shared.NextBytes(sourceBytes);
+            File.WriteAllBytes(sourcePath, sourceBytes);
+
+            var videoRepository = new FakeVideoFileRepository();
+            videoRepository.MovieFilesById[9] =
+            [
+                CreateVideoItem(sourcePath, "vid-cancel-1", duration: sourceBytes.Length / 10)
+            ];
+            var settings = new SettingsViewModel(new FakeSettingsService(), new FakeTmdbConnectionTester());
+            settings.OfflineCacheDirectory = Path.Combine(tempRoot, "cache");
+            var viewModel = CreateViewModel(
+                videoRepository,
+                new FakePlaybackLauncher(),
+                settings,
+                new PlayerViewModel(new FakeMediaPlayer()));
+
+            var poster = new LibraryPosterItem
+            {
+                Id = "movie-9",
+                Title = "取消测试",
+                MediaKind = "电影",
+                MovieId = 9
+            };
+
+            var cacheTask = viewModel.CachePosterItemCommand.ExecuteAsync(poster);
+            await WaitUntilAsync(
+                () => viewModel.StatusMessage is { } status && status.StartsWith("\u6B63\u5728\u79BB\u7EBF\u7F13\u5B58", StringComparison.Ordinal),
+                15000);
+
+            await viewModel.CachePosterItemCommand.ExecuteAsync(poster);
+            await WaitUntilAsync(() => viewModel.IsCancelOfflineCacheConfirmationOpen, 15000);
+            Assert.True(viewModel.KeepOfflineCacheCommand.CanExecute(null));
+
+            viewModel.KeepOfflineCacheCommand.Execute(null);
+            Assert.False(viewModel.IsCancelOfflineCacheConfirmationOpen);
+
+            await viewModel.CachePosterItemCommand.ExecuteAsync(poster);
+            await WaitUntilAsync(() => viewModel.IsCancelOfflineCacheConfirmationOpen, 15000);
+
+            viewModel.ConfirmCancelOfflineCacheCommand.Execute(null);
+            Assert.False(viewModel.IsCancelOfflineCacheConfirmationOpen);
+            await cacheTask;
+
+            var destinationPath = Path.Combine(tempRoot, "cache", "vid-cancel-1", Path.GetFileName(sourcePath));
+            var tempPath = $"{destinationPath}.tmp";
+            Assert.False(File.Exists(destinationPath));
+            Assert.False(File.Exists(tempPath));
+            Assert.Contains("已取消离线缓存", viewModel.StatusMessage, StringComparison.Ordinal);
+            Assert.False(viewModel.ShowSelectedSeasonOfflineCacheProgress);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task CacheDetailEpisodeCommand_CancelConfirmation_AbortsRemoteDownloadAndRemovesTempFile()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"omniplay-cache-cancel-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        var listener = new HttpListener();
+        var prefix = $"http://127.0.0.1:{GetAvailablePort()}/";
+        listener.Prefixes.Add(prefix);
+        listener.Start();
+        var stopServer = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            var payload = new byte[4 * 1024 * 1024];
+            Random.Shared.NextBytes(payload);
+            var serverTask = Task.Run(async () =>
+            {
+                var token = stopServer.Token;
+                while (!token.IsCancellationRequested)
+                {
+                    HttpListenerContext context;
+                    try
+                    {
+                        context = await listener.GetContextAsync();
+                    }
+                    catch (Exception)
+                    {
+                        break;
+                    }
+
+                    var isHead = context.Request.HttpMethod == "HEAD";
+                    context.Response.StatusCode = (int)HttpStatusCode.OK;
+                    context.Response.ContentType = "video/x-matroska";
+                    context.Response.ContentLength64 = isHead ? payload.Length : -1;
+                    if (isHead)
+                    {
+                        context.Response.Close();
+                        continue;
+                    }
+
+                    try
+                    {
+                        for (var offset = 0; offset < payload.Length; offset += 64 * 1024)
+                        {
+                            var chunk = Math.Min(64 * 1024, payload.Length - offset);
+                            await context.Response.OutputStream.WriteAsync(payload.AsMemory(offset, chunk));
+                            await Task.Delay(15, token);
+                        }
+
+                        context.Response.Close();
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            });
+
+            var cacheDirectory = Path.Combine(tempRoot, "cache");
+            var settings = new SettingsViewModel(new FakeSettingsService(), new FakeTmdbConnectionTester());
+            settings.OfflineCacheDirectory = cacheDirectory;
+            var video = new LibraryVideoItem
+            {
+                Id = "vid-remote-cancel",
+                FileName = "remote-cancel.mkv",
+                AbsolutePath = "http://127.0.0.1/unused.mkv",
+                PlaybackPath = prefix.TrimEnd('/') + "/remote-cancel.mkv",
+                SourceProtocolType = "webdav",
+                Duration = 100
+            };
+            var viewModel = CreateViewModel(
+                new FakeVideoFileRepository(),
+                new FakePlaybackLauncher(),
+                settings,
+                new PlayerViewModel(new FakeMediaPlayer()));
+
+            var cacheTask = viewModel.CacheDetailEpisodeCommand.ExecuteAsync(video);
+            await WaitUntilAsync(
+                () => viewModel.StatusMessage is { } status && status.StartsWith("\u6B63\u5728\u79BB\u7EBF\u7F13\u5B58", StringComparison.Ordinal),
+                15000);
+            await viewModel.CacheDetailEpisodeCommand.ExecuteAsync(video);
+            await WaitUntilAsync(() => viewModel.IsCancelOfflineCacheConfirmationOpen, 15000);
+
+            viewModel.ConfirmCancelOfflineCacheCommand.Execute(null);
+            await cacheTask;
+
+            var destinationPath = Path.Combine(cacheDirectory, "vid-remote-cancel", "remote-cancel.mkv");
+            var tempPath = $"{destinationPath}.tmp";
+            Assert.False(File.Exists(destinationPath));
+            Assert.False(File.Exists(tempPath));
+            Assert.Contains("已取消离线缓存", viewModel.StatusMessage, StringComparison.Ordinal);
+        }
+        finally
+        {
+            stopServer.Cancel();
+            listener.Stop();
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
+    private static int GetAvailablePort()
+    {
+        var probe = new TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        var port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        return port;
+    }
+
+    [Fact]
+    public async Task OpenLuckyStunSourcePanel_PrefillsPersistedCredentials()
+    {
+        var initial = new AppSettings
+        {
+            LuckyStun = new LuckyStunSettings
+            {
+                ManagementUrl = "http://192.168.1.1:16601",
+                Username = "admin",
+                Password = "secret",
+                AutoUpdate = true,
+                UpdateIntervalMinutes = 45,
+                SelectedRuleId = "rule-1",
+                SelectedRuleName = "home"
+            }
+        };
+        var service = new FakeSettingsService(initial);
+        var settings = new SettingsViewModel(service, new FakeTmdbConnectionTester());
+        await settings.LoadAsync();
+
+        var viewModel = CreateViewModel(
+            new FakeVideoFileRepository(),
+            new FakePlaybackLauncher(),
+            settings,
+            new PlayerViewModel(new FakeMediaPlayer()));
+
+        viewModel.OpenLuckyStunSourcePanelCommand.Execute(null);
+
+        Assert.True(viewModel.IsLuckyStunSourcePanelOpen);
+        Assert.Equal("http://192.168.1.1:16601", viewModel.PendingLuckyStunManagementUrl);
+        Assert.Equal("admin", viewModel.PendingLuckyStunUsername);
+        Assert.Equal("secret", viewModel.PendingLuckyStunPassword);
+        Assert.True(viewModel.PendingLuckyStunAutoUpdate);
+        Assert.Equal(45, viewModel.PendingLuckyStunUpdateIntervalMinutes);
+        Assert.Equal("rule-1", viewModel.PendingLuckyStunRuleId);
+
+        // 默认协议为 WebDAV：凭据区应显示用户名与（可选）密码框，且提供 WebDAV 登录按钮。
+        Assert.True(viewModel.LuckyStunSourceUsesWebDav);
+        Assert.Equal("用户名（可选）", viewModel.LuckyStunSourceUserWatermark);
+        Assert.Equal("密码（可选）", viewModel.LuckyStunSourceCredentialWatermark);
+        Assert.True(viewModel.TestLuckyStunWebDavSourceCommand.CanExecute(null));
+    }
+
 }

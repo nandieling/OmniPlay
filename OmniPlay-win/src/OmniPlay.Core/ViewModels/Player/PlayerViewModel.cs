@@ -15,6 +15,8 @@ public partial class PlayerViewModel : ObservableObject
     private readonly IMediaPlayer mediaPlayer;
     private readonly ISubtitlePickerService? subtitlePickerService;
     private readonly SynchronizationContext? synchronizationContext;
+    private readonly IPowerManagementService powerManagement;
+    private (bool Paused, DateTimeOffset ExpiresUtc)? pendingPauseOverride;
     private Func<Task>? playPreviousEpisodeAction;
     private Func<Task>? playNextEpisodeAction;
     private Func<string, Task>? selectPlaybackNavigationItemAction;
@@ -35,10 +37,12 @@ public partial class PlayerViewModel : ObservableObject
 
     public PlayerViewModel(
         IMediaPlayer mediaPlayer,
-        ISubtitlePickerService? subtitlePickerService = null)
+        ISubtitlePickerService? subtitlePickerService = null,
+        IPowerManagementService? powerManagement = null)
     {
         this.mediaPlayer = mediaPlayer;
         this.subtitlePickerService = subtitlePickerService;
+        this.powerManagement = powerManagement ?? NullPowerManagementService.Instance;
         synchronizationContext = SynchronizationContext.Current;
 
         TogglePlayPauseCommand = new AsyncRelayCommand(TogglePlayPauseAsync, CanControlPlayback);
@@ -542,8 +546,12 @@ public partial class PlayerViewModel : ObservableObject
     private async Task TogglePlayPauseAsync()
     {
         var nextPaused = !IsPaused;
-        await mediaPlayer.SetPausedAsync(nextPaused);
+        // mpv 的 pause 属性会滞后于命令：先按目标状态更新界面，并在 0.75 秒内忽略
+        // 轮询回来的旧状态，否则暂停按钮会闪回成播放中。
+        pendingPauseOverride = (nextPaused, DateTimeOffset.UtcNow.AddMilliseconds(750));
         IsPaused = nextPaused;
+        await mediaPlayer.SetPausedAsync(nextPaused);
+        pendingPauseOverride = (nextPaused, DateTimeOffset.UtcNow.AddMilliseconds(750));
         StatusMessage = nextPaused ? "播放已暂停。" : "正在播放。";
         RefreshComputedProperties();
     }
@@ -708,7 +716,23 @@ public partial class PlayerViewModel : ObservableObject
             IsOpeningMovie = false;
         }
 
-        IsPaused = state.IsPaused;
+        if (pendingPauseOverride is { } pauseOverride)
+        {
+            if (pauseOverride.ExpiresUtc > DateTimeOffset.UtcNow)
+            {
+                IsPaused = pauseOverride.Paused;
+            }
+            else
+            {
+                pendingPauseOverride = null;
+                IsPaused = state.IsPaused;
+            }
+        }
+        else
+        {
+            IsPaused = state.IsPaused;
+        }
+
         IsPlaybackCompleted = state.IsPlaybackCompleted;
         IsMuted = state.IsMuted;
         if (!isVolumeInteractionActive)
@@ -722,7 +746,12 @@ public partial class PlayerViewModel : ObservableObject
 
         if (!isSeekInteractionActive)
         {
-            CurrentPositionSeconds = state.PositionSeconds;
+            // 刚切换片源时 mpv 会回传 NaN/负值，直接写会让进度条文本变成乱码。
+            var reportedPosition =
+                double.IsFinite(state.PositionSeconds) && state.PositionSeconds >= 0
+                    ? state.PositionSeconds
+                    : CurrentPositionSeconds;
+            CurrentPositionSeconds = reportedPosition;
             SeekPositionSeconds = CurrentPositionSeconds;
         }
 
@@ -1150,7 +1179,7 @@ public partial class PlayerViewModel : ObservableObject
 
     private async Task ApplyStartupSeekIfNeededAsync(CancellationToken cancellationToken)
     {
-        if (pendingStartupSeekSeconds is not > 5)
+        if (pendingStartupSeekSeconds is not > 0)
         {
             return;
         }
@@ -1240,7 +1269,7 @@ public partial class PlayerViewModel : ObservableObject
 
     private static double? NormalizeStartupSeekPosition(double? value)
     {
-        if (value is not > 5 || double.IsNaN(value.Value) || double.IsInfinity(value.Value))
+        if (value is not > 0 || double.IsNaN(value.Value) || double.IsInfinity(value.Value))
         {
             return null;
         }
@@ -1352,6 +1381,14 @@ public partial class PlayerViewModel : ObservableObject
         OnPropertyChanged(nameof(HasSubtitleStyleControls));
         OnPropertyChanged(nameof(ShouldShowOpeningMovieStatus));
         NotifyPlaybackNavigationStateChanged();
+        if (value)
+        {
+            powerManagement.BeginPlayback();
+        }
+        else
+        {
+            powerManagement.EndPlayback();
+        }
     }
 
     partial void OnCurrentPositionSecondsChanged(double value)

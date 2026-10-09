@@ -30,7 +30,7 @@ final class OmniPlayUITests: XCTestCase {
     func testExample() throws {
         let app = try launchAppForUITest()
 
-        guard waitForToolbarControl(in: app, identifier: "toolbar.addSource", fallbackLabel: "媒体源管理", timeout: 10) else {
+        guard waitForToolbarControl(in: app, identifier: "toolbar.addSource", fallbackLabel: "添加源", timeout: 10) else {
             throw XCTSkip("UI environment could not stably find toolbar control: toolbar.addSource")
         }
         guard hasToolbarControl(in: app, identifier: "toolbar.sync", fallbackLabel: "同步") else {
@@ -54,7 +54,7 @@ final class OmniPlayUITests: XCTestCase {
     }
 
     @MainActor
-    func testWebDAVInvalidManualURLShowsInlineValidation() throws {
+    func testWebDAVPreflightFailureShowsCopyDiagnosticsButton() throws {
         let app = try launchAppForUITest(openWebDAVSheet: true)
 
         XCTAssertTrue(app.staticTexts["webdav.sheet.title"].waitForExistence(timeout: 5))
@@ -67,15 +67,17 @@ final class OmniPlayUITests: XCTestCase {
         }
         baseURL.typeText("not-a-url")
 
-        let saveButton = app.buttons["webdav.save"]
-        XCTAssertTrue(saveButton.exists)
-        saveButton.tap()
+        let testButton = app.buttons["webdav.testConnection"]
+        XCTAssertTrue(testButton.exists)
+        testButton.tap()
 
         XCTAssertTrue(app.staticTexts["WebDAV 地址无效，请输入 http(s):// 开头且包含主机名的地址。"].waitForExistence(timeout: 5))
 
         let cancel = app.buttons["webdav.cancel"]
         XCTAssertTrue(cancel.exists)
         cancel.tap()
+
+        XCTAssertTrue(app.buttons["toolbar.copyDiagnostics"].waitForExistence(timeout: 5))
     }
 
     @MainActor
@@ -135,7 +137,7 @@ final class OmniPlayUITests: XCTestCase {
     private func waitForHomeScreenReady(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if hasToolbarControl(in: app, identifier: "toolbar.addSource", fallbackLabel: "媒体源管理") { return true }
+            if hasToolbarControl(in: app, identifier: "toolbar.addSource", fallbackLabel: "添加源") { return true }
             if app.staticTexts["我的觅影库"].exists { return true }
             if app.staticTexts["所有影视"].exists { return true }
             if app.staticTexts["媒体库空空如也，快去添加文件夹吧！"].exists { return true }

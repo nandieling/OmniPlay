@@ -23,6 +23,7 @@ public final class MpvVideoView extends FrameLayout {
     private String pendingCookie;
     private String pendingAudioTrack;
     private String pendingSubtitleTrack;
+    private String pendingQualityProfile;
     private double pendingStartSeconds;
     private boolean pendingIsoPlayback;
     private boolean surfaceReady;
@@ -110,6 +111,12 @@ public final class MpvVideoView extends FrameLayout {
         player.setAudioTrack(value);
     }
 
+    /** Applies the 播放画质模式 buffer profile to the running player. */
+    public void setQualityProfile(String mode) {
+        pendingQualityProfile = mode;
+        player.setQualityProfile(mode);
+    }
+
     public void setSubtitleTrack(String value) {
         pendingSubtitleTrack = value == null || value.isEmpty() ? "auto" : value;
         player.setSubtitleTrack(value);
@@ -125,6 +132,10 @@ public final class MpvVideoView extends FrameLayout {
 
     public String lastError() {
         return player.lastError();
+    }
+
+    public boolean isPlaying() {
+        return player.isPlaying();
     }
 
     public double currentTimeSeconds() {
@@ -253,6 +264,9 @@ public final class MpvVideoView extends FrameLayout {
         }
         if (pendingSubtitleTrack != null) {
             player.setSubtitleTrack(pendingSubtitleTrack);
+        }
+        if (pendingQualityProfile != null) {
+            player.setQualityProfile(pendingQualityProfile);
         }
     }
 }

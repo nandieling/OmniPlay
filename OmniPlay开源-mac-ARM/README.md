@@ -4,6 +4,14 @@
 
 本仓库是 macOS 开源版工程，项目入口为 `OmniPlay.xcodeproj`，主应用显示名称为“觅影”。当前播放器链路使用 MPVKit-GPL / libmpv / FFmpeg 相关组件，适合自编译、本机使用和开源再分发评估；如果要对外正式分发，请先完成签名、公证和开源许可证合规审查。
 
+## 1.8 更新要点
+
+- 导演、主演名与分类文件夹详情页的作品名自动补全中文译名：TMDB 缺少中文条目时改查人物中文译名/中文别名与作品官方别名，结果（含"确认无中文译名"）持久化缓存。
+- 分类文件夹编辑弹窗支持手动修改导演/主演名称，改名同步影片名单、文件夹封面与人物资料，并记住该名字，再次刮削不会退回外文名。
+- 设置页移除与首页重复的"首页分类"区块，分类方式统一由首页工具栏切换。
+- TMDB 连通性检测与全部 TMDB 请求移出主线程，检测超时收紧到 8 秒，消除刮削前的指针掉帧。
+- 清理 Swift 6 并发相关告警（默认 MainActor 隔离下的跨 actor 调用与 `NSLock` 异步上下文用法）。
+
 ## 1.7 更新要点
 
 - 新增 Lucky STUN 穿透媒体源，可为 OmniPlay Docker、WebDAV、Plex、Emby 和 Jellyfin 分别配置 Lucky 管理端、穿透规则与自动更新周期。
@@ -313,7 +321,7 @@ Lucky 管理信息属于每个媒体源，不是全局设置。开启自动更�
 ```text
 PRODUCT_BUNDLE_IDENTIFIER = nan.OmniPlay
 PRODUCT_NAME = 觅影
-MARKETING_VERSION = 1.7
+MARKETING_VERSION = 1.8
 CURRENT_PROJECT_VERSION = 1
 MACOSX_DEPLOYMENT_TARGET = 14.0
 DEVELOPMENT_TEAM =

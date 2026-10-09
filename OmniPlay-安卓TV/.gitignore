@@ -8,3 +8,12 @@ local.properties
 *.iml
 app/build/
 app/.cxx/
+.avd/
+*.avd/
+*.qcow2
+.kotlin/
+.externalNativeBuild/
+captures/
+*.mp4
+*.mkv
+*.mov

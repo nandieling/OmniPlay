@@ -123,7 +123,9 @@ echo "[2/5] 创建应用载荷..."
     zip -q -r "$payload_zip" . -x '*.DS_Store' '*/.DS_Store' '._*' '*/._*' '*.pdb' '*/.pdb'
 )
 unzip -tq "$payload_zip"
-unzip -Z1 "$payload_zip" | grep -Fxq 'OmniPlay.Desktop.exe' || die "载荷中缺少 OmniPlay.Desktop.exe。"
+# 先取目录再匹配：grep -q 提前退出会让 unzip 收到 SIGPIPE，pipefail 下会误报
+payload_listing="$(unzip -Z1 "$payload_zip")"
+grep -Fxq 'OmniPlay.Desktop.exe' <<<"$payload_listing" || die "载荷中缺少 OmniPlay.Desktop.exe。"
 
 echo "[3/5] 创建便携版压缩包..."
 rm -f "$portable_zip"

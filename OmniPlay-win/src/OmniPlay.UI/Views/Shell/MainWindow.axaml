@@ -7,8 +7,8 @@
     Height="900"
     MinWidth="1024"
     MinHeight="720"
-    Background="#FFFFFF"
-    Foreground="#1A1A1A"
+    Background="{DynamicResource SurfaceBrush}"
+    Foreground="{DynamicResource TextPrimaryBrush}"
     CanResize="True"
     SystemDecorations="None"
     WindowStartupLocation="CenterScreen"
@@ -25,7 +25,7 @@
       <Setter Property="VerticalAlignment" Value="Top"/>
     </Style>
     <Style Selector="Button.WinCaptionBtn:pointerover /template/ ContentPresenter">
-      <Setter Property="Background" Value="#E5E5E5"/>
+      <Setter Property="Background" Value="{DynamicResource SurfaceBorderBrush}"/>
     </Style>
     <Style Selector="Button.WinCloseBtn:pointerover /template/ ContentPresenter">
       <Setter Property="Background" Value="#E81123"/>
@@ -150,14 +150,14 @@
             HorizontalAlignment="Right"
             VerticalAlignment="Top"
             Orientation="Horizontal">
-          <Button Classes="WinCaptionBtn" Click="ShellMinimizeButton_OnClick" ToolTip.Tip="最小化">
-            <Path Data="M 0,5 H 10 V 6 H 0 Z" Fill="#323130" Width="10" Height="10" Stretch="None" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          <Button Classes="WinCaptionBtn" Click="ShellMinimizeButton_OnClick" ToolTip.Tip="{DynamicResource L104}">
+            <Path Data="M 0,5 H 10 V 6 H 0 Z" Fill="{DynamicResource TextSecondaryBrush}" Width="10" Height="10" Stretch="None" HorizontalAlignment="Center" VerticalAlignment="Center"/>
           </Button>
-          <Button Classes="WinCaptionBtn" Click="ShellMaximizeButton_OnClick" ToolTip.Tip="最大化或还原">
-            <Path Data="M 1,1 H 9 V 9 H 1 Z M 0,0 V 10 H 10 V 0 Z" Fill="#323130" Width="10" Height="10" Stretch="None" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          <Button Classes="WinCaptionBtn" Click="ShellMaximizeButton_OnClick" ToolTip.Tip="{DynamicResource L103}">
+            <Path Data="M 1,1 H 9 V 9 H 1 Z M 0,0 V 10 H 10 V 0 Z" Fill="{DynamicResource TextSecondaryBrush}" Width="10" Height="10" Stretch="None" HorizontalAlignment="Center" VerticalAlignment="Center"/>
           </Button>
-          <Button Classes="WinCaptionBtn WinCloseBtn" Click="ShellCloseButton_OnClick" ToolTip.Tip="关闭">
-            <Path Data="M 1,0 L 5,4 L 9,0 L 10,1 L 6,5 L 10,9 L 9,10 L 5,6 L 1,10 L 0,9 L 4,5 L 0,1 Z" Fill="#323130" Width="10" Height="10" Stretch="None" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          <Button Classes="WinCaptionBtn WinCloseBtn" Click="ShellCloseButton_OnClick" ToolTip.Tip="{DynamicResource L035}">
+            <Path Data="M 1,0 L 5,4 L 9,0 L 10,1 L 6,5 L 10,9 L 9,10 L 5,6 L 1,10 L 0,9 L 4,5 L 0,1 Z" Fill="{DynamicResource TextSecondaryBrush}" Width="10" Height="10" Stretch="None" HorizontalAlignment="Center" VerticalAlignment="Center"/>
           </Button>
         </StackPanel>
       </Border>

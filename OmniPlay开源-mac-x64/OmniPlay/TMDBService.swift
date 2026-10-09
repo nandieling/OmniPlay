@@ -20,7 +20,7 @@ private actor TMDBRateLimiter {
     }
 }
 
-private struct TMDBTranslationsResponse: Codable {
+struct TMDBTranslationsResponse: Codable {
     struct TranslationItem: Codable {
         struct TranslationData: Codable {
             let title: String?
@@ -39,13 +39,113 @@ private struct TMDBTranslationsResponse: Codable {
     let translations: [TranslationItem]
 }
 
-enum TMDBCredentialSource: Equatable {
+// TMDB 作品别名（/movie/{id}/alternative_titles 用 titles，/tv/{id}/alternative_titles 用 results）
+struct TMDBAlternativeTitlesResponse: Codable {
+    struct Title: Codable {
+        let title: String?
+        let type: String?
+        let iso3166_1: String?
+        enum CodingKeys: String, CodingKey {
+            case title, type
+            case iso3166_1 = "iso_3166_1"
+        }
+    }
+    let titles: [Title]?
+    let results: [Title]?
+}
+
+// TMDB 人物详情（append_to_response=translations）：本地化名称 + 别名 + 各语言译名
+struct TMDBPersonDetailResponse: Codable {
+    struct PersonTranslations: Codable {
+        let translations: [TMDBTranslationsResponse.TranslationItem]?
+    }
+    let name: String?
+    let alsoKnownAs: [String]?
+    let translations: PersonTranslations?
+    enum CodingKeys: String, CodingKey {
+        case name, translations
+        case alsoKnownAs = "also_known_as"
+    }
+}
+
+// TMDB 演职员接口（/movie/{id}/credits、/tv/{id}/credits）
+struct TMDBCredits: Codable {
+    struct Person: Codable {
+        let name: String?
+        let character: String?
+        let id: Int?
+        let profilePath: String?
+        enum CodingKeys: String, CodingKey {
+            case name, character, id
+            case profilePath = "profile_path"
+        }
+    }
+    struct Crew: Codable {
+        let name: String?
+        let job: String?
+        let id: Int?
+        let profilePath: String?
+        enum CodingKeys: String, CodingKey {
+            case name, job, id
+            case profilePath = "profile_path"
+        }
+    }
+    let cast: [Person]
+    let crew: [Crew]
+}
+
+// TMDB 人物信息（名称 + 人物 id + 头像），用于首页分类文件夹的人物照片
+struct TMDBPersonInfo: Codable, Equatable {
+    let name: String
+    let tmdbId: Int?
+    let profilePath: String?
+}
+
+// TMDB 人物作品条目（标题 + 评分 + 年份/日期 + TMDB id），用于文件夹详情页简介
+struct TMDBFilmographyItem: Codable, Equatable {
+    var title: String
+    var rating: Double?
+    var year: Int?
+    var date: String?
+    var tmdbId: Int?
+    // 作品类型（movie/tv）；老缓存里没有该字段，缺中文片名时会按两种类型探测
+    var mediaType: String?
+}
+
+// /person/{id}/combined_credits 的通用条目（cast/crew 公共字段子集）
+private struct TMDBCombinedCredits: Codable {
+    struct Item: Codable {
+        let id: Int?
+        let title: String?
+        let name: String?
+        let mediaType: String?
+        let voteAverage: Double?
+        let job: String?
+        let releaseDate: String?
+        let firstAirDate: String?
+        enum CodingKeys: String, CodingKey {
+            case id, title, name, job
+            case mediaType = "media_type"
+            case voteAverage = "vote_average"
+            case releaseDate = "release_date"
+            case firstAirDate = "first_air_date"
+        }
+    }
+    let cast: [Item]
+    let crew: [Item]
+}
+
+enum TMDBCredentialSource {
     case customAPIKey(String)
     case customBearerToken(String)
     case none
 
-    var isAvailable: Bool {
-        self != .none
+    nonisolated var isAvailable: Bool {
+        switch self {
+        case .customAPIKey(let key): return !key.isEmpty
+        case .customBearerToken(let token): return !token.isEmpty
+        case .none: return false
+        }
     }
 }
 
@@ -56,13 +156,20 @@ struct TMDBConnectionCheckResult {
 
 class TMDBService {
     static let shared = TMDBService()
-    
-    private let baseURL = "https://api.themoviedb.org/3"
+
+    nonisolated static let officialAPIBaseURL = URL(string: "https://api.themoviedb.org/3")!
+    nonisolated static let proxyURLDefaultsKey = "tmdbProxyURL"
+
+    private var baseURL: String { Self.officialAPIBaseURL.absoluteString }
     private var tvSeasonCountCache: [Int: Int] = [:]
     private var tvSeasonAirYearCache: [String: Int] = [:]
     private let seasonCacheQueue = DispatchQueue(label: "nan.omniplay.tmdb.season-cache")
     private var localizedResultCache: [String: TMDBResult] = [:]
     private let localizedCacheQueue = DispatchQueue(label: "nan.omniplay.tmdb.localized-cache")
+    private var creditsCache: [Int: (directors: [TMDBPersonInfo], casts: [TMDBPersonInfo])] = [:]
+    private let creditsCacheQueue = DispatchQueue(label: "nan.omniplay.tmdb.credits-cache")
+    private var filmographyCache: [String: [TMDBFilmographyItem]] = [:]
+    private let filmographyCacheQueue = DispatchQueue(label: "nan.omniplay.tmdb.filmography-cache")
     private let customRateLimiter = TMDBRateLimiter(requestsPerSecond: 3.2)
     private let tmdbSession: URLSession
     
@@ -78,7 +185,7 @@ class TMDBService {
         tmdbSession = URLSession(configuration: config)
     }
 
-    static func credentialSource(customAPIInput: String? = nil, defaults: UserDefaults = .standard) -> TMDBCredentialSource {
+    nonisolated static func credentialSource(customAPIInput: String? = nil, defaults: UserDefaults = .standard) -> TMDBCredentialSource {
         let explicitInput = customAPIInput?.trimmingCharacters(in: .whitespacesAndNewlines)
         let userKey = (explicitInput?.isEmpty == false ? explicitInput! : (defaults.string(forKey: "tmdbApiKey") ?? ""))
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -92,19 +199,78 @@ class TMDBService {
         Self.credentialSource()
     }
 
-    func checkConnection(customAPIInput: String? = nil) async -> TMDBConnectionCheckResult {
-        let credential = Self.credentialSource(customAPIInput: customAPIInput)
+    nonisolated static func proxyAPIBaseURL(
+        customProxyURL: String? = nil,
+        defaults: UserDefaults = .standard
+    ) -> URL? {
+        let input = (customProxyURL ?? defaults.string(forKey: proxyURLDefaultsKey) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else { return officialAPIBaseURL }
+
+        let valueWithScheme = input.contains("://") ? input : "https://\(input)"
+        guard var components = URLComponents(string: valueWithScheme),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              components.host?.isEmpty == false,
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil else {
+            return nil
+        }
+
+        components.scheme = scheme
+        var path = components.percentEncodedPath
+        while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
+        if path.isEmpty { path = "/3" }
+        else if path != "/3" && !path.hasSuffix("/3") { path += "/3" }
+        components.percentEncodedPath = path
+        return components.url
+    }
+
+    nonisolated static func resolvedAPIURL(
+        for officialURLString: String,
+        customProxyURL: String? = nil,
+        defaults: UserDefaults = .standard
+    ) -> URL? {
+        guard let sourceURL = URL(string: officialURLString),
+              let source = URLComponents(url: sourceURL, resolvingAgainstBaseURL: false),
+              let proxyBaseURL = proxyAPIBaseURL(customProxyURL: customProxyURL, defaults: defaults),
+              var destination = URLComponents(url: proxyBaseURL, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+
+        let sourcePath = source.percentEncodedPath
+        let endpointPath = sourcePath == "/3" ? "" : (sourcePath.hasPrefix("/3/") ? String(sourcePath.dropFirst(2)) : sourcePath)
+        let basePath = destination.percentEncodedPath.hasSuffix("/")
+            ? String(destination.percentEncodedPath.dropLast())
+            : destination.percentEncodedPath
+        destination.percentEncodedPath = basePath + endpointPath
+        destination.percentEncodedQuery = source.percentEncodedQuery
+        return destination.url
+    }
+
+    /// 连通性探测：URLSession、URL 拼装与超时控制都在全局执行器上跑，
+    /// 刮削前的检测不再占用主线程（否则检测期间指针与滚动会掉帧）。
+    nonisolated static func probeConnection(
+        credential: TMDBCredentialSource,
+        customProxyURL: String? = nil
+    ) async -> TMDBConnectionCheckResult {
         guard credential.isAvailable else {
             return TMDBConnectionCheckResult(isConnected: false, message: "当前未配置可用的 TMDB API。")
         }
-
-        let urlString = "\(baseURL)/configuration"
-        guard let request = makeRequest(urlString: urlString, credential: credential) else {
+        guard proxyAPIBaseURL(customProxyURL: customProxyURL) != nil else {
+            return TMDBConnectionCheckResult(isConnected: false, message: "TMDB 代理网关地址无效。")
+        }
+        let urlString = "\(officialAPIBaseURL.absoluteString)/configuration"
+        guard let request = makeRequest(urlString: urlString, credential: credential, customProxyURL: customProxyURL) else {
             return TMDBConnectionCheckResult(isConnected: false, message: "TMDB 请求地址无效。")
         }
 
+        let session = URLSession(configuration: probeSessionConfiguration())
+        defer { session.invalidateAndCancel() }
         do {
-            let (_, response) = try await tmdbSession.data(for: request)
+            let (_, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 return TMDBConnectionCheckResult(isConnected: false, message: "TMDB 未返回有效响应。")
             }
@@ -116,7 +282,20 @@ class TMDBService {
             return TMDBConnectionCheckResult(isConnected: false, message: error.localizedDescription)
         }
     }
-    
+
+    // 探测用独立配置：超时更短，网络异常时尽快返回，不拖长刮削前的等待窗口
+    nonisolated private static func probeSessionConfiguration() -> URLSessionConfiguration {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 8
+        config.timeoutIntervalForResource = 10
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.urlCache = nil
+        config.httpCookieStorage = nil
+        config.httpShouldSetCookies = false
+        config.connectionProxyDictionary = [:]
+        return config
+    }
+
     // 🌟 自动刮削调用入口（带年份参数）
     func multiSearch(
         query: String,
@@ -417,6 +596,111 @@ class TMDBService {
         return airYear
     }
     
+    /// 拉取导演与主演名单（缓存），用于影片元数据与首页分类。
+    /// 剧集取 Creator/导演（TMDB 剧集 credits 仅含第一季主创），电影取 Director。
+    func fetchCredits(id: Int, mediaType: String?) async -> (directors: [TMDBPersonInfo], casts: [TMDBPersonInfo]) {
+        if let cached = creditsCacheQueue.sync(execute: { creditsCache[id] }) {
+            return cached
+        }
+        let appLang = UserDefaults.standard.string(forKey: "appLanguage") ?? "zh-Hans"
+        let tmdbLang = appLang == "en" ? "en-US" : "zh-CN"
+        let kind = (mediaType?.lowercased() == "tv") ? "tv" : "movie"
+        let urlString = "\(baseURL)/\(kind)/\(id)/credits?language=\(tmdbLang)"
+        guard let (data, response) = try? await requestTMDB(urlString: urlString),
+              response.statusCode == 200,
+              let credits = try? JSONDecoder().decode(TMDBCredits.self, from: data) else {
+            return ([], [])
+        }
+        let directorJobs: Set<String> = (kind == "tv") ? ["creator", "director"] : ["director"]
+        var directors: [TMDBPersonInfo] = []
+        var seenDirectors = Set<String>()
+        for member in credits.crew {
+            guard let job = member.job?.lowercased(),
+                  directorJobs.contains(job),
+                  let rawName = member.name else { continue }
+            let name = simplifyChineseIfNeeded(rawName)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !name.isEmpty else { continue }
+            let key = name.lowercased()
+            guard !seenDirectors.contains(key) else { continue }
+            seenDirectors.insert(key)
+            directors.append(TMDBPersonInfo(name: name, tmdbId: member.id, profilePath: member.profilePath))
+        }
+        directors = Array(directors.prefix(5))
+
+        var casts: [TMDBPersonInfo] = []
+        var seenCasts = Set<String>()
+        for member in credits.cast {
+            guard let rawName = member.name else { continue }
+            let name = simplifyChineseIfNeeded(rawName)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !name.isEmpty else { continue }
+            let key = name.lowercased()
+            guard !seenCasts.contains(key) else { continue }
+            seenCasts.insert(key)
+            casts.append(TMDBPersonInfo(name: name, tmdbId: member.id, profilePath: member.profilePath))
+        }
+        casts = Array(casts.prefix(8))
+
+        creditsCacheQueue.sync { creditsCache[id] = (directors, casts) }
+        return (directors, casts)
+    }
+
+    // 人物完整作品列表（/person/{id}/combined_credits）：导演取 crew 中 director/creator，主演取 cast 排行
+    func fetchPersonFilmography(personId: Int, kind: String) async -> [TMDBFilmographyItem]? {
+        let cacheKey = "\(kind)-\(personId)"
+        if let cached = filmographyCacheQueue.sync(execute: { filmographyCache[cacheKey] }) {
+            return cached
+        }
+        let appLang = UserDefaults.standard.string(forKey: "appLanguage") ?? "zh-Hans"
+        let tmdbLang = appLang == "en" ? "en-US" : "zh-CN"
+        let urlString = "\(baseURL)/person/\(personId)/combined_credits?language=\(tmdbLang)"
+        guard let (data, response) = try? await requestTMDB(urlString: urlString),
+              response.statusCode == 200,
+              let credits = try? JSONDecoder().decode(TMDBCombinedCredits.self, from: data) else {
+            return nil
+        }
+        let source: [TMDBCombinedCredits.Item]
+        if kind == "director" {
+            source = credits.crew.filter { member in
+                let job = (member.job ?? "").lowercased()
+                return job == "director" || job == "creator"
+            }
+        } else {
+            source = credits.cast
+        }
+        var byKey: [String: (title: String, rating: Double?, tmdbId: Int?, year: Int?, date: String?, mediaType: String?)] = [:]
+        var order: [String] = []
+        for member in source {
+            let rawTitle = (member.mediaType?.lowercased() == "tv" ? member.name : member.title) ?? ""
+            let title = simplifyChineseIfNeeded(rawTitle)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !title.isEmpty else { continue }
+            let key = "\(member.id ?? 0)-\(member.mediaType ?? "")"
+            let rawDate = member.releaseDate ?? member.firstAirDate
+            let year = Int((rawDate ?? "").prefix(4))
+            if byKey[key] == nil {
+                order.append(key)
+                byKey[key] = (title, member.voteAverage, member.id, year, rawDate, member.mediaType?.lowercased())
+            } else if let r = member.voteAverage, (byKey[key]?.rating ?? -1) < r {
+                byKey[key]?.rating = r
+            }
+        }
+        var items: [TMDBFilmographyItem] = []
+        for key in order {
+            guard let entry = byKey[key] else { continue }
+            items.append(TMDBFilmographyItem(
+                title: entry.title,
+                rating: entry.rating,
+                year: entry.year,
+                date: entry.date,
+                tmdbId: entry.tmdbId,
+                mediaType: entry.mediaType
+            ))
+        }
+        let sorted = items.sorted { lhs, rhs in (lhs.rating ?? -1) > (rhs.rating ?? -1) }
+        let result = Array(sorted.prefix(60))
+        filmographyCacheQueue.sync { filmographyCache[cacheKey] = result }
+        return result
+    }
+
     private func matchableTitles(for item: TMDBResult) -> [String] {
         var list: [String] = []
         list.append(item.displayTitle)
@@ -463,12 +747,30 @@ class TMDBService {
     func requestTMDB(urlString: String) async throws -> (Data, HTTPURLResponse)? {
         let credential = currentCredentialSource()
         guard credential.isAvailable else { return nil }
+        let session = tmdbSession
+        let limiter = customRateLimiter
+        // 网络请求与限流等待放到全局执行器，主线程只负责发起与拿结果
+        return try await Task.detached(priority: .utility) {
+            try await Self.performRequest(
+                session: session,
+                urlString: urlString,
+                credential: credential,
+                limiter: limiter
+            )
+        }.value
+    }
 
+    nonisolated private static func performRequest(
+        session: URLSession,
+        urlString: String,
+        credential: TMDBCredentialSource,
+        limiter: TMDBRateLimiter
+    ) async throws -> (Data, HTTPURLResponse)? {
         let maxAttempts = 2
         for attempt in 0..<maxAttempts {
-            await rateLimiter(for: credential).acquire()
+            await limiter.acquire()
             guard let request = makeRequest(urlString: urlString, credential: credential) else { return nil }
-            let (data, response) = try await tmdbSession.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { return nil }
             if http.statusCode != 429 || attempt == maxAttempts - 1 {
                 return (data, http)
@@ -478,12 +780,13 @@ class TMDBService {
         return nil
     }
 
-    private func rateLimiter(for credential: TMDBCredentialSource) -> TMDBRateLimiter {
-        customRateLimiter
-    }
-
-    private func makeRequest(urlString: String, credential: TMDBCredentialSource) -> URLRequest? {
-        guard let url = URL(string: authenticatedURLString(for: urlString, credential: credential)) else {
+    nonisolated private static func makeRequest(
+        urlString: String,
+        credential: TMDBCredentialSource,
+        customProxyURL: String? = nil
+    ) -> URLRequest? {
+        guard let resolvedURL = resolvedAPIURL(for: urlString, customProxyURL: customProxyURL),
+              let url = authenticatedURL(for: resolvedURL, credential: credential) else {
             return nil
         }
         var request = URLRequest(url: url)
@@ -495,16 +798,21 @@ class TMDBService {
         return request
     }
 
-    private func authenticatedURLString(for urlString: String, credential: TMDBCredentialSource) -> String {
+    nonisolated private static func authenticatedURL(for url: URL, credential: TMDBCredentialSource) -> URL? {
         switch credential {
         case .customAPIKey(let key):
-            return urlString + (urlString.contains("?") ? "&" : "?") + "api_key=\(key)"
+            guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+            var queryItems = components.queryItems ?? []
+            queryItems.removeAll { $0.name == "api_key" }
+            queryItems.append(URLQueryItem(name: "api_key", value: key))
+            components.queryItems = queryItems
+            return components.url
         case .customBearerToken, .none:
-            return urlString
+            return url
         }
     }
 
-    private func retryDelayNanoseconds(for response: HTTPURLResponse, attempt: Int) -> UInt64 {
+    nonisolated private static func retryDelayNanoseconds(for response: HTTPURLResponse, attempt: Int) -> UInt64 {
         if let retryAfter = response.value(forHTTPHeaderField: "Retry-After")?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            let seconds = Double(retryAfter),
@@ -615,36 +923,118 @@ class TMDBService {
             return nil
         }
         let payload = try JSONDecoder().decode(TMDBTranslationsResponse.self, from: data)
-        let preferredRegionOrder = ["CN", "SG", "TW", "HK"]
+        return Self.chineseName(from: payload.translations, requireChinese: false)
+    }
 
-        let zhTranslations = payload.translations.filter { item in
-            (item.iso639_1 ?? "").lowercased() == "zh"
+    /// 人物中文姓名：先取 zh-CN 本地化名称与中文译名，再退到人物别名中的中文名。
+    /// 区分"TMDB 确实没有中文条目"和"本次请求失败"，避免网络抖动被长期当成前者。
+    func fetchChinesePersonName(personId: Int) async -> ChineseNameResult {
+        let appLang = UserDefaults.standard.string(forKey: "appLanguage") ?? "zh-Hans"
+        let tmdbLang = appLang == "en" ? "en-US" : "zh-CN"
+        let urlString = "\(baseURL)/person/\(personId)?language=\(tmdbLang)&append_to_response=translations"
+        guard let (data, response) = try? await requestTMDB(urlString: urlString) else { return .requestFailed }
+        guard response.statusCode == 200,
+              let detail = try? JSONDecoder().decode(TMDBPersonDetailResponse.self, from: data) else {
+            return response.statusCode == 404 ? .notTranslated : .requestFailed
         }
-        for region in preferredRegionOrder {
-            if let hit = zhTranslations.first(where: { ($0.iso3166_1 ?? "").uppercased() == region }) {
-                if let title = hit.data?.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
-                    return simplifyChineseIfNeeded(title)
-                }
-                if let name = hit.data?.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
-                    return simplifyChineseIfNeeded(name)
-                }
-            }
-        }
+        if let name = Self.chinesePersonName(from: detail) { return .found(name) }
+        return .notTranslated
+    }
 
-        for hit in zhTranslations {
-            if let title = hit.data?.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
-                return simplifyChineseIfNeeded(title)
+    /// 作品中文片名：TMDB 在缺少 zh-CN 标题时会直接回传原文，此时 alternative_titles
+    /// 里往往仍带有中文片名（别名与译名是两张表），这里只查别名。
+    /// - Parameter mediaType: "movie" / "tv"；nil 时先按电影再按剧集探测。
+    func fetchChineseTitle(mediaType: String?, id: Int) async -> ChineseNameResult {
+        let candidates = mediaType == nil ? ["movie", "tv"] : [(mediaType ?? "").lowercased() == "tv" ? "tv" : "movie"]
+        var sawRequestFailure = false
+        for kind in candidates {
+            let urlString = "\(baseURL)/\(kind)/\(id)/alternative_titles"
+            guard let (data, response) = try? await requestTMDB(urlString: urlString) else {
+                sawRequestFailure = true
+                continue
             }
-            if let name = hit.data?.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
-                return simplifyChineseIfNeeded(name)
+            guard response.statusCode == 200,
+                  let payload = try? JSONDecoder().decode(TMDBAlternativeTitlesResponse.self, from: data) else {
+                if response.statusCode != 404 { sawRequestFailure = true }
+                continue
+            }
+            if let title = Self.chineseAlternativeTitle(from: payload) { return .found(title) }
+        }
+        return sawRequestFailure ? .requestFailed : .notTranslated
+    }
+
+    // MARK: - 中文名称挑选（纯函数，便于单测）
+
+    // 人物详情 → 中文名：本地化名称 → 简体中文译名 → 中文名别名
+    static func chinesePersonName(from detail: TMDBPersonDetailResponse) -> String? {
+        if let name = trimmed(detail.name), containsChinese(name) {
+            return simplifiedChinese(name) ?? name
+        }
+        if let translated = chineseName(
+            from: detail.translations?.translations ?? [],
+            requireChinese: true
+        ) {
+            return translated
+        }
+        if let alias = detail.alsoKnownAs?.first(where: { containsChinese($0) }), !alias.isEmpty {
+            return simplifiedChinese(alias) ?? alias
+        }
+        return nil
+    }
+
+    // 作品别名 → 中文片名：电影在 titles、剧集在 results，优先 CN/SG/TW/HK 地区
+    static func chineseAlternativeTitle(from payload: TMDBAlternativeTitlesResponse) -> String? {
+        let titles = (payload.titles ?? []) + (payload.results ?? [])
+        func chinese(_ entries: [TMDBAlternativeTitlesResponse.Title]) -> String? {
+            for entry in entries {
+                guard let value = trimmed(entry.title), containsChinese(value) else { continue }
+                return simplifiedChinese(value) ?? value
+            }
+            return nil
+        }
+        let regional = ["CN", "SG", "TW", "HK"].compactMap { region in
+            titles.first { ($0.iso3166_1 ?? "").uppercased() == region }
+        }
+        return chinese(regional) ?? chinese(titles)
+    }
+
+    // 译名列表 → 简体中文名称：优先 CN/SG/TW/HK 地区，其次任意中文条目
+    static func chineseName(
+        from translations: [TMDBTranslationsResponse.TranslationItem],
+        requireChinese: Bool
+    ) -> String? {
+        let zhTranslations = translations.filter { ($0.iso639_1 ?? "").lowercased() == "zh" }
+        let regional = ["CN", "SG", "TW", "HK"].compactMap { region in
+            zhTranslations.first { ($0.iso3166_1 ?? "").uppercased() == region }
+        }
+        for item in regional + zhTranslations {
+            for raw in [item.data?.title, item.data?.name] {
+                guard let value = trimmed(raw), !value.isEmpty else { continue }
+                if requireChinese, !containsChinese(value) { continue }
+                return simplifiedChinese(value) ?? value
             }
         }
         return nil
     }
 
-    private func simplifyChineseIfNeeded(_ input: String?) -> String? {
+    nonisolated static func containsChinese(_ value: String) -> Bool {
+        value.range(of: #"\p{Han}"#, options: .regularExpression) != nil
+    }
+
+    private static func trimmed(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    func simplifyChineseIfNeeded(_ input: String?) -> String? {
+        Self.simplifiedChinese(input)
+    }
+
+    static func simplifiedChinese(_ input: String?) -> String? {
         guard let input else { return nil }
-        guard input.range(of: #"\p{Han}"#, options: .regularExpression) != nil else { return input }
+        guard containsChinese(input) else { return input }
         let mutable = NSMutableString(string: input)
         let transformed = CFStringTransform(
             mutable as CFMutableString,

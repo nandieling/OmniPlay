@@ -10,6 +10,8 @@ struct LocalSidecarMetadata {
     var tmdbId: Int?
     var seasonNumber: Int?
     var episodeNumber: Int?
+    var directors: [String] = []
+    var casts: [String] = []
 
     var hasAnyValue: Bool {
         title?.isEmpty == false ||
@@ -20,7 +22,9 @@ struct LocalSidecarMetadata {
         voteAverage != nil ||
         tmdbId != nil ||
         seasonNumber != nil ||
-        episodeNumber != nil
+        episodeNumber != nil ||
+        !directors.isEmpty ||
+        !casts.isEmpty
     }
 }
 
@@ -102,6 +106,40 @@ final class LocalMetadataSidecarStore {
         let tmdbId = (try? document.nodes(forXPath: "//*[local-name()='uniqueid' and @type='tmdb']").first?.stringValue)
             ?? value(["tmdbid", "tmdb_id", "id"])
 
+        func nameList(_ names: [String]) -> [String] {
+            var result: [String] = []
+            for name in names {
+                guard let nodes = try? document.nodes(forXPath: "//*[local-name()='\(name)']") else { continue }
+                for node in nodes {
+                    let text = node.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if !text.isEmpty { result.append(text) }
+                }
+            }
+            return result
+        }
+
+        func actorNames() -> [String] {
+            guard let nodes = try? document.nodes(forXPath: "//*[local-name()='actor']") else { return [] }
+            var result: [String] = []
+            for node in nodes {
+                guard let element = node as? XMLElement else { continue }
+                var attributeValue: String?
+                for attribute in (element.attributes ?? []) {
+                    if attribute.name == "name" {
+                        attributeValue = attribute.stringValue
+                        break
+                    }
+                }
+                let text = (element.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let candidate = (attributeValue ?? text).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !candidate.isEmpty { result.append(candidate) }
+            }
+            return result
+        }
+
+        let directors = nameList(["director", "showrunner", "creator"])
+        let casts = actorNames()
+
         return LocalSidecarMetadata(
             title: value(["title", "showtitle", "originaltitle"]),
             date: value(["premiered", "releasedate", "aired", "year"]),
@@ -111,7 +149,9 @@ final class LocalMetadataSidecarStore {
             voteAverage: Double(value(["rating", "userrating"]) ?? ""),
             tmdbId: Int(tmdbId ?? ""),
             seasonNumber: Int(value(["season"]) ?? ""),
-            episodeNumber: Int(value(["episode"]) ?? "")
+            episodeNumber: Int(value(["episode"]) ?? ""),
+            directors: directors,
+            casts: casts
         )
     }
 
@@ -131,6 +171,12 @@ final class LocalMetadataSidecarStore {
         }
         if let season = metadata.seasonNumber { addElement("season", String(season), to: root) }
         if let episode = metadata.episodeNumber { addElement("episode", String(episode), to: root) }
+        for director in metadata.directors { addElement("director", director, to: root) }
+        for actor in metadata.casts {
+            let element = XMLElement(name: "actor")
+            element.addAttribute(XMLNode.attribute(withName: "name", stringValue: actor) as! XMLNode)
+            root.addChild(element)
+        }
 
         let document = XMLDocument(rootElement: root)
         document.version = "1.0"

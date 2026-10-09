@@ -115,6 +115,7 @@ namespace OmniPlay.Infrastructure.Data;
                            movie.releaseDate AS Subtitle,
                            movie.posterPath AS PosterPath,
                            movie.voteAverage AS VoteAverage,
+                           doubanMetadata.rating AS DoubanRating,
                            '电影' AS MediaKind,
                            CASE
                                WHEN videoFile.duration > 0 THEN MIN(videoFile.playProgress / videoFile.duration, 1.0)
@@ -131,6 +132,8 @@ namespace OmniPlay.Infrastructure.Data;
                     JOIN mediaSource ON mediaSource.id = videoFile.sourceId
                                     AND mediaSource.isEnabled = 1
                                     AND mediaSource.removedAt IS NULL
+                    LEFT JOIN doubanMetadata ON doubanMetadata.itemKind = 'movie'
+                    AND doubanMetadata.entityId = movie.id
                     WHERE videoFile.playProgress > @MinimumProgressSeconds
                       AND (videoFile.duration <= 0 OR (videoFile.playProgress / videoFile.duration) < @CompletionRatio)
                 ),
@@ -141,6 +144,7 @@ namespace OmniPlay.Infrastructure.Data;
                            tvShow.firstAirDate AS Subtitle,
                            tvShow.posterPath AS PosterPath,
                            tvShow.voteAverage AS VoteAverage,
+                           doubanMetadata.rating AS DoubanRating,
                            '剧集' AS MediaKind,
                            CASE
                                WHEN videoFile.duration > 0 THEN MIN(videoFile.playProgress / videoFile.duration, 1.0)
@@ -157,6 +161,8 @@ namespace OmniPlay.Infrastructure.Data;
                     JOIN mediaSource ON mediaSource.id = videoFile.sourceId
                                     AND mediaSource.isEnabled = 1
                                     AND mediaSource.removedAt IS NULL
+                    LEFT JOIN doubanMetadata ON doubanMetadata.itemKind = 'tv'
+                    AND doubanMetadata.entityId = tvShow.id
                     WHERE videoFile.playProgress > @MinimumProgressSeconds
                       AND (videoFile.duration <= 0 OR (videoFile.playProgress / videoFile.duration) < @CompletionRatio)
                 )
@@ -167,6 +173,7 @@ namespace OmniPlay.Infrastructure.Data;
                        Subtitle,
                        PosterPath,
                        VoteAverage,
+                       DoubanRating,
                        MediaKind,
                        ContinueWatchingProgress,
                        LastPlayedAt
@@ -181,6 +188,7 @@ namespace OmniPlay.Infrastructure.Data;
                        Subtitle,
                        PosterPath,
                        VoteAverage,
+                       DoubanRating,
                        MediaKind,
                        ContinueWatchingProgress,
                        LastPlayedAt
@@ -202,11 +210,12 @@ namespace OmniPlay.Infrastructure.Data;
                 Subtitle = FormatYear(row.Subtitle),
                 PosterPath = row.PosterPath,
                 VoteAverage = row.VoteAverage,
+                DoubanRating = row.DoubanRating,
                 MediaKind = row.MediaKind,
                 ContinueWatchingProgress = Math.Clamp(row.ContinueWatchingProgress, 0, 1),
                 IsContinuing = true,
                 WatchState = PlaybackWatchState.InProgress,
-                ContinueWatchingLabel = $"\u672A\u770B\u5B8C {Math.Clamp(row.ContinueWatchingProgress * 100, 0, 100):F0}%",
+                ContinueWatchingLabel = $"\u672A\u64AD\u5B8C {Math.Clamp(row.ContinueWatchingProgress * 100, 0, 100):F0}%",
                 LastPlayedAt = row.LastPlayedAt,
                 MovieId = row.MovieId,
                 TvShowId = row.TvShowId
@@ -628,6 +637,8 @@ namespace OmniPlay.Infrastructure.Data;
         public string? PosterPath { get; init; }
 
         public double? VoteAverage { get; init; }
+
+        public double? DoubanRating { get; init; }
 
         public string MediaKind { get; init; } = string.Empty;
 

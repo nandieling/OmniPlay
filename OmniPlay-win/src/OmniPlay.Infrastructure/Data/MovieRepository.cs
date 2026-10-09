@@ -30,7 +30,12 @@ public sealed class MovieRepository : IMovieRepository
                                 movie.isLocked,
                                 movie.productionCountryCodes,
                                 movie.originalLanguage,
-                                movie.metadataLanguage
+                                movie.metadataLanguage,
+                                movie.director,
+                                movie.mainCast,
+                                movie.directors,
+                                movie.casts,
+                                movie.tmdbId
                 FROM movie
                 JOIN videoFile ON videoFile.movieId = movie.id AND videoFile.mediaType = 'movie'
                 JOIN mediaSource ON mediaSource.id = videoFile.sourceId
@@ -42,6 +47,16 @@ public sealed class MovieRepository : IMovieRepository
                 """,
                 cancellationToken: cancellationToken));
         return movies.Where(ShouldExposeMovieOnHome).ToList();
+    }
+
+    public async Task UpdatePosterPathAsync(long id, string? posterPath, CancellationToken cancellationToken = default)
+    {
+        using var connection = database.OpenConnection();
+        await connection.ExecuteAsync(
+            new CommandDefinition(
+                "UPDATE movie SET posterPath = @PosterPath WHERE id = @Id",
+                new { Id = id, PosterPath = posterPath },
+                cancellationToken: cancellationToken));
     }
 
     private static bool ShouldExposeMovieOnHome(Movie movie)
@@ -56,24 +71,7 @@ public sealed class MovieRepository : IMovieRepository
             return true;
         }
 
-        return MediaNameParser.IsUsableLibraryDisplayTitle(movie.Title) &&
-               HasVisibleMetadata(movie);
-    }
-
-    private static bool HasVisibleMetadata(Movie movie)
-    {
-        return movie.IsLocked ||
-               HasText(movie.ReleaseDate) ||
-               HasText(movie.Overview) ||
-               HasText(movie.PosterPath) ||
-               movie.VoteAverage.HasValue ||
-               HasText(movie.ProductionCountryCodes) ||
-               HasText(movie.OriginalLanguage) ||
-               HasText(movie.MetadataLanguage);
-    }
-
-    private static bool HasText(string? value)
-    {
-        return !string.IsNullOrWhiteSpace(value);
+        // 未刮削的合成占位只要标题可用就要在首页展示，保证其能进入自动刮削队列（对齐 mac 版 fetchVisibleLibrary）。
+        return MediaNameParser.IsUsableLibraryDisplayTitle(movie.Title);
     }
 }

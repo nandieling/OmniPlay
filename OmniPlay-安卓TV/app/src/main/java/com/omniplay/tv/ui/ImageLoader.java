@@ -248,10 +248,12 @@ public final class ImageLoader {
         }
     }
 
+    /** 未刮削条目的海报占位：跟着当前主题的面板色走，深色主题下不会出现亮块。 */
     private static GradientDrawable placeholder() {
         GradientDrawable drawable = new GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{Color.rgb(243, 244, 246), Color.rgb(229, 231, 235)});
+                new int[]{Theme.SURFACE_ALT, Theme.blend(Theme.SURFACE_ALT,
+                        Theme.DARK ? Color.WHITE : Color.BLACK, 0.07f)});
         drawable.setCornerRadius(10);
         return drawable;
     }

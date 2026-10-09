@@ -237,16 +237,20 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(theme.textSecondary)
 
-                    HStack(spacing: 8) {
-                        TextField("TMDB API 代理网关（可选）", text: $tmdbProxyURL)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 482)
-                        Spacer(minLength: 0)
-                    }
-
-                    Text("留空直连官方 API；无法直连时可填写反向代理地址。支持域名或带路径前缀的地址，例如 https://proxy.example.com/tmdb。")
+                    Text("TMDB API 代理网关（可选）。留空直连官方 API；无法直连时可填写反向代理地址，支持域名或带路径前缀的地址，例如 https://proxy.example.com/tmdb。")
                         .font(.caption)
                         .foregroundColor(theme.textSecondary)
+
+                    HStack(spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "globe")
+                                .foregroundColor(.secondary)
+                            TextField("留空直连官方 API", text: $tmdbProxyURL)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        .frame(width: 482)
+                        Spacer(minLength: 0)
+                    }
 
                     Link("请往TMDB官网注册获取api：https://www.themoviedb.org", destination: URL(string: "https://www.themoviedb.org")!)
                         .font(.caption)
@@ -336,10 +340,13 @@ struct SettingsView: View {
         apiValidationColor = .secondary
         
         Task {
-            let result = await TMDBService.shared.checkConnection(
-                customAPIInput: customKey,
-                customProxyURL: trimmedTMDBProxyURL
-            )
+            // 与扫描前的连通性检测走同一条后台路径，主线程只等结果
+            let result = await Task.detached(priority: .utility) {
+                await TMDBService.probeConnection(
+                    credential: TMDBService.credentialSource(customAPIInput: customKey),
+                    customProxyURL: trimmedTMDBProxyURL
+                )
+            }.value
             await MainActor.run {
                 if result.isConnected {
                     apiValidationMessage = "✅ 验证成功！API 状态正常。"

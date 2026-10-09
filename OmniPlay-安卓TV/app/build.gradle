@@ -26,8 +26,8 @@ android {
         applicationId "com.omniplay.tv"
         minSdk 26
         targetSdk 35
-        versionCode 18
-        versionName "1.6"
+        versionCode 28
+        versionName "1.17"
 
         externalNativeBuild {
             cmake {
@@ -61,4 +61,7 @@ android {
 
 dependencies {
     implementation "dev.jdtech.mpv:libmpv:0.5.1"
+    implementation "eu.agno3.jcifs:jcifs-ng:2.1.10"
+    // QR code for the phone-assisted input page (Apache 2.0, pure Java, ~500KB)
+    implementation "com.google.zxing:core:3.5.3"
 }

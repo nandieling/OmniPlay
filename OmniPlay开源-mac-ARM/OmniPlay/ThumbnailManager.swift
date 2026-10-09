@@ -25,26 +25,45 @@ class ThumbnailManager: ObservableObject {
         let episodeCount: Int
     }
 
-    private var webFetchQueue: [EpisodeThumbnailTask] = []
-    private var isFetching = false
-    private var currentFetchTask: Task<Void, Never>? = nil
-    private var currentFetchSourceID: Int64? = nil
-    private var currentFetchID: UUID? = nil
-    private var failedTMDBFileIDs: Set<String>
-    private let failedTMDBStoreKey = "ThumbnailTMDBFailedFileIDs"
+    // 🌟 失败文件黑名单：区分“TMDB 确认没有剧照”（长期跳过）与“抓取失败”（下次扫描重试）。
+    // 旧版本把两类原因混在同一个数组里，网络抖动后剧照就永远不重试了。
+    private var confirmedNoStillFileIDs: Set<String>
+    private let confirmedNoStillStoreKey = "ThumbnailTMDBConfirmedNoStillFileIDs"
+    private var failedFetchFileIDs: Set<String>
+    private var failedFetchReasons: [String: String]
+    private let failedFetchStoreKey = "ThumbnailTMDBFailedFetchFileIDs"
+    private let failedFetchReasonsStoreKey = "ThumbnailTMDBFailedFetchReasons"
+    private let legacyFailedStoreKey = "ThumbnailTMDBFailedFileIDs"
+    // 旧版本把“TMDB 没有剧照”和“下载失败”都写进失败数组；升级后旧记录视为确认无剧照，
+    // 避免 893 个“真实无剧照”的文件每轮扫描都重新打 API。
     private let failedTMDBMappingVersionKey = "ThumbnailTMDBMappingVersion"
-    private let currentTMDBMappingVersion = 2
+    private let currentTMDBMappingVersion = 3
     private var tvSeasonSummaryCache: [Int: [TMDBSeasonSummary]] = [:]
     private let tvSeasonSummaryCacheQueue = DispatchQueue(label: "nan.omniplay.thumbnail.tmdb-season-summary")
+    private var webFetchQueue: [EpisodeThumbnailTask] = []
+    private var inFlightFileIDs: Set<String> = []
+    private var inFlightBySource: [Int64: Set<String>] = [:]
+    private var inFlightTasks: [String: Task<Void, Never>] = [:]
+    private let fetchQueueLock = NSLock()
+    private let maxConcurrentFetches = 3
     
     private init() {
         let cachePaths = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
         thumbDirectory = cachePaths[0].appendingPathComponent("OmniPlayThumbnails")
-        failedTMDBFileIDs = Set(UserDefaults.standard.stringArray(forKey: failedTMDBStoreKey) ?? [])
+        let legacyFailed = Set(UserDefaults.standard.stringArray(forKey: legacyFailedStoreKey) ?? [])
+        confirmedNoStillFileIDs = Set(UserDefaults.standard.stringArray(forKey: confirmedNoStillStoreKey) ?? [])
+        failedFetchFileIDs = Set(UserDefaults.standard.stringArray(forKey: failedFetchStoreKey) ?? [])
+        failedFetchReasons = (UserDefaults.standard.dictionary(forKey: failedFetchReasonsStoreKey) as? [String: String]) ?? [:]
         if UserDefaults.standard.integer(forKey: failedTMDBMappingVersionKey) < currentTMDBMappingVersion {
-            failedTMDBFileIDs.removeAll()
-            UserDefaults.standard.set([], forKey: failedTMDBStoreKey)
+            if UserDefaults.standard.object(forKey: confirmedNoStillStoreKey) == nil {
+                confirmedNoStillFileIDs = legacyFailed
+            }
+            failedFetchFileIDs = legacyFailed
+            failedFetchReasons = [:]
+            UserDefaults.standard.set([], forKey: legacyFailedStoreKey)
             UserDefaults.standard.set(currentTMDBMappingVersion, forKey: failedTMDBMappingVersionKey)
+            persistNoStillSet()
+            persistFailedFetchSet()
         }
         
         if !FileManager.default.fileExists(atPath: thumbDirectory.path) {
@@ -85,118 +104,188 @@ class ThumbnailManager: ObservableObject {
 
     private func startBatchWebFetch(tasks: [EpisodeThumbnailTask], forceRetry: Bool = false) {
         DispatchQueue.global(qos: .background).async {
+            var didAppend = false
             for task in tasks {
                 // 核心防重复拦截：本地已存在，直接跳过
                 let localFileURL = self.thumbDirectory.appendingPathComponent("\(task.fileId).jpg")
                 if FileManager.default.fileExists(atPath: localFileURL.path) { continue }
-                if self.failedTMDBFileIDs.contains(task.fileId) {
+                // TMDB 确认没有剧照的分集，不重试，避免每轮扫描重复打 API。
+                if self.confirmedNoStillFileIDs.contains(task.fileId) {
                     if forceRetry {
-                        self.failedTMDBFileIDs.remove(task.fileId)
-                        UserDefaults.standard.set(Array(self.failedTMDBFileIDs), forKey: self.failedTMDBStoreKey)
+                        self.confirmedNoStillFileIDs.remove(task.fileId)
+                        self.persistNoStillSet()
                     } else {
                         continue
                     }
                 }
+                // 历史上的抓取失败（网络、5xx、超时）在新一轮扫描时自动重试。
+                if forceRetry, self.failedFetchFileIDs.contains(task.fileId) {
+                    self.failedFetchFileIDs.remove(task.fileId)
+                    self.failedFetchReasons.removeValue(forKey: task.fileId)
+                    self.persistFailedFetchSet()
+                }
                 
-                if !self.webFetchQueue.contains(where: { $0.fileId == task.fileId }) {
+                self.fetchQueueLock.lock()
+                let alreadyTracked = self.inFlightFileIDs.contains(task.fileId)
+                    || self.webFetchQueue.contains(where: { $0.fileId == task.fileId })
+                if !alreadyTracked {
+                    self.inFlightFileIDs.insert(task.fileId)
                     self.webFetchQueue.append(task)
                 }
+                self.fetchQueueLock.unlock()
+                if !alreadyTracked { didAppend = true }
             }
-            if !self.isFetching { self.processNextWebFetch() }
+            if didAppend { self.processNextWebFetch() }
         }
     }
 
     func cancelTasks(forSourceID sourceID: Int64) {
         DispatchQueue.global(qos: .background).async {
+            self.fetchQueueLock.lock()
             self.webFetchQueue.removeAll { $0.sourceId == sourceID }
-            guard self.currentFetchSourceID == sourceID else { return }
-            self.currentFetchTask?.cancel()
-            self.currentFetchTask = nil
-            self.currentFetchSourceID = nil
-            self.currentFetchID = nil
-            self.isFetching = false
-            DispatchQueue.main.async {
-                self.progressMessage = ""
+            let cancelledFileIDs = Array(self.inFlightBySource[sourceID] ?? [])
+            self.fetchQueueLock.unlock()
+            for fileId in cancelledFileIDs {
+                self.fetchQueueLock.lock()
+                let worker = self.inFlightTasks[fileId]
+                self.fetchQueueLock.unlock()
+                worker?.cancel()
             }
-            if !self.webFetchQueue.isEmpty {
+            if self.isQueueIdle() {
+                DispatchQueue.main.async { self.progressMessage = "" }
+            }
+            if !self.isQueueEmptyExcludingInFlight() {
                 self.processNextWebFetch()
             }
         }
     }
     
-    private func processNextWebFetch() {
-        guard !webFetchQueue.isEmpty else {
-            isFetching = false
-            currentFetchTask = nil
-            currentFetchSourceID = nil
-            currentFetchID = nil
-            DispatchQueue.main.async {
-                self.progressMessage = ""
-            }
-            return
-        }
-        
-        isFetching = true
-        let task = webFetchQueue.removeFirst()
-        let fetchID = UUID()
-        currentFetchID = fetchID
-        currentFetchSourceID = task.sourceId
-        let fileId = task.fileId
-        let title = task.title
-        let season = task.season
-        let episode = task.episode
-        
-        DispatchQueue.main.async {
-            self.progressMessage = "获取剧照: \(title) S\(String(format: "%02d", season))E\(String(format: "%02d", episode))"
-        }
-        
-        let fetchTask = Task {
-            guard !Task.isCancelled, await self.sourceExists(task.sourceId) else {
-                self.finishCurrentFetch(fetchID: fetchID)
-                return
-            }
-            // 1. 先尝试向 TMDB 请求官方剧照
-            let tmdbSuccess = await fetchFromTMDB(
-                fileId: fileId,
-                title: title,
-                tmdbTVId: task.tmdbTVId,
-                season: season,
-                episode: episode
-            )
-            if !Task.isCancelled, await self.sourceExists(task.sourceId) {
-                if tmdbSuccess {
-                    clearTMDBFailure(for: fileId)
-                } else {
-                    markTMDBFailure(for: fileId)
-                }
-            }
-            
-            try? await Task.sleep(nanoseconds: 1_000_000_000) // 延迟防封IP
-            self.finishCurrentFetch(fetchID: fetchID)
-        }
-        currentFetchTask = fetchTask
+    private func isQueueIdle() -> Bool {
+        fetchQueueLock.lock()
+        defer { fetchQueueLock.unlock() }
+        return webFetchQueue.isEmpty && inFlightFileIDs.isEmpty
     }
 
-    private func finishCurrentFetch(fetchID: UUID) {
-        DispatchQueue.global(qos: .background).async {
-            guard self.currentFetchID == fetchID else { return }
-            self.currentFetchTask = nil
-            self.currentFetchSourceID = nil
-            self.currentFetchID = nil
-            self.processNextWebFetch()
+    private func isQueueEmptyExcludingInFlight() -> Bool {
+        fetchQueueLock.lock()
+        defer { fetchQueueLock.unlock() }
+        return webFetchQueue.isEmpty
+    }
+
+    private func processNextWebFetch() {
+        fetchQueueLock.lock()
+        guard !webFetchQueue.isEmpty else {
+            fetchQueueLock.unlock()
+            return
+        }
+        let pending = Array(webFetchQueue.prefix(maxConcurrentFetches))
+        webFetchQueue.removeFirst(pending.count)
+        fetchQueueLock.unlock()
+        for task in pending {
+            startFetchWorker(task)
         }
     }
-    
-    // ==========================================
-    // 🎬 引擎 1：TMDB 剧照本地化下载
-    // ==========================================
-    private func fetchFromTMDB(fileId: String, title: String, tmdbTVId: Int64?, season: Int, episode: Int) async -> Bool {
+
+    private func startFetchWorker(_ task: EpisodeThumbnailTask) {
+        fetchQueueLock.lock()
+        inFlightBySource[task.sourceId, default: []].insert(task.fileId)
+        fetchQueueLock.unlock()
+        updateProgressMessage(for: task)
+
+        let workerTask = Task {
+            defer {
+                // 锁清理收敛到同步方法，避免在 async 上下文里直接 NSLock lock/unlock。
+                self.finishFetchWorker(task)
+            }
+            guard !Task.isCancelled, await self.sourceExists(task.sourceId) else { return }
+            // 1. 先尝试向 TMDB 请求官方剧照
+            let outcome = await self.fetchFromTMDB(
+                fileId: task.fileId,
+                title: task.title,
+                tmdbTVId: task.tmdbTVId,
+                season: task.season,
+                episode: task.episode
+            )
+            guard !Task.isCancelled, await self.sourceExists(task.sourceId) else { return }
+            self.applyFetchOutcome(outcome, fileId: task.fileId)
+        }
+        fetchQueueLock.lock()
+        inFlightTasks[task.fileId] = workerTask
+        fetchQueueLock.unlock()
+    }
+
+    /// 抓取任务结束后同步清理在途状态（lock/unlock 必须发生在同步上下文中）。
+    private func finishFetchWorker(_ task: EpisodeThumbnailTask) {
+        fetchQueueLock.lock()
+        inFlightFileIDs.remove(task.fileId)
+        inFlightTasks.removeValue(forKey: task.fileId)
+        inFlightBySource[task.sourceId, default: []].remove(task.fileId)
+        if inFlightBySource[task.sourceId, default: []].isEmpty {
+            inFlightBySource[task.sourceId] = nil
+        }
+        let hasMore = !webFetchQueue.isEmpty
+        fetchQueueLock.unlock()
+        if hasMore {
+            processNextWebFetch()
+        } else if isQueueIdle() {
+            DispatchQueue.main.async { self.progressMessage = "" }
+        }
+    }
+
+    private func updateProgressMessage(for task: EpisodeThumbnailTask) {
+        fetchQueueLock.lock()
+        let remaining = webFetchQueue.count + inFlightFileIDs.count
+        fetchQueueLock.unlock()
+        DispatchQueue.main.async {
+            self.progressMessage = "获取剧照: \(task.title) S\(String(format: "%02d", task.season))E\(String(format: "%02d", task.episode)) · 剩 \(remaining) 个"
+        }
+    }
+
+    private func applyFetchOutcome(_ outcome: EpisodeStillFetchOutcome, fileId: String) {
+        switch outcome {
+        case .success:
+            if failedFetchFileIDs.remove(fileId) != nil || failedFetchReasons.removeValue(forKey: fileId) != nil {
+                persistFailedFetchSet()
+            }
+        case .confirmedNoStill:
+            if confirmedNoStillFileIDs.insert(fileId).inserted {
+                persistNoStillSet()
+            }
+            if failedFetchFileIDs.remove(fileId) != nil || failedFetchReasons.removeValue(forKey: fileId) != nil {
+                persistFailedFetchSet()
+            }
+        case .fetchFailed(let reason):
+            failedFetchFileIDs.insert(fileId)
+            failedFetchReasons[fileId] = reason
+            persistFailedFetchSet()
+        }
+    }
+
+    private func persistNoStillSet() {
+        UserDefaults.standard.set(Array(confirmedNoStillFileIDs), forKey: confirmedNoStillStoreKey)
+    }
+
+    private func persistFailedFetchSet() {
+        UserDefaults.standard.set(Array(failedFetchFileIDs), forKey: failedFetchStoreKey)
+        UserDefaults.standard.set(failedFetchReasons, forKey: failedFetchReasonsStoreKey)
+    }
+
+    // 剧照抓取结果：区分“TMDB 确认无剧照”与“抓取失败”，后者下次扫描自动重试。
+    private enum EpisodeStillFetchOutcome {
+        case success
+        case confirmedNoStill
+        case fetchFailed(reason: String)
+    }
+
+    private func fetchFromTMDB(fileId: String, title: String, tmdbTVId: Int64?, season: Int, episode: Int) async -> EpisodeStillFetchOutcome {
         if let tmdbTVId, tmdbTVId > 0 {
             return await fetchEpisodeStill(fileId: fileId, tvId: Int(tmdbTVId), season: season, episode: episode)
         }
 
-        let cleanTitle = title.replacingOccurrences(of: #"\(\d{4}\)"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanTitle.isEmpty else { return false }
+        let cleanTitle = title.replacingOccurrences(of: #"\(\d{4})"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty else {
+            return .fetchFailed(reason: "title is empty")
+        }
 
         do {
             guard let candidate = try await TMDBService.shared.multiSearch(
@@ -204,25 +293,27 @@ class ThumbnailManager: ObservableObject {
                 preferredMediaType: "tv",
                 preferredSeason: season
             ) else {
-                return false
+                return .fetchFailed(reason: "TMDB search hit no result")
             }
             let mediaType = candidate.mediaType?.lowercased()
             guard mediaType == "tv" || (mediaType == nil && candidate.firstAirDate?.isEmpty == false) else {
-                return false
+                return .fetchFailed(reason: "TMDB search result is not a TV series")
             }
             return await fetchEpisodeStill(fileId: fileId, tvId: candidate.id, season: season, episode: episode)
         } catch {
-            return false
+            return .fetchFailed(reason: error.localizedDescription)
         }
     }
 
-    private func fetchEpisodeStill(fileId: String, tvId: Int, season: Int, episode: Int) async -> Bool {
+    private func fetchEpisodeStill(fileId: String, tvId: Int, season: Int, episode: Int) async -> EpisodeStillFetchOutcome {
         let appLang = UserDefaults.standard.string(forKey: "appLanguage") ?? "zh-Hans"
         let tmdbLang = appLang == "en" ? "en-US" : "zh-CN"
 
         do {
-            let stillPath = await fetchMappedEpisodeStillPath(tvId: tvId, season: season, episode: episode, language: tmdbLang)
-            guard let stillPath else { return false }
+            let lookup = await fetchMappedEpisodeStillPath(tvId: tvId, season: season, episode: episode, language: tmdbLang)
+            guard let stillPath = lookup.stillPath else {
+                return lookup.sawTMDBResponse ? .confirmedNoStill : .fetchFailed(reason: "TMDB still request failed")
+            }
 
             let imageURL = URL(string: "https://image.tmdb.org/t/p/w500\(stillPath)")!
             let (imageData, _) = try await URLSession.shared.data(from: imageURL)
@@ -237,9 +328,9 @@ class ThumbnailManager: ObservableObject {
             await MainActor.run {
                 NotificationCenter.default.post(name: NSNotification.Name("ThumbnailGenerated_\(fileId)"), object: nil)
             }
-            return true
+            return .success
         } catch {
-            return false
+            return .fetchFailed(reason: error.localizedDescription)
         }
     }
 
@@ -258,30 +349,53 @@ class ThumbnailManager: ObservableObject {
         LocalMetadataSidecarStore.shared.exportEpisodeThumbnail(sourceURL: thumbnailURL, videoURL: videoURL)
     }
 
-    private func fetchMappedEpisodeStillPath(tvId: Int, season: Int, episode: Int, language: String) async -> String? {
-        let candidates = await episodeStillCoordinateCandidates(tvId: tvId, requestedSeason: season, requestedEpisode: episode)
-        for candidate in candidates {
-            if let stillPath = await fetchEpisodeStillPath(tvId: tvId, season: candidate.season, episode: candidate.episode, language: language) {
-                return stillPath
-            }
-        }
-        return nil
+    private struct EpisodeStillLookup {
+        let stillPath: String?
+        let sawTMDBResponse: Bool
     }
 
-    private func fetchEpisodeStillPath(tvId: Int, season: Int, episode: Int, language: String) async -> String? {
+    private func fetchMappedEpisodeStillPath(tvId: Int, season: Int, episode: Int, language: String) async -> EpisodeStillLookup {
+        let candidates = await episodeStillCoordinateCandidates(tvId: tvId, requestedSeason: season, requestedEpisode: episode)
+        var sawResponse = false
+        var hasTransientFailure = false
+        for candidate in candidates {
+            let lookup = await fetchEpisodeStillPath(tvId: tvId, season: candidate.season, episode: candidate.episode, language: language)
+            if lookup.stillPath != nil {
+                return lookup
+            }
+            if lookup.sawTMDBResponse {
+                sawResponse = true
+            } else {
+                // 任一候选季请求是网络/5xx 类临时失败，整体按“抓取失败”处理，下次扫描重试。
+                hasTransientFailure = true
+            }
+        }
+        return EpisodeStillLookup(stillPath: nil, sawTMDBResponse: sawResponse && !hasTransientFailure)
+    }
+
+    private func fetchEpisodeStillPath(tvId: Int, season: Int, episode: Int, language: String) async -> EpisodeStillLookup {
         let episodeURL = "https://api.themoviedb.org/3/tv/\(tvId)/season/\(season)/episode/\(episode)?language=\(language)"
         do {
-            guard let (data, response) = try await TMDBService.shared.requestTMDB(urlString: episodeURL),
-                  response.statusCode == 200,
-                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return nil
+            guard let (data, response) = try await TMDBService.shared.requestTMDB(urlString: episodeURL) else {
+                return EpisodeStillLookup(stillPath: nil, sawTMDBResponse: false)
+            }
+            // 404 说明 TMDB 里不存在这个季/集，重试也没有意义，按“确认无剧照”处理。
+            guard response.statusCode == 200 else {
+                return EpisodeStillLookup(stillPath: nil, sawTMDBResponse: response.statusCode == 404)
+            }
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return EpisodeStillLookup(stillPath: nil, sawTMDBResponse: true)
             }
             if let stillPath = json["still_path"] as? String {
-                return stillPath
+                return EpisodeStillLookup(stillPath: stillPath, sawTMDBResponse: true)
             }
-            return await fetchEpisodeStillImagePath(tvId: tvId, season: season, episode: episode, language: language)
+            let imageLookup = await fetchEpisodeStillImagePath(tvId: tvId, season: season, episode: episode, language: language)
+            if let stillPath = imageLookup.stillPath {
+                return EpisodeStillLookup(stillPath: stillPath, sawTMDBResponse: true)
+            }
+            return EpisodeStillLookup(stillPath: nil, sawTMDBResponse: true)
         } catch {
-            return nil
+            return EpisodeStillLookup(stillPath: nil, sawTMDBResponse: false)
         }
     }
 
@@ -351,18 +465,24 @@ class ThumbnailManager: ObservableObject {
         }
     }
 
-    private func fetchEpisodeStillImagePath(tvId: Int, season: Int, episode: Int, language: String) async -> String? {
+    private func fetchEpisodeStillImagePath(tvId: Int, season: Int, episode: Int, language: String) async -> EpisodeStillLookup {
         let imageLanguage = language == "en-US" ? "en,null" : "zh,null,en"
         let imagesURL = "https://api.themoviedb.org/3/tv/\(tvId)/season/\(season)/episode/\(episode)/images?include_image_language=\(imageLanguage)"
         do {
-            guard let (data, response) = try await TMDBService.shared.requestTMDB(urlString: imagesURL),
-                  response.statusCode == 200,
-                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let stills = json["stills"] as? [[String: Any]],
-                  !stills.isEmpty else {
-                return nil
+            guard let (data, response) = try await TMDBService.shared.requestTMDB(urlString: imagesURL) else {
+                return EpisodeStillLookup(stillPath: nil, sawTMDBResponse: false)
             }
-            return stills
+            guard response.statusCode == 200 else {
+                return EpisodeStillLookup(stillPath: nil, sawTMDBResponse: response.statusCode == 404)
+            }
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let stills = json["stills"] as? [[String: Any]] else {
+                return EpisodeStillLookup(stillPath: nil, sawTMDBResponse: true)
+            }
+            guard !stills.isEmpty else {
+                return EpisodeStillLookup(stillPath: nil, sawTMDBResponse: true)
+            }
+            let best = stills
                 .sorted { lhs, rhs in
                     let lhsScore = (lhs["vote_average"] as? Double ?? 0) + Double(lhs["vote_count"] as? Int ?? 0) * 0.1
                     let rhsScore = (rhs["vote_average"] as? Double ?? 0) + Double(rhs["vote_count"] as? Int ?? 0) * 0.1
@@ -370,21 +490,21 @@ class ThumbnailManager: ObservableObject {
                 }
                 .compactMap { $0["file_path"] as? String }
                 .first
+            return EpisodeStillLookup(stillPath: best, sawTMDBResponse: true)
         } catch {
-            return nil
+            return EpisodeStillLookup(stillPath: nil, sawTMDBResponse: false)
         }
     }
 
-    private func markTMDBFailure(for fileId: String) {
-        guard !failedTMDBFileIDs.contains(fileId) else { return }
-        failedTMDBFileIDs.insert(fileId)
-        UserDefaults.standard.set(Array(failedTMDBFileIDs), forKey: failedTMDBStoreKey)
-    }
-
-    private func clearTMDBFailure(for fileId: String) {
-        guard failedTMDBFileIDs.contains(fileId) else { return }
-        failedTMDBFileIDs.remove(fileId)
-        UserDefaults.standard.set(Array(failedTMDBFileIDs), forKey: failedTMDBStoreKey)
+    private func resetNoStillMarks(for fileId: String) {
+        var changed = false
+        if confirmedNoStillFileIDs.remove(fileId) != nil { changed = true }
+        if failedFetchFileIDs.remove(fileId) != nil { changed = true }
+        if failedFetchReasons.removeValue(forKey: fileId) != nil { changed = true }
+        if changed {
+            persistNoStillSet()
+            persistFailedFetchSet()
+        }
     }
 
     func thumbnailURL(for fileId: String) -> URL {
@@ -413,7 +533,7 @@ class ThumbnailManager: ObservableObject {
             try FileManager.default.removeItem(at: destinationURL)
         }
         try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
-        clearTMDBFailure(for: fileId)
+        resetNoStillMarks(for: fileId)
 
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: NSNotification.Name("ThumbnailGenerated_\(fileId)"), object: nil)
@@ -422,12 +542,18 @@ class ThumbnailManager: ObservableObject {
 
     func removeAssets(for fileIDs: [String]) {
         guard !fileIDs.isEmpty else { return }
+        var changed = false
         for fileId in fileIDs {
             let localFileURL = thumbDirectory.appendingPathComponent("\(fileId).jpg")
             try? FileManager.default.removeItem(at: localFileURL)
-            failedTMDBFileIDs.remove(fileId)
+            if confirmedNoStillFileIDs.remove(fileId) != nil { changed = true }
+            if failedFetchFileIDs.remove(fileId) != nil { changed = true }
+            if failedFetchReasons.removeValue(forKey: fileId) != nil { changed = true }
         }
-        UserDefaults.standard.set(Array(failedTMDBFileIDs), forKey: failedTMDBStoreKey)
+        if changed {
+            persistNoStillSet()
+            persistFailedFetchSet()
+        }
     }
     
     func enqueueEpisodeThumbnails(for movieId: Int64) {
@@ -479,10 +605,19 @@ class ThumbnailManager: ObservableObject {
                     }
                     return aggregated
                 }
+                let skippedNoStill = self.confirmedNoStillFileIDs.count
+
+                let pendingRetry = self.failedFetchFileIDs.count
+
+                print("[OmniPlay][剧照] 补抓任务：\(tasks.count) 个缺失分集剧照待处理，已确认无剧照 \(skippedNoStill) 个，待重试 \(pendingRetry) 个。")
+
                 if !tasks.isEmpty {
                     self.startBatchWebFetch(tasks: tasks, forceRetry: true)
                 }
-            } catch {}
+            } catch {
+
+                print("[OmniPlay][剧照] 补抓任务读取数据库失败：\(error.localizedDescription)")
+            }
         }
     }
 

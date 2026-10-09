@@ -30,7 +30,11 @@ public sealed class TvShowRepository : ITvShowRepository
                                 tvShow.isLocked,
                                 tvShow.productionCountryCodes,
                                 tvShow.originalLanguage,
-                                tvShow.metadataLanguage
+                                tvShow.metadataLanguage,
+                                tvShow.director,
+                                tvShow.mainCast,
+                                tvShow.directors,
+                                tvShow.casts
                 FROM tvShow
                 JOIN videoFile ON videoFile.episodeId = tvShow.id AND videoFile.mediaType = 'tv'
                 JOIN mediaSource ON mediaSource.id = videoFile.sourceId
@@ -42,6 +46,16 @@ public sealed class TvShowRepository : ITvShowRepository
                 """,
                 cancellationToken: cancellationToken));
         return shows.Where(ShouldExposeShowOnHome).ToList();
+    }
+
+    public async Task UpdatePosterPathAsync(long id, string? posterPath, CancellationToken cancellationToken = default)
+    {
+        using var connection = database.OpenConnection();
+        await connection.ExecuteAsync(
+            new CommandDefinition(
+                "UPDATE tvShow SET posterPath = @PosterPath WHERE id = @Id",
+                new { Id = id, PosterPath = posterPath },
+                cancellationToken: cancellationToken));
     }
 
     private static bool ShouldExposeShowOnHome(TvShow show)
@@ -56,24 +70,7 @@ public sealed class TvShowRepository : ITvShowRepository
             return true;
         }
 
-        return MediaNameParser.IsUsableLibraryDisplayTitle(show.Title) &&
-               HasVisibleMetadata(show);
-    }
-
-    private static bool HasVisibleMetadata(TvShow show)
-    {
-        return show.IsLocked ||
-               HasText(show.FirstAirDate) ||
-               HasText(show.Overview) ||
-               HasText(show.PosterPath) ||
-               show.VoteAverage.HasValue ||
-               HasText(show.ProductionCountryCodes) ||
-               HasText(show.OriginalLanguage) ||
-               HasText(show.MetadataLanguage);
-    }
-
-    private static bool HasText(string? value)
-    {
-        return !string.IsNullOrWhiteSpace(value);
+        // 未刮削的合成占位只要标题可用就要在首页展示，保证其能进入自动刮削队列（对齐 mac 版 fetchVisibleLibrary）。
+        return MediaNameParser.IsUsableLibraryDisplayTitle(show.Title);
     }
 }

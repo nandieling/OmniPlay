@@ -149,13 +149,11 @@ public sealed class LibraryVideoItem
 
     public bool ShouldShowEpisodeProgress => WatchState == PlaybackWatchState.InProgress && ProgressRatio > 0;
 
-    public double EpisodeThumbnailDimOpacity =>
-        WatchState switch
-        {
-            PlaybackWatchState.Watched => 0,
-            PlaybackWatchState.InProgress => 0.16,
-            _ => 0.38
-        };
+    public bool IsWatchedState => WatchState == PlaybackWatchState.Watched;
+
+    public bool IsInProgressState => WatchState == PlaybackWatchState.InProgress;
+
+    public bool IsUnwatchedState => WatchState == PlaybackWatchState.Unwatched;
 
     public string WatchStateText => PlaybackProgressRules.GetWatchStateText(WatchState);
 
@@ -172,9 +170,9 @@ public sealed class LibraryVideoItem
     public string ProgressText =>
         WatchState switch
         {
-            PlaybackWatchState.Watched => "\u5DF2\u770B",
-            PlaybackWatchState.InProgress when Duration > 0 => $"\u672A\u770B\u5B8C \u00B7 {(ProgressRatio * 100):F0}%",
-            PlaybackWatchState.InProgress => "\u672A\u770B\u5B8C",
-            _ => "\u672A\u770B"
+            PlaybackWatchState.Watched => "\u5DF2\u64AD",
+            PlaybackWatchState.InProgress when Duration > 0 => $"\u672A\u64AD\u5B8C \u00B7 {(ProgressRatio * 100):F0}%",
+            PlaybackWatchState.InProgress => "\u672A\u64AD\u5B8C",
+            _ => "\u672A\u64AD"
         };
 }

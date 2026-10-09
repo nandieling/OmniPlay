@@ -16,24 +16,17 @@ public sealed class LibraryPosterItem
 
     public double? DoubanRating { get; init; }
 
-    public string RatingDisplayText
-    {
-        get
-        {
-            var parts = new List<string>();
-            if (VoteAverage.HasValue)
-            {
-                parts.Add($"TMDB {VoteAverage.Value:F1}");
-            }
+    public bool HasTmdbRating => VoteAverage.HasValue && VoteAverage.Value > 0;
 
-            if (DoubanRating.HasValue)
-            {
-                parts.Add($"豆瓣 {DoubanRating.Value:F1}");
-            }
+    public bool HasDoubanRating => DoubanRating.HasValue && DoubanRating.Value > 0;
 
-            return parts.Count == 0 ? "暂无评分" : string.Join("  ", parts);
-        }
-    }
+    public string TmdbRatingText => VoteAverage.HasValue
+        ? VoteAverage.Value.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)
+        : string.Empty;
+
+    public string DoubanRatingText => DoubanRating.HasValue
+        ? DoubanRating.Value.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)
+        : string.Empty;
 
     public required string MediaKind { get; init; }
 
@@ -83,4 +76,29 @@ public sealed class LibraryPosterItem
     public long? MovieId { get; init; }
 
     public long? TvShowId { get; init; }
+    public string? Director { get; init; }
+
+    /// <summary>导演名单 JSON，缺失时回退到 <see cref="Director"/> 扁平列。</summary>
+    public string? Directors { get; init; }
+
+    /// <summary>主演名单 JSON，缺失时回退到 <see cref="MainCast"/> 扁平列。</summary>
+    public string? Casts { get; init; }
+
+    public System.Collections.Generic.List<string> DirectorList => OmniPlay.Core.Models.PersonNames.Decode(Directors ?? Director);
+
+    public System.Collections.Generic.List<string> CastList => OmniPlay.Core.Models.PersonNames.Decode(Casts ?? MainCast);
+
+    public string? MainCast { get; init; }
+
+    public bool IsFolder { get; init; }
+
+    public string? FolderKey { get; init; }
+
+    /// <summary>分类文件夹内的影视数量，卡片上与名称同行显示。</summary>
+    public int? FolderItemCount { get; init; }
+
+    public string FolderCountText =>
+        FolderItemCount.HasValue
+            ? FolderItemCount.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : string.Empty;
 }

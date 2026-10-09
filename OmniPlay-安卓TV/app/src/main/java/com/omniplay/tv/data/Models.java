@@ -24,6 +24,10 @@ public final class Models {
             this.role = role;
         }
 
+        public static AuthStatus of(boolean requiresSetup, boolean isAuthenticated, String username, String role) {
+            return new AuthStatus(requiresSetup, isAuthenticated, username, role);
+        }
+
         public static AuthStatus fromJson(JSONObject json) {
             return new AuthStatus(
                     json.optBoolean("requiresSetup"),
@@ -44,6 +48,10 @@ public final class Models {
             return new AppSettings(PlaybackSettings.defaults());
         }
 
+        public static AppSettings withPlayback(PlaybackSettings settings) {
+            return new AppSettings(settings);
+        }
+
         public static AppSettings fromJson(JSONObject json) {
             return new AppSettings(PlaybackSettings.fromJson(json == null ? null : json.optJSONObject("playback")));
         }
@@ -54,7 +62,7 @@ public final class Models {
         public final String defaultAudioLanguage;
         public final String defaultSubtitleLanguage;
 
-        private PlaybackSettings(boolean showEpisodeDetails, String defaultAudioLanguage, String defaultSubtitleLanguage) {
+        public PlaybackSettings(boolean showEpisodeDetails, String defaultAudioLanguage, String defaultSubtitleLanguage) {
             this.showEpisodeDetails = showEpisodeDetails;
             this.defaultAudioLanguage = defaultAudioLanguage == null || defaultAudioLanguage.isEmpty() ? "smart" : defaultAudioLanguage;
             this.defaultSubtitleLanguage = defaultSubtitleLanguage == null || defaultSubtitleLanguage.isEmpty() ? "zh" : defaultSubtitleLanguage;
@@ -89,6 +97,9 @@ public final class Models {
         public final int videoFileCount;
         public final double maxProgressSeconds;
         public final double maxDurationSeconds;
+        public final List<String> genres;
+        public final List<String> directors;
+        public final List<String> casts;
 
         LibraryItem(JSONObject json) {
             id = json.optString("id");
@@ -103,6 +114,58 @@ public final class Models {
             videoFileCount = json.optInt("videoFileCount");
             maxProgressSeconds = json.optDouble("maxProgressSeconds", 0);
             maxDurationSeconds = json.optDouble("maxDurationSeconds", 0);
+            genres = parseStringList(json.optJSONArray("genres"));
+            directors = parseStringList(json.optJSONArray("directors"));
+            casts = parseStringList(json.optJSONArray("casts"));
+        }
+
+        public LibraryItem(
+                String id,
+                String itemKind,
+                String title,
+                String releaseDate,
+                String overview,
+                String posterAssetId,
+                Double voteAverage,
+                boolean isWatched,
+                int videoFileCount,
+                double maxProgressSeconds,
+                double maxDurationSeconds) {
+            this(id, itemKind, title, releaseDate, overview, posterAssetId, voteAverage, isWatched,
+                    videoFileCount, maxProgressSeconds, maxDurationSeconds,
+                    Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
+        }
+
+        public LibraryItem(
+                String id,
+                String itemKind,
+                String title,
+                String releaseDate,
+                String overview,
+                String posterAssetId,
+                Double voteAverage,
+                boolean isWatched,
+                int videoFileCount,
+                double maxProgressSeconds,
+                double maxDurationSeconds,
+                List<String> genres,
+                List<String> directors,
+                List<String> casts) {
+            this.id = id;
+            this.itemKind = itemKind;
+            this.title = title;
+            this.releaseDate = releaseDate;
+            this.overview = overview;
+            this.posterAssetId = posterAssetId;
+            this.voteAverage = voteAverage;
+            this.doubanRating = null;
+            this.isWatched = isWatched;
+            this.videoFileCount = videoFileCount;
+            this.maxProgressSeconds = maxProgressSeconds;
+            this.maxDurationSeconds = maxDurationSeconds;
+            this.genres = genres == null ? Collections.<String>emptyList() : genres;
+            this.directors = directors == null ? Collections.<String>emptyList() : directors;
+            this.casts = casts == null ? Collections.<String>emptyList() : casts;
         }
 
         public int progressPercent() {
@@ -129,6 +192,77 @@ public final class Models {
 
         public static LibraryDetail fromJson(JSONObject json) {
             return new LibraryDetail(json);
+        }
+
+        public static LibraryDetail local(
+                String id,
+                String itemKind,
+                String title,
+                String releaseDate,
+                String overview,
+                String posterAssetId,
+                Double voteAverage,
+                boolean isWatched,
+                int videoFileCount,
+                double maxProgressSeconds,
+                double maxDurationSeconds,
+                List<VideoFile> videoFiles,
+                List<Season> seasons) {
+            return new LibraryDetail(
+                    id, itemKind, title, releaseDate, overview, posterAssetId, voteAverage,
+                    isWatched, videoFileCount, maxProgressSeconds, maxDurationSeconds,
+                    videoFiles, seasons, null,
+                    Collections.<String>emptyList(), Collections.<String>emptyList(),
+                    Collections.<String>emptyList());
+        }
+
+        public static LibraryDetail local(
+                String id,
+                String itemKind,
+                String title,
+                String releaseDate,
+                String overview,
+                String posterAssetId,
+                Double voteAverage,
+                boolean isWatched,
+                int videoFileCount,
+                double maxProgressSeconds,
+                double maxDurationSeconds,
+                List<VideoFile> videoFiles,
+                List<Season> seasons,
+                List<String> genres,
+                List<String> directors,
+                List<String> casts) {
+            return new LibraryDetail(
+                    id, itemKind, title, releaseDate, overview, posterAssetId, voteAverage,
+                    isWatched, videoFileCount, maxProgressSeconds, maxDurationSeconds,
+                    videoFiles, seasons, null, genres, directors, casts);
+        }
+
+        private LibraryDetail(
+                String id,
+                String itemKind,
+                String title,
+                String releaseDate,
+                String overview,
+                String posterAssetId,
+                Double voteAverage,
+                boolean isWatched,
+                int videoFileCount,
+                double maxProgressSeconds,
+                double maxDurationSeconds,
+                List<VideoFile> videoFiles,
+                List<Season> seasons,
+                DoubanMetadata douban,
+                List<String> genres,
+                List<String> directors,
+                List<String> casts) {
+            super(id, itemKind, title, releaseDate, overview, posterAssetId, voteAverage,
+                    isWatched, videoFileCount, maxProgressSeconds, maxDurationSeconds,
+                    genres, directors, casts);
+            this.videoFiles = videoFiles;
+            this.seasons = seasons;
+            this.douban = douban;
         }
 
         public List<VideoFile> playableFiles() {
@@ -184,6 +318,14 @@ public final class Models {
         public final String posterAssetId;
         public final List<Episode> episodes;
 
+        public Season(String id, int seasonNumber, String title, String posterAssetId, List<Episode> episodes) {
+            this.id = id;
+            this.seasonNumber = seasonNumber;
+            this.title = title;
+            this.posterAssetId = posterAssetId;
+            this.episodes = episodes;
+        }
+
         private Season(JSONObject json) {
             id = json.optString("id");
             seasonNumber = json.optInt("seasonNumber");
@@ -203,6 +345,35 @@ public final class Models {
         public final String airDate;
         public final VideoFile videoFile;
         public final List<VideoFile> videoFiles;
+        /** 分集自定义副标题: only ever set by the user. */
+        public final String subtitleOverride;
+
+        public Episode(String id, int seasonNumber, int episodeNumber, String title,
+                       String stillAssetId, VideoFile videoFile, List<VideoFile> videoFiles) {
+            this(id, seasonNumber, episodeNumber, title, null, null, stillAssetId, videoFile, videoFiles, null);
+        }
+
+        public Episode(String id, int seasonNumber, int episodeNumber, String title,
+                       String overview, String airDate, String stillAssetId,
+                       VideoFile videoFile, List<VideoFile> videoFiles) {
+            this(id, seasonNumber, episodeNumber, title, overview, airDate, stillAssetId, videoFile,
+                    videoFiles, null);
+        }
+
+        public Episode(String id, int seasonNumber, int episodeNumber, String title,
+                       String overview, String airDate, String stillAssetId,
+                       VideoFile videoFile, List<VideoFile> videoFiles, String subtitleOverride) {
+            this.id = id;
+            this.seasonNumber = seasonNumber;
+            this.episodeNumber = episodeNumber;
+            this.title = title;
+            this.overview = overview;
+            this.stillAssetId = stillAssetId;
+            this.airDate = airDate;
+            this.videoFile = videoFile;
+            this.videoFiles = videoFiles;
+            this.subtitleOverride = subtitleOverride;
+        }
 
         private Episode(JSONObject json) {
             id = json.optString("id");
@@ -212,6 +383,7 @@ public final class Models {
             overview = optString(json, "overview");
             stillAssetId = optString(json, "stillAssetId");
             airDate = optString(json, "airDate");
+            subtitleOverride = null;
             JSONObject file = json.optJSONObject("videoFile");
             videoFile = file == null ? null : new VideoFile(file);
             List<VideoFile> parsedFiles = parseVideoFiles(json.optJSONArray("videoFiles"));
@@ -247,6 +419,7 @@ public final class Models {
         public final List<VideoFileStream> audioTracks;
         public final List<VideoFileStream> subtitleStreams;
         public final String displayLabel;
+        public final String playbackUrl;
 
         private VideoFile(JSONObject json) {
             this(
@@ -268,7 +441,30 @@ public final class Models {
                     optString(json, "subtitleSummary"),
                     parseStreams(json.optJSONArray("audioTracks")),
                     parseStreams(json.optJSONArray("subtitleStreams")),
-                    null);
+                    null,
+                    "");
+        }
+
+        /** Local-library factory: files are played from an absolute path or direct URL. */
+        public static VideoFile local(
+                String id,
+                String relativePath,
+                String fileName,
+                String mediaKind,
+                int seasonNumber,
+                int episodeNumber,
+                String episodeTitle,
+                double positionSeconds,
+                double durationSeconds,
+                boolean isWatched,
+                String playbackUrl) {
+            return new VideoFile(
+                    id, relativePath, fileName, mediaKind, 0,
+                    positionSeconds, isWatched,
+                    seasonNumber, episodeNumber, episodeTitle,
+                    "", "", 0, 0, "", "",
+                    Collections.emptyList(), Collections.emptyList(),
+                    null, playbackUrl);
         }
 
         private VideoFile(
@@ -290,7 +486,8 @@ public final class Models {
                 String subtitleSummary,
                 List<VideoFileStream> audioTracks,
                 List<VideoFileStream> subtitleStreams,
-                String displayLabel) {
+                String displayLabel,
+                String playbackUrl) {
             this.id = id;
             this.relativePath = relativePath;
             this.fileName = fileName;
@@ -310,6 +507,15 @@ public final class Models {
             this.audioTracks = audioTracks == null ? Collections.emptyList() : audioTracks;
             this.subtitleStreams = subtitleStreams == null ? Collections.emptyList() : subtitleStreams;
             this.displayLabel = displayLabel;
+            this.playbackUrl = playbackUrl == null ? "" : playbackUrl;
+        }
+
+        public VideoFile withPlaybackUrl(String url) {
+            return new VideoFile(
+                    id, relativePath, fileName, mediaKind, durationSeconds,
+                    positionSeconds, isWatched, seasonNumber, episodeNumber, episodeTitle,
+                    container, videoCodec, videoWidth, videoHeight, audioCodec, subtitleSummary,
+                    audioTracks, subtitleStreams, displayLabel, url);
         }
 
         public VideoFile withEpisodeLabel(String label) {
@@ -332,7 +538,8 @@ public final class Models {
                     subtitleSummary,
                     audioTracks,
                     subtitleStreams,
-                    label);
+                    label,
+                    playbackUrl);
         }
 
         public VideoFile withStreams(List<VideoFileStream> audioTracks, List<VideoFileStream> subtitleStreams) {
@@ -355,7 +562,8 @@ public final class Models {
                     subtitleSummary,
                     audioTracks == null ? this.audioTracks : audioTracks,
                     subtitleStreams == null ? this.subtitleStreams : subtitleStreams,
-                    displayLabel);
+                    displayLabel,
+                    playbackUrl);
         }
 
         public String label() {
@@ -603,6 +811,20 @@ public final class Models {
 
     private static String optString(JSONObject json, String key) {
         return json.has(key) && !json.isNull(key) ? json.optString(key) : null;
+    }
+
+    private static List<String> parseStringList(JSONArray array) {
+        if (array == null || array.length() == 0) {
+            return Collections.emptyList();
+        }
+        ArrayList<String> values = new ArrayList<>(array.length());
+        for (int index = 0; index < array.length(); index++) {
+            String value = array.optString(index, "");
+            if (value != null && !value.trim().isEmpty()) {
+                values.add(value.trim());
+            }
+        }
+        return values;
     }
 
     private static Integer optInt(JSONObject json, String key) {

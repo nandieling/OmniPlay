@@ -154,10 +154,47 @@ public final class MpvPlayer {
         }
     }
 
+    /**
+     * 播放画质模式: trades demuxer buffering against startup latency and stalls.
+     * {@code smooth} buffers less on weak boxes, {@code quality} read-aheads further
+     * so high-bitrate remuxes keep a stable frame rate.
+     */
+    public void setQualityProfile(String mode) {
+        if (!initialized) {
+            return;
+        }
+        String maxBytes = "128MiB";
+        String backBytes = "32MiB";
+        String readahead = "20";
+        if ("smooth".equals(mode)) {
+            maxBytes = "64MiB";
+            backBytes = "16MiB";
+            readahead = "10";
+        } else if ("quality".equals(mode)) {
+            maxBytes = "512MiB";
+            backBytes = "128MiB";
+            readahead = "60";
+        }
+        MpvBridge.nativeSetString(handle, "demuxer-max-bytes", maxBytes);
+        MpvBridge.nativeSetString(handle, "demuxer-max-back-bytes", backBytes);
+        MpvBridge.nativeSetString(handle, "demuxer-readahead-secs", readahead);
+    }
+
     public void setSubtitleTrack(String value) {
         if (initialized) {
             MpvBridge.nativeSetString(handle, "sid", value == null || value.isEmpty() ? "auto" : value);
         }
+    }
+
+    /**
+     * 只有视频真正处于播放中（未暂停、未播放结束）才返回 true。
+     * 用于同步 FLAG_KEEP_SCREEN_ON：暂停或播完后允许屏幕按系统策略息屏。
+     */
+    public boolean isPlaying() {
+        if (!initialized || paused) {
+            return false;
+        }
+        return "yes".equals(getStringProperty("idle", "no"));
     }
 
     public String getStringProperty(String property, String fallback) {

@@ -129,4 +129,139 @@ public sealed class WebDavDiscoveryClientTests
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized));
         }
     }
+
+    [Fact]
+    public async Task TestConnectionAsync_RetriesServerErrorsUntilSuccess()
+    {
+        var handler = new SequenceWebDavHttpMessageHandler(
+            [HttpStatusCode.ServiceUnavailable, (HttpStatusCode)207, (HttpStatusCode)207]);
+        using var httpClient = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(5)
+        };
+        var client = new WebDavDiscoveryClient(httpClient);
+
+        var result = await client.TestConnectionAsync(CreateWebDavSource());
+
+        Assert.True(result.Success);
+        Assert.Equal(2, handler.CallCount);
+    }
+
+    [Fact]
+    public async Task EnumerateFilesAsync_RetriesNetworkErrorsUntilSuccess()
+    {
+        var handler = new SequenceWebDavHttpMessageHandler(
+            [(HttpStatusCode)207],
+            preSuccessThrow: new HttpRequestException("Connection reset by peer"));
+        using var httpClient = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(5)
+        };
+        var client = new WebDavDiscoveryClient(httpClient);
+
+        var files = await client.EnumerateFilesAsync(CreateWebDavSource());
+
+        // 1 network failure on the root directory, then root and movies/ PROPFINDs succeed.
+        Assert.Equal(3, handler.CallCount);
+        Assert.Equal(["movies/Inception.2010.mkv"], files.Select(static file => file.RelativePath).ToList());
+    }
+
+    [Fact]
+    public async Task TestConnectionAsync_DoesNotRetryAuthenticationFailure()
+    {
+        var handler = new SequenceWebDavHttpMessageHandler([HttpStatusCode.Unauthorized]);
+        using var httpClient = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(5)
+        };
+        var client = new WebDavDiscoveryClient(httpClient);
+
+        var result = await client.TestConnectionAsync(CreateWebDavSource());
+
+        Assert.False(result.Success);
+        Assert.Equal(1, handler.CallCount);
+        Assert.Contains("认证被拒绝", result.Message, StringComparison.Ordinal);
+    }
+
+    private static MediaSource CreateWebDavSource()
+    {
+        return new MediaSource
+        {
+            Name = "Remote",
+            ProtocolType = "webdav",
+            BaseUrl = "https://demo.example/library",
+            AuthConfig = MediaSourceAuthConfigSerializer.SerializeWebDav(new WebDavAuthConfig("demo", "secret"))
+        };
+    }
+
+    private sealed class SequenceWebDavHttpMessageHandler(
+        IReadOnlyList<HttpStatusCode> statuses,
+        Exception? preSuccessThrow = null) : HttpMessageHandler
+    {
+        private readonly IReadOnlyList<HttpStatusCode> statuses = statuses;
+        private readonly Exception? preSuccessThrow = preSuccessThrow;
+        private int callCount;
+
+        public int CallCount => callCount;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            callCount++;
+            if (preSuccessThrow is not null && callCount == 1)
+            {
+                throw preSuccessThrow;
+            }
+
+            var status = statuses[Math.Min(callCount - 1, statuses.Count - 1)];
+            if (status == (HttpStatusCode)207)
+            {
+                var path = request.RequestUri?.AbsolutePath ?? string.Empty;
+                var children = path switch
+                {
+                    "/library/" => """
+                    <d:response>
+                      <d:href>/library/movies/</d:href>
+                      <d:propstat>
+                        <d:prop>
+                          <d:resourcetype><d:collection /></d:resourcetype>
+                        </d:prop>
+                        <d:status>HTTP/1.1 200 OK</d:status>
+                      </d:propstat>
+                    </d:response>
+                    """,
+                    "/library/movies/" => """
+                    <d:response>
+                      <d:href>/library/movies/Inception.2010.mkv</d:href>
+                      <d:propstat>
+                        <d:prop>
+                          <d:resourcetype /><d:getcontentlength>128</d:getcontentlength>
+                        </d:prop>
+                        <d:status>HTTP/1.1 200 OK</d:status>
+                      </d:propstat>
+                    </d:response>
+                    """,
+                    _ => string.Empty
+                };
+
+                var content = """<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:">""" +
+                    $"""
+                    <d:response>
+                      <d:href>{path}</d:href>
+                      <d:propstat>
+                        <d:prop>
+                          <d:resourcetype><d:collection /></d:resourcetype>
+                        </d:prop>
+                        <d:status>HTTP/1.1 200 OK</d:status>
+                      </d:propstat>
+                    </d:response>
+                    """ + children + "</d:multistatus>";
+                return Task.FromResult(new HttpResponseMessage((HttpStatusCode)207)
+                {
+                    Content = new StringContent(content, Encoding.UTF8, "application/xml")
+                });
+            }
+
+            return Task.FromResult(new HttpResponseMessage(status));
+        }
+    }
 }

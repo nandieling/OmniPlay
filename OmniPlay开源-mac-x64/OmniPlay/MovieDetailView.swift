@@ -12,40 +12,46 @@ struct EpisodeItem: Identifiable {
 
 struct MovieDetailView: View {
     let movie: Movie
+    @State private var displayedMovie: Movie
     @Environment(\.dismiss) var dismiss
     @AppStorage("seekDuration") var seekDuration: Int = 10
-
+    
     @AppStorage("appTheme") var appTheme = ThemeType.appleLight.rawValue
     var theme: AppTheme { ThemeType(rawValue: appTheme)?.colors ?? ThemeType.appleLight.colors }
     @AppStorage("enableFastTooltip") var enableFastTooltip = true
-
+    
     // 🌟 修复：在这里声明管家，让详情页全局都能认识它！
     @ObservedObject var cacheManager = OfflineCacheManager.shared
-
+    
     @State private var videoFiles: [VideoFile] = []
     @State private var currentVideoFileId: String? = nil
-
+    
     @State private var allEpisodes: [EpisodeItem] = []
     @State private var availableSeasons: [Int] = []
     @State private var selectedSeason: Int = 1
     @State private var isTVShow: Bool = false
     @State private var isDetailCacheModeActive = false
     @State private var cacheSupportByFileId: [String: Bool] = [:]
+    @State private var pendingCacheCancellation: [VideoFile] = []
+    @State private var showCancelCacheConfirmation = false
     @State private var loadFileDetailsTask: Task<Void, Never>? = nil
-
+    
     @State private var localPoster: NSImage? = nil
     @State private var displayMovieTitle: String
     @State private var playbackAlertMessage = ""
     @State private var showPlaybackAlert = false
     @State private var doubanMetadata: DoubanMetadata? = nil
-
+    
     init(movie: Movie) {
         self.movie = movie
+        _displayedMovie = State(initialValue: movie)
         _displayMovieTitle = State(initialValue: movie.title)
     }
 
+    private var activeMovieId: Int64? { displayedMovie.id ?? movie.id }
+    
     // 删除了原有的 posterURLString 变量，因为我们现在有了超强的 CachedPosterView
-
+    
     var mainFile: VideoFile? {
         if let currentVideoFileId,
            let selected = videoFiles.first(where: { $0.id == currentVideoFileId }) {
@@ -54,7 +60,7 @@ struct MovieDetailView: View {
 
         let unfinished = videoFiles
             .filter { file in
-                guard file.playProgress > 5 else { return false }
+                guard file.playProgress > 0 else { return false }
                 return file.duration <= 0 || file.playProgress / file.duration < 0.95
             }
             .max { lhs, rhs in
@@ -78,15 +84,15 @@ struct MovieDetailView: View {
         }
         return (progress, duration)
     }
-
+    
     var allEpisodesForSelectedSeason: [EpisodeItem] {
         allEpisodes.filter { $0.season == selectedSeason }
     }
-
+    
     private var episodeGridColumns: [GridItem] {
         [GridItem(.adaptive(minimum: 260, maximum: 320), spacing: 24, alignment: .top)]
     }
-
+    
     var body: some View {
         ZStack(alignment: .topLeading) {
             // 1. 毛玻璃背景
@@ -103,22 +109,28 @@ struct MovieDetailView: View {
                 .overlay(.regularMaterial)
                 .overlay(theme.background.opacity(0.6))
             }.ignoresSafeArea()
-
+            
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     // 2. 左右分栏的高级信息区
                     HStack(alignment: .top, spacing: 45) {
-
+                        
                         ZStack {
                             // 🌟 核心升级：详情页的左侧海报也使用具有智能自愈功能的组件！
-                            CachedPosterView(posterPath: movie.posterPath)
+                            CachedPosterView(posterPath: displayedMovie.posterPath)
                                 .frame(width: 260, height: 390) // 🌟 修复：明确给定 2:3 比例的高度 (260 * 1.5)
                                 .clipped() // 🌟 修复：防止内部的 fill 模式溢出
                                 .cornerRadius(12)
                                 .shadow(color: theme.textSecondary.opacity(0.15), radius: 25, y: 15)
 
                             if isDetailCacheModeActive {
-                                Button(action: { cacheEntireTitle() }) {
+                                Button(action: {
+                                    if aggregateCacheProgress(for: videoFiles) != nil {
+                                        requestCacheCancellation(for: videoFiles)
+                                    } else {
+                                        cacheEntireTitle()
+                                    }
+                                }) {
                                     cacheOverlayContent(for: videoFiles, downloadTitle: "离线缓存整部影片或整部剧集")
                                 }
                                 .buttonStyle(.plain)
@@ -126,13 +138,13 @@ struct MovieDetailView: View {
                                 .conditionalHelp(cacheHelpText(for: videoFiles, defaultText: "离线缓存整部影片或整部剧集"), show: enableFastTooltip)
                             }
                         }
-
+                        
                         VStack(alignment: .leading, spacing: 16) {
                             Text(displayMovieTitle).font(.system(size: 46, weight: .heavy)).foregroundColor(theme.textPrimary).lineLimit(2)
-
+                            
                             HStack(spacing: 16) {
                                 if let year = preferredYear { Text(year) }
-                                if let vote = movie.voteAverage, vote > 0 {
+                                if let vote = displayedMovie.voteAverage, vote > 0 {
                                     HStack(spacing: 4) {
                                         Image(systemName: "star.fill")
                                         Text(String(format: "%.1f", vote))
@@ -152,7 +164,32 @@ struct MovieDetailView: View {
                             }
                             .font(.title3.bold())
                             .foregroundColor(theme.textSecondary)
-
+                            
+                            VStack(alignment: .leading, spacing: 8) {
+                                if !fusedDirectorLine.isEmpty {
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Text("导演")
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundColor(theme.textSecondary)
+                                            .frame(width: 34, alignment: .leading)
+                                        Text(fusedDirectorLine)
+                                            .font(.subheadline)
+                                            .foregroundColor(theme.textPrimary)
+                                    }
+                                }
+                                if !fusedCastLine.isEmpty {
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Text("主演")
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundColor(theme.textSecondary)
+                                            .frame(width: 34, alignment: .leading)
+                                        Text(fusedCastLine)
+                                            .font(.subheadline)
+                                            .foregroundColor(theme.textPrimary)
+                                    }
+                                }
+                            }
+                            
                             Text(fusedOverview)
                                 .font(.body)
                                 .foregroundColor(theme.textPrimary.opacity(0.85))
@@ -160,18 +197,16 @@ struct MovieDetailView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                                 .padding(.top, 10)
                                 .padding(.bottom, 10)
-
+                            
                             // 3. 播放控制条
                             if let file = mainFile {
                                 let timeline = isMultipartMovie ? multipartMovieTimeline : (progress: file.playProgress, duration: file.duration)
                                 let mainPlayProgress = timeline.progress
                                 let mainVideoDuration = timeline.duration
-                                let isWatched = mainVideoDuration > 0 && (mainPlayProgress / mainVideoDuration) >= 0.95
                                 let currentBtnLabel = getPlayButtonLabel(fileId: file.id, progress: mainPlayProgress)
-
+                                
                                 mainPlaybackControls(
                                     file: file,
-                                    isWatched: isWatched,
                                     buttonLabel: currentBtnLabel,
                                     progress: mainPlayProgress,
                                     duration: mainVideoDuration
@@ -180,7 +215,7 @@ struct MovieDetailView: View {
                         }
                     }
                     .padding(.top, 120).padding(.horizontal, 60)
-
+                    
                     // 4. 分集选择器
                     if isTVShow && !allEpisodes.isEmpty {
                         VStack(alignment: .leading, spacing: 20) {
@@ -198,11 +233,18 @@ struct MovieDetailView: View {
                                 .menuStyle(.borderlessButton)
                                 .menuIndicator(.hidden)
                                 .fixedSize()
-
+                                
                                 // 整季缓存专属按钮
                                 if isDetailCacheModeActive {
                                     HStack(spacing: 10) {
-                                        Button(action: { cacheSelectedSeason() }) {
+                                        Button(action: {
+                                            let seasonFiles = allEpisodesForSelectedSeason.map(\.file)
+                                            if aggregateCacheProgress(for: seasonFiles) != nil {
+                                                requestCacheCancellation(for: seasonFiles)
+                                            } else {
+                                                cacheSelectedSeason()
+                                            }
+                                        }) {
                                             cacheOverlayContent(for: allEpisodesForSelectedSeason.map(\.file), downloadTitle: "缓存当前选择的整季", compact: true)
                                         }
                                         .buttonStyle(.plain)
@@ -222,7 +264,7 @@ struct MovieDetailView: View {
                             LazyVGrid(columns: episodeGridColumns, alignment: .leading, spacing: 24) {
                                 ForEach(allEpisodesForSelectedSeason) { ep in
                                     EpisodeCardView(
-                                        movieId: movie.id,
+                                        movieId: activeMovieId,
                                         movieTitle: $displayMovieTitle,
                                         ep: ep,
                                         currentVideoFileId: $currentVideoFileId,
@@ -246,13 +288,13 @@ struct MovieDetailView: View {
                     }
                 }
             }
-
+            
             // 返回按钮
             Button(action: { dismiss() }) {
                 Image(systemName: "chevron.left").font(.body.bold()).padding(14).background(theme.background.opacity(0.8)).foregroundColor(theme.textPrimary).clipShape(Circle()).shadow(color: theme.textSecondary.opacity(0.1), radius: 5, y: 3)
             }
             .buttonStyle(.plain).padding(.top, 25).padding(.leading, 30)
-
+            
             // 详情页右上角快捷切换缓存模式
             VStack {
                 HStack {
@@ -277,39 +319,49 @@ struct MovieDetailView: View {
         } message: {
             Text(playbackAlertMessage)
         }
+        .confirmationDialog("取消离线缓存？", isPresented: $showCancelCacheConfirmation, titleVisibility: .visible) {
+            Button("取消缓存", role: .destructive) {
+                cacheManager.cancelDownloads(files: pendingCacheCancellation)
+                pendingCacheCancellation = []
+            }
+            Button("继续缓存", role: .cancel) {
+                pendingCacheCancellation = []
+            }
+        } message: {
+            Text("已缓存的内容会保留，未完成的文件将被删除。")
+        }
         .onAppear {
             // 🌟 核心修复：使用新的无沙盒抓取逻辑作为毛玻璃背景
-            if let path = movie.posterPath,
-               let localURL = PosterManager.shared.getLocalPosterURL(for: path),
-               let data = try? Data(contentsOf: localURL),
-               let img = NSImage(data: data) {
-                self.localPoster = img
-            }
-            loadFileDetails()
-            loadDoubanMetadata()
+            refreshLocalPoster()
+            refreshMovieMetadata(preferredFileId: nil, followFileAssociation: false)
         }
         // 🌟 监听海报下载完成，刷新毛玻璃背景
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PosterUpdated_\((movie.posterPath ?? "").replacingOccurrences(of: "/", with: ""))"))) { _ in
-            if let path = movie.posterPath,
-               let localURL = PosterManager.shared.getLocalPosterURL(for: path),
-               let data = try? Data(contentsOf: localURL),
-               let img = NSImage(data: data) {
-                self.localPoster = img
-            }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PosterUpdated_\(PosterManager.shared.cacheFileName(for: displayedMovie.posterPath ?? ""))"))) { _ in
+            refreshLocalPoster()
         }
         .onReceive(NotificationCenter.default.publisher(for: .libraryUpdated)) { notification in
             let preferredFileId = notification.userInfo?[LibraryUpdateUserInfoKey.preferredVideoFileId] as? String
-            loadFileDetails(preservingCurrentSelection: true, preferredFileId: preferredFileId)
-            loadDoubanMetadata()
+            let replacedMovieId = notification.userInfo?[LibraryUpdateUserInfoKey.replacedMovieId] as? Int64
+            let updatedMovieId = notification.userInfo?[LibraryUpdateUserInfoKey.updatedMovieId] as? Int64
+            let followsCurrentScrape = replacedMovieId == activeMovieId
+                || updatedMovieId == activeMovieId
+                || preferredFileId.map { id in videoFiles.contains(where: { $0.id == id }) } == true
+            refreshMovieMetadata(
+                preferredFileId: preferredFileId,
+                followFileAssociation: followsCurrentScrape,
+                preservingCurrentSelection: true
+            )
         }
         .onDisappear {
             loadFileDetailsTask?.cancel()
             loadFileDetailsTask = nil
         }
     }
-
+    
     private func getPlayButtonLabel(fileId: String, progress: Double) -> String {
-        let prefix = progress > 5.0 ? "继续播放" : "开始播放"
+        let duration = isMultipartMovie ? multipartMovieTimeline.duration : (videoFiles.first { $0.id == fileId }?.duration ?? 0)
+        let state = PlaybackWatchState(progress: progress, duration: duration)
+        let prefix = state.hasResumeProgress ? "继续播放" : "开始播放"
         if isTVShow, let ep = allEpisodes.first(where: { $0.id == fileId }) {
             return "\(prefix) \(ep.displayName)"
         }
@@ -325,14 +377,26 @@ struct MovieDetailView: View {
         return parts
     }
 
+    private var fusedDirectorLine: String {
+        let fromMovie = displayedMovie.directorList
+        if !fromMovie.isEmpty { return fromMovie.joined(separator: "、") }
+        return (doubanMetadata?.directorList ?? []).joined(separator: "、")
+    }
+
+    private var fusedCastLine: String {
+        let fromMovie = displayedMovie.castList
+        let list = fromMovie.isEmpty ? (doubanMetadata?.castList ?? []) : fromMovie
+        return list.prefix(6).joined(separator: "、")
+    }
+
     private var preferredYear: String? {
         if let year = doubanMetadata?.year, !year.isEmpty { return year }
-        if let date = movie.releaseDate, date.count >= 4 { return String(date.prefix(4)) }
+        if let date = displayedMovie.releaseDate, date.count >= 4 { return String(date.prefix(4)) }
         return nil
     }
 
     private var fusedOverview: String {
-        if let overview = movie.overview?.trimmingCharacters(in: .whitespacesAndNewlines), !overview.isEmpty {
+        if let overview = displayedMovie.overview?.trimmingCharacters(in: .whitespacesAndNewlines), !overview.isEmpty {
             return overview
         }
         if let summary = doubanMetadata?.summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
@@ -342,7 +406,7 @@ struct MovieDetailView: View {
     }
 
     private func loadDoubanMetadata() {
-        guard let movieId = movie.id else { return }
+        guard let movieId = activeMovieId else { return }
         Task {
             let metadata = try? await AppDatabase.shared.dbQueue.read { db in
                 try DoubanMetadata.fetchOne(db, key: movieId)
@@ -351,6 +415,49 @@ struct MovieDetailView: View {
                 self.doubanMetadata = metadata?.isInvalidPlaceholder == true ? nil : metadata
             }
         }
+    }
+
+    private func refreshMovieMetadata(
+        preferredFileId: String?,
+        followFileAssociation: Bool,
+        preservingCurrentSelection: Bool = false
+    ) {
+        let currentMovieId = activeMovieId
+        Task {
+            let refreshed = try? await AppDatabase.shared.dbQueue.read { db -> Movie? in
+                if followFileAssociation,
+                   let preferredFileId,
+                   let associatedMovieId = try VideoFile.fetchOne(db, key: preferredFileId)?.movieId,
+                   let associatedMovie = try Movie.fetchOne(db, key: associatedMovieId) {
+                    return associatedMovie
+                }
+                guard let currentMovieId else { return nil }
+                return try Movie.fetchOne(db, key: currentMovieId)
+            }
+            await MainActor.run {
+                if let refreshed {
+                    displayedMovie = refreshed
+                    displayMovieTitle = refreshed.title
+                }
+                refreshLocalPoster()
+                loadFileDetails(
+                    preservingCurrentSelection: preservingCurrentSelection,
+                    preferredFileId: followFileAssociation ? preferredFileId : nil
+                )
+                loadDoubanMetadata()
+            }
+        }
+    }
+
+    private func refreshLocalPoster() {
+        guard let path = displayedMovie.posterPath,
+              let localURL = PosterManager.shared.getLocalPosterURL(for: path),
+              let data = try? Data(contentsOf: localURL),
+              let image = NSImage(data: data) else {
+            localPoster = nil
+            return
+        }
+        localPoster = image
     }
 
     private func seasonSortPriority(_ season: Int) -> Int {
@@ -517,9 +624,7 @@ struct MovieDetailView: View {
     }
 
     private func hasUnfinishedPlaybackProgress(_ file: VideoFile) -> Bool {
-        guard file.playProgress > 5.0 else { return false }
-        guard file.duration > 0 else { return true }
-        return (file.playProgress / file.duration) < 0.95
+        PlaybackWatchState(progress: file.playProgress, duration: file.duration) == .inProgress
     }
 
     private func isNotFullyWatched(_ file: VideoFile) -> Bool {
@@ -540,8 +645,9 @@ struct MovieDetailView: View {
             ?? seasonEpisodes.first { isNotFullyWatched($0.file) }
             ?? seasonEpisodes.first
     }
-
+    
     private func loadFileDetails(preservingCurrentSelection: Bool = false, preferredFileId: String? = nil) {
+        guard let movieId = activeMovieId else { return }
         let preservedSeason = preservingCurrentSelection ? selectedSeason : nil
         let preservedFileId = preservingCurrentSelection ? currentVideoFileId : nil
         let explicitPreferredFileId = preferredFileId?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -549,7 +655,7 @@ struct MovieDetailView: View {
         loadFileDetailsTask = Task {
             do {
                 let sourcePairs = try await AppDatabase.shared.dbQueue.read { db in
-                    try VideoFile.fetchVisibleSourcePairs(movieId: movie.id, in: db)
+                    try VideoFile.fetchVisibleSourcePairs(movieId: movieId, in: db)
                 }
                 if Task.isCancelled { return }
                 let files = sourcePairs.map(\.0)
@@ -585,7 +691,7 @@ struct MovieDetailView: View {
                 var eligibleEpisodeIDs = Set<String>()
                 var explicitSubtitleFileIDs = Set<String>()
                 var isShow = false
-
+                
                 for (index, file) in sortedFiles.enumerated() {
                     let parsed = MediaNameParser.parseEpisodeDescriptor(from: file.fileName, fallbackIndex: index)
                     let override = EpisodeMetadataOverrideStore.shared.override(for: file.id)
@@ -614,7 +720,7 @@ struct MovieDetailView: View {
                     }
                     episodes.append(EpisodeItem(id: file.id, file: file, season: s, episode: e, displayName: dName))
                 }
-
+                
                 let seasons = Array(Set(episodes.map { $0.season })).sorted {
                     seasonSortPriority($0) < seasonSortPriority($1)
                 }
@@ -626,7 +732,7 @@ struct MovieDetailView: View {
                 let resumeEp = mostRecentUnfinishedEpisode(in: sortedEpisodes)
                 let nextUnwatchedEp = sortedEpisodes.first { isNotFullyWatched($0.file) }
                 let nextUpEp = resumeEp ?? nextUnwatchedEp ?? sortedEpisodes.first
-
+                
                 await MainActor.run {
                     guard !Task.isCancelled else { return }
                     self.videoFiles = sortedEpisodes.map(\.file); self.allEpisodes = sortedEpisodes; self.availableSeasons = seasons; self.isTVShow = isShow
@@ -673,11 +779,11 @@ struct MovieDetailView: View {
             } catch { }
         }
     }
-
+    
     private func toggleWatchedStatus(for fileId: String) {
         Task { do { try await AppDatabase.shared.dbQueue.write { db in if var file = try VideoFile.fetchOne(db, key: fileId) { let isWatched = file.duration > 0 && (file.playProgress / file.duration) >= 0.95; if isWatched { file.playProgress = 0 } else { file.playProgress = file.duration > 0 ? file.duration : 100; if file.duration == 0 { file.duration = 100 } }; file.lastPlayedAt = nil; try file.update(db) } }; DispatchQueue.main.async { NotificationCenter.default.post(name: .libraryUpdated, object: nil) } } catch { } }
     }
-
+    
     private func cacheSelectedSeason() {
         let episodesToCache = allEpisodes.filter { $0.season == selectedSeason }
         let supportedFiles = episodesToCache.map(\.file).filter { cacheSupportByFileId[$0.id] ?? false }
@@ -689,7 +795,7 @@ struct MovieDetailView: View {
         }
         let filesToCache = supportedFiles.filter { !OfflineCacheManager.shared.isCached($0) }
         if !filesToCache.isEmpty {
-            OfflineCacheManager.shared.startDownloads(files: filesToCache, groupTitle: "\(movie.title) 第 \(selectedSeason) 季")
+            OfflineCacheManager.shared.startDownloads(files: filesToCache, groupTitle: "\(displayedMovie.title) 第 \(selectedSeason) 季")
         }
         if hasUnsupported {
             OfflineCacheManager.shared.cacheStatusMessage = "部分剧集的媒体源暂不支持离线缓存，已跳过"
@@ -703,27 +809,36 @@ struct MovieDetailView: View {
             OfflineCacheManager.shared.cacheStatusMessage = supportedFiles.isEmpty ? "该媒体源暂不支持离线缓存" : "所选内容已在本地缓存中"
             return
         }
-        OfflineCacheManager.shared.startDownloads(files: filesToCache, groupTitle: movie.title)
+        OfflineCacheManager.shared.startDownloads(files: filesToCache, groupTitle: displayedMovie.title)
     }
 
+    private func requestCacheCancellation(for files: [VideoFile]) {
+        let activeFiles = files.filter { cacheManager.progress(for: $0) != nil }
+        guard !activeFiles.isEmpty else { return }
+        pendingCacheCancellation = activeFiles
+        showCancelCacheConfirmation = true
+    }
+    
     private func attemptPlayback(for file: VideoFile) {
+        guard let movieId = activeMovieId else { return }
         Task {
             do {
                 let snapshot = try await AppDatabase.shared.dbQueue.read { db -> (VideoFile, MediaSource?, [VideoFile]) in
                     let current = try VideoFile.fetchOne(db, key: file.id) ?? file
                     let source = try current.request(for: VideoFile.mediaSource).fetchOne(db)
-                    let files = try VideoFile.fetchVisibleFiles(movieId: movie.id, in: db)
+                    let files = try VideoFile.fetchVisibleFiles(movieId: movieId, in: db)
                     return (current, source, files)
                 }
 
-                let selectedFile = await refreshDockerProgressIfNeeded(file: snapshot.0, source: snapshot.1)
+                let selectedFile = snapshot.0
 
                 let selectedSourceId = selectedFile.sourceId
                 let source = try await AppDatabase.shared.dbQueue.read { db in
                     try MediaSource.fetchOne(db, key: selectedSourceId)
                 }
                 let playlistFiles = try await AppDatabase.shared.dbQueue.read { db in
-                    try VideoFile.fetchVisibleFiles(movieId: movie.id, in: db)
+                    try VideoFile.fetchVisibleFiles(movieId: movieId, in: db)
+                        .filter { $0.sourceId == selectedSourceId }
                 }
                 let isMissing = OfflineCacheManager.shared.hasMissingSource(for: selectedFile, mediaSource: source)
                 await MainActor.run {
@@ -752,38 +867,6 @@ struct MovieDetailView: View {
                     showPlaybackAlert = true
                 }
             }
-        }
-    }
-
-    private func refreshDockerProgressIfNeeded(file: VideoFile, source: MediaSource?) async -> VideoFile {
-        guard let source,
-              source.protocolKind == .omniplayDocker,
-              let remoteFileId = Self.omniPlayDockerRemoteFileId(from: file) else {
-            return file
-        }
-
-        let selectedFileId = file.id
-        do {
-            let config = OmniPlayDockerAuthConfig.decode(source.authConfig)
-            let client = try OmniPlayDockerClient(baseURLString: source.baseUrl, sessionCookie: config?.sessionCookie)
-            let remote = try await client.playbackProgress(videoFileId: remoteFileId)
-            guard remote.positionSeconds > 0 || file.playProgress <= 5 else {
-                return file
-            }
-
-            try await AppDatabase.shared.dbQueue.write { db in
-                guard var current = try VideoFile.fetchOne(db, key: selectedFileId) else { return }
-                current.playProgress = max(0, remote.positionSeconds)
-                current.duration = max(current.duration, remote.durationSeconds)
-                current.lastPlayedAt = current.playProgress > 5 ? Date().timeIntervalSince1970 : nil
-                try current.update(db)
-            }
-
-            return try await AppDatabase.shared.dbQueue.read { db in
-                try VideoFile.fetchOne(db, key: selectedFileId)
-            } ?? file
-        } catch {
-            return file
         }
     }
 
@@ -830,55 +913,34 @@ struct MovieDetailView: View {
         .frame(maxWidth: 900, alignment: .leading)
     }
 
-    private static func omniPlayDockerRemoteFileId(from file: VideoFile) -> String? {
-        let idParts = file.id.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
-        if idParts.count == 3,
-           idParts[0] == "omniplay-docker",
-           !idParts[2].isEmpty {
-            return idParts[2].removingPercentEncoding ?? idParts[2]
-        }
-
-        let parts = file.relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            .split(separator: "/")
-            .map(String.init)
-        guard parts.count >= 5,
-              parts[0] == "api",
-              parts[1] == "playback",
-              parts[2] == "files",
-              parts[4] == "stream" else {
-            return nil
-        }
-        return parts[3].removingPercentEncoding ?? parts[3]
-    }
-
     @ViewBuilder
     private func mainPlaybackControls(
         file: VideoFile,
-        isWatched: Bool,
         buttonLabel: String,
         progress: Double,
         duration: Double
     ) -> some View {
-        let hasProgress = duration > 0 && progress > 0 && !isWatched
-        if hasProgress {
+        let state = PlaybackWatchState(progress: progress, duration: duration)
+        let hasProgressBar = state.hasResumeProgress && duration > 0
+        if hasProgressBar {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 12) {
-                    mainPlaybackButtons(file: file, isWatched: isWatched, buttonLabel: buttonLabel)
+                    mainPlaybackButtons(file: file, state: state, buttonLabel: buttonLabel)
                     mainPlaybackProgress(progress: progress, duration: duration)
                         .frame(width: 320, alignment: .leading)
                 }
                 VStack(alignment: .leading, spacing: 12) {
-                    mainPlaybackButtons(file: file, isWatched: isWatched, buttonLabel: buttonLabel)
+                    mainPlaybackButtons(file: file, state: state, buttonLabel: buttonLabel)
                     mainPlaybackProgress(progress: progress, duration: duration)
                         .frame(maxWidth: 360, alignment: .leading)
                 }
             }
         } else {
-            mainPlaybackButtons(file: file, isWatched: isWatched, buttonLabel: buttonLabel)
+            mainPlaybackButtons(file: file, state: state, buttonLabel: buttonLabel)
         }
     }
 
-    private func mainPlaybackButtons(file: VideoFile, isWatched: Bool, buttonLabel: String) -> some View {
+    private func mainPlaybackButtons(file: VideoFile, state: PlaybackWatchState, buttonLabel: String) -> some View {
         HStack(spacing: 12) {
             Button(action: { attemptPlayback(for: file) }) {
                 HStack(spacing: 8) {
@@ -898,8 +960,8 @@ struct MovieDetailView: View {
 
             Button(action: { toggleWatchedStatus(for: file.id) }) {
                 HStack(spacing: 8) {
-                    Image(systemName: isWatched ? "checkmark.circle.fill" : "circle").font(.title3)
-                    Text(isWatched ? "已播" : "未播")
+                    Image(systemName: state == .watched ? "checkmark.circle.fill" : (state == .inProgress ? "circle.lefthalf.filled" : "circle")).font(.title3)
+                    Text(state.statusLabel)
                         .font(.title3.bold())
                         .lineLimit(1)
                         .minimumScaleFactor(0.86)
@@ -941,10 +1003,10 @@ struct MovieDetailView: View {
     private func aggregateCacheProgress(for files: [VideoFile]) -> Double? {
         let cacheableFiles = files.filter { cacheSupportByFileId[$0.id] ?? false }
         guard !cacheableFiles.isEmpty else { return nil }
-        guard cacheableFiles.contains(where: { cacheManager.downloadProgress[$0.id] != nil }) else { return nil }
+        guard cacheableFiles.contains(where: { cacheManager.progress(for: $0) != nil }) else { return nil }
         let total = cacheableFiles.reduce(0.0) { partial, file in
             if cacheManager.isCached(file) { return partial + 1.0 }
-            return partial + (cacheManager.downloadProgress[file.id] ?? 0.0)
+            return partial + (cacheManager.progress(for: file) ?? 0.0)
         }
         return total / Double(cacheableFiles.count)
     }
@@ -957,14 +1019,13 @@ struct MovieDetailView: View {
     private func isCacheActionDisabled(for files: [VideoFile]) -> Bool {
         let cacheableFiles = files.filter { cacheSupportByFileId[$0.id] ?? false }
         return cacheableFiles.isEmpty ||
-            cacheableFiles.contains(where: { cacheManager.downloadProgress[$0.id] != nil }) ||
             cacheableFiles.allSatisfy { cacheManager.isCached($0) }
     }
 
     private func cacheHelpText(for files: [VideoFile], defaultText: String) -> String {
         let cacheableFiles = files.filter { cacheSupportByFileId[$0.id] ?? false }
         if cacheableFiles.isEmpty { return "该媒体源暂不支持离线缓存" }
-        if cacheableFiles.contains(where: { cacheManager.downloadProgress[$0.id] != nil }) { return "正在离线缓存" }
+        if cacheableFiles.contains(where: { cacheManager.progress(for: $0) != nil }) { return "正在离线缓存" }
         if cacheableFiles.allSatisfy({ cacheManager.isCached($0) }) { return "已缓存到本地" }
         return defaultText
     }
@@ -991,7 +1052,7 @@ struct MovieDetailView: View {
     }
 
     private var effectiveMovie: Movie {
-        var currentMovie = movie
+        var currentMovie = displayedMovie
         currentMovie.title = displayMovieTitle
         return currentMovie
     }
@@ -1005,29 +1066,24 @@ struct EpisodeCardView: View {
     let localPoster: NSImage?
     let isCacheSupported: Bool
     let isDetailCacheModeActive: Bool
-
+    
     @AppStorage("appTheme") var appTheme = ThemeType.appleLight.rawValue
     var theme: AppTheme { ThemeType(rawValue: appTheme)?.colors ?? ThemeType.appleLight.colors }
     @ObservedObject var cacheManager = OfflineCacheManager.shared
     @State private var isHovering = false
     @State private var showEditModal = false
-
+    @State private var showCancelCacheConfirmation = false
+    
     private let cardWidth: CGFloat = 260
     private let thumbnailHeight: CGFloat = 156
-
+    
     var body: some View {
         let duration = ep.file.duration
         let progress = duration > 0 ? (ep.file.playProgress / duration) : 0
-        let isEpWatched = duration > 0 && progress >= 0.95
-        let isPartiallyWatched = ep.file.playProgress > 5.0 && progress < 0.95
+        let watchState = PlaybackWatchState(progress: ep.file.playProgress, duration: duration)
         let isSelected = currentVideoFileId == ep.file.id
-
-        let maskOpacity: Double = isEpWatched ? 0.06 : (isSelected ? 0.12 : (isPartiallyWatched ? 0.2 : 0.3))
-        let cardBrightness: Double = isEpWatched ? 0.12 : -0.12
         let isCached = cacheManager.isCached(ep.file)
-        let downloadProgress = cacheManager.downloadProgress[ep.file.id]
-        let isDownloading = downloadProgress != nil
-
+        
         VStack(alignment: .leading, spacing: 10) {
             ZStack {
                 Button(action: { currentVideoFileId = ep.file.id }) {
@@ -1038,8 +1094,6 @@ struct EpisodeCardView: View {
                             width: cardWidth,
                             height: thumbnailHeight
                         )
-                            .brightness(cardBrightness)
-                        Color.black.opacity(maskOpacity)
                         if isSelected { RoundedRectangle(cornerRadius: 10).stroke(theme.accent, lineWidth: 1.5) }
                     }
                     .frame(width: cardWidth, height: thumbnailHeight)
@@ -1051,7 +1105,7 @@ struct EpisodeCardView: View {
                         episodeCacheOverlayContent
                     }
                     .buttonStyle(.plain)
-                    .disabled(!isCacheSupported || isDownloading || isCached)
+                    .disabled(!isCacheSupported || isCached)
                 }
 
                 VStack {
@@ -1074,15 +1128,20 @@ struct EpisodeCardView: View {
                 .frame(width: cardWidth, height: thumbnailHeight)
             }
             .onHover { isHovering = $0 }
-
-            Text(ep.displayName)
-                .font(.subheadline.bold())
-                .foregroundColor(theme.textPrimary.opacity(isSelected ? 1.0 : 0.8))
-                .lineLimit(2)
-                .frame(width: cardWidth, alignment: .center)
-                .multilineTextAlignment(.center)
-
-            if duration > 0 && !isEpWatched && ep.file.playProgress > 0 {
+            
+            HStack(spacing: 6) {
+                Image(systemName: watchState == .watched ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(watchState == .watched ? theme.accent : theme.textSecondary)
+                    .accessibilityLabel(watchState == .watched ? "已看" : "未看")
+                Text(ep.displayName)
+                    .font(.subheadline.bold())
+                    .foregroundColor(theme.textPrimary.opacity(isSelected ? 1.0 : 0.8))
+                    .lineLimit(2)
+            }
+            .frame(width: cardWidth, alignment: .center)
+            .multilineTextAlignment(.center)
+            
+            if duration > 0 && watchState == .inProgress {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         Rectangle().fill(theme.surface).frame(height: 4).cornerRadius(2)
@@ -1094,11 +1153,19 @@ struct EpisodeCardView: View {
         .sheet(isPresented: $showEditModal) {
             EpisodeThumbnailEditModalView(movieId: movieId, movieTitle: $movieTitle, episode: ep)
         }
+        .confirmationDialog("取消这一集的离线缓存？", isPresented: $showCancelCacheConfirmation, titleVisibility: .visible) {
+            Button("取消缓存", role: .destructive) {
+                cacheManager.cancelDownloads(files: [ep.file])
+            }
+            Button("继续缓存", role: .cancel) { }
+        } message: {
+            Text("未完成的文件将被删除。")
+        }
     }
 
     @ViewBuilder
     private var episodeCacheOverlayContent: some View {
-        if let progress = cacheManager.downloadProgress[ep.file.id] {
+        if let progress = cacheManager.progress(for: ep.file) {
             OfflineCacheProgressBadge(progress: progress, tint: theme.accent)
         } else {
             ZStack {
@@ -1113,6 +1180,10 @@ struct EpisodeCardView: View {
     }
 
     private func cacheEpisode() {
+        if cacheManager.progress(for: ep.file) != nil {
+            showCancelCacheConfirmation = true
+            return
+        }
         guard isCacheSupported else {
             cacheManager.cacheStatusMessage = "该媒体源暂不支持离线缓存"
             return
@@ -1131,10 +1202,10 @@ struct EpisodeThumbnailView: View {
     let width: CGFloat
     let height: CGFloat
     @State private var thumbnail: NSImage? = nil
-
+    
     @AppStorage("appTheme") var appTheme = ThemeType.appleLight.rawValue
     var theme: AppTheme { ThemeType(rawValue: appTheme)?.colors ?? ThemeType.appleLight.colors }
-
+    
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 10)
@@ -1163,7 +1234,7 @@ struct EpisodeThumbnailView: View {
         .onAppear { loadThumbnail() }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ThumbnailGenerated_\(fileId)"))) { _ in loadThumbnail() }
     }
-
+    
     private func loadThumbnail() {
         let url = ThumbnailManager.shared.thumbnailURL(for: fileId)
         if let img = NSImage(contentsOf: url) { self.thumbnail = img }

@@ -29,14 +29,17 @@ import android.widget.Spinner;
 import android.widget.TextView;
 
 import com.omniplay.tv.data.Models;
-import com.omniplay.tv.data.OmniPlayApi;
+import com.omniplay.tv.data.LocalPlayApi;
 import com.omniplay.tv.iso.RemoteIsoStreamServer;
+import com.omniplay.tv.local.SmbStreamServer;
 import com.omniplay.tv.player.MpvVideoView;
 import com.omniplay.tv.ui.ImageLoader;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -52,7 +55,8 @@ public final class PhoneMainActivity extends Activity {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newFixedThreadPool(4);
     private FrameLayout root;
-    private OmniPlayApi api;
+    private LocalPlayApi api;
+    private final Map<String, Button> kindToggleButtons = new LinkedHashMap<>();
     private ImageLoader imageLoader;
     private Models.LibraryDetail currentDetail;
     private MpvVideoView playerView;
@@ -67,7 +71,7 @@ public final class PhoneMainActivity extends Activity {
         getWindow().setStatusBarColor(COLOR_BACKGROUND);
         getWindow().setNavigationBarColor(COLOR_BACKGROUND);
 
-        api = new OmniPlayApi(this);
+        api = new LocalPlayApi(this);
         imageLoader = new ImageLoader(this);
         root = new FrameLayout(this);
         root.setBackgroundColor(COLOR_BACKGROUND);
@@ -81,7 +85,7 @@ public final class PhoneMainActivity extends Activity {
     }
 
     private void checkSession() {
-        showLoading("正在连接 OmniPlay 服务端");
+        showLoading("正在打开媒体库");
         runAsync(
                 () -> api.authStatus(),
                 status -> {
@@ -110,115 +114,174 @@ public final class PhoneMainActivity extends Activity {
         scroll.addView(page, matchWidth());
 
         page.addView(title("OmniPlay"));
-        page.addView(body("连接docker服务端，安卓端只播放，不扫描刮削。"));
+        page.addView(body("独立版：添加本地目录、WebDAV 或 SMB 媒体源，自动扫描并用 TMDB 刮削海报。"));
 
-        EditText serverInput = input("Docker 服务端地址，例如 http://192.168.1.10:45722", api.serverUrl());
-        page.addView(serverInput, margin(matchWidth(), 0, dp(18), 0, 0));
+        TextView sourceSummary = text(api.engine().sources().isEmpty()
+                ? "当前没有媒体源。"
+                : "当前媒体源：" + api.engine().sources().size() + " 个。", 13, Typeface.BOLD, COLOR_MUTED);
+        page.addView(sourceSummary, margin(matchWidth(), 0, dp(14), 0, 0));
 
-        EditText usernameInput = input("用户名", api.savedUsername());
-        page.addView(usernameInput, margin(matchWidth(), 0, dp(12), 0, 0));
+        final TextView pathHint = text(kindHint("webdav"), 11, Typeface.NORMAL, COLOR_MUTED);
+        LinearLayout kindRow = new LinearLayout(this);
+        kindRow.setGravity(Gravity.CENTER_VERTICAL);
+        page.addView(kindRow, margin(matchWidth(), 0, dp(6), 0, dp(8)));
+        kindToggleButtons.clear();
+        final String[] selectedKind = {"webdav"};
+        Button localKind = kindToggleButton("local", "本地目录", selectedKind, pathHint);
+        Button webDavKind = kindToggleButton("webdav", "WebDAV", selectedKind, pathHint);
+        Button smbKind = kindToggleButton("smb", "SMB", selectedKind, pathHint);
+        kindRow.addView(webDavKind, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)));
+        kindRow.addView(smbKind, margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)), dp(12), 0, 0, 0));
+        kindRow.addView(localKind, margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)), dp(12), 0, 0, 0));
 
-        EditText passwordInput = input("密码", api.savedPassword());
+        page.addView(pathHint, margin(matchWidth(), 0, dp(4), 0, 0));
+        EditText pathInput = input("例如 /storage/emulated/0/Movies、https://nas:5006/dav 或 smb://192.168.0.10/video", "");
+        page.addView(pathInput, margin(matchWidth(), 0, dp(8), 0, 0));
+        EditText nameInput = input("显示名称（可选）", "");
+        page.addView(nameInput, margin(matchWidth(), 0, dp(8), 0, 0));
+        EditText usernameInput = input("用户名（WebDAV / SMB 可选）", "");
+        page.addView(usernameInput, margin(matchWidth(), 0, dp(8), 0, 0));
+        EditText passwordInput = input("密码（WebDAV / SMB 可选）", "");
         passwordInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        page.addView(passwordInput, margin(matchWidth(), 0, dp(12), 0, 0));
+        page.addView(passwordInput, margin(matchWidth(), 0, dp(8), 0, 0));
 
-        page.addView(body("Lucky STUN 穿透地址"), margin(matchWidth(), 0, dp(6), 0, dp(2)));
-        page.addView(body("管理地址"), margin(matchWidth(), 0, 0, 0, dp(3)));
-        EditText luckyUrlInput = input("例如 http://192.168.1.1:16601", api.luckyStunManagementUrl());
-        page.addView(luckyUrlInput, margin(matchWidth(), 0, dp(10), 0, 0));
-        page.addView(body("账号"), margin(matchWidth(), 0, 0, 0, dp(3)));
-        EditText luckyUsernameInput = input("Lucky 管理账号", api.luckyStunUsername());
-        page.addView(luckyUsernameInput, margin(matchWidth(), 0, dp(10), 0, 0));
-        page.addView(body("密码"), margin(matchWidth(), 0, 0, 0, dp(3)));
-        EditText luckyPasswordInput = input("Lucky 管理密码", api.luckyStunPassword());
-        luckyPasswordInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        page.addView(luckyPasswordInput, margin(matchWidth(), 0, dp(10), 0, 0));
-        ArrayList<String> luckyRuleIds = new ArrayList<>();
-        ArrayList<String> luckyRuleNames = new ArrayList<>();
-        ArrayList<String> luckyRuleLabels = new ArrayList<>();
-        Spinner luckyRuleSpinner = new Spinner(this);
-        ArrayAdapter<String> luckyRuleAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, luckyRuleLabels);
-        luckyRuleAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        luckyRuleSpinner.setAdapter(luckyRuleAdapter);
-        page.addView(luckyRuleSpinner, margin(matchWidth(), 0, dp(8), 0, 0));
-        TextView luckyRuleList = body("登录后将在此显示规则列表。");
-        luckyRuleList.setMaxLines(8);
-        luckyRuleList.setEllipsize(TextUtils.TruncateAt.END);
-        page.addView(luckyRuleList, margin(matchWidth(), 0, dp(8), 0, 0));
-        CheckBox luckyAutoUpdate = new CheckBox(this);
-        luckyAutoUpdate.setText("定期自动更新 Lucky STUN 地址");
-        luckyAutoUpdate.setTextColor(COLOR_TEXT);
-        luckyAutoUpdate.setChecked(api.luckyStunAutoUpdate());
-        page.addView(luckyAutoUpdate, margin(matchWidth(), 0, dp(4), 0, 0));
-        EditText luckyIntervalInput = input("更新周期（分钟，至少 5）", String.valueOf(api.luckyStunUpdateIntervalMinutes()));
-        luckyIntervalInput.setInputType(InputType.TYPE_CLASS_NUMBER);
-        page.addView(luckyIntervalInput, margin(matchWidth(), 0, dp(8), 0, 0));
-        Button luckyUpdate = button("登录检测并更新");
-        page.addView(luckyUpdate, margin(matchWidth(), 0, dp(4), 0, 0));
-        TextView luckyStatus = body("选择规则后点击按钮同步 Docker 地址。");
-        page.addView(luckyStatus, margin(matchWidth(), 0, dp(12), 0, 0));
-        luckyUpdate.setOnClickListener(view -> {
-            int selectedIndex = luckyRuleSpinner.getSelectedItemPosition();
-            String selectedId = selectedIndex >= 0 && selectedIndex < luckyRuleIds.size() ? luckyRuleIds.get(selectedIndex) : api.luckyStunRuleId();
-            String selectedName = selectedIndex >= 0 && selectedIndex < luckyRuleNames.size() ? luckyRuleNames.get(selectedIndex) : "";
-            int interval;
-            try {
-                interval = Math.max(5, Math.min(1440, Integer.parseInt(luckyIntervalInput.getText().toString().trim())));
-            } catch (NumberFormatException error) {
-                interval = 30;
-            }
-            luckyUpdate.setEnabled(false);
-            luckyStatus.setText("正在登录并读取 Lucky STUN 规则...");
-            api.saveLuckyStunSettings(luckyUrlInput.getText().toString(), luckyUsernameInput.getText().toString(), luckyPasswordInput.getText().toString(), selectedId, selectedName, luckyAutoUpdate.isChecked(), interval);
-            runAsync(
-                    () -> api.refreshLuckyStun(luckyUrlInput.getText().toString(), luckyUsernameInput.getText().toString(), luckyPasswordInput.getText().toString(), selectedId, selectedName),
-                    result -> {
-                        luckyRuleIds.clear();
-                        luckyRuleNames.clear();
-                        luckyRuleLabels.clear();
-                        for (com.omniplay.tv.data.LuckyStunClient.Rule rule : result.rules) {
-                            luckyRuleIds.add(rule.id);
-                            luckyRuleNames.add(rule.name);
-                            luckyRuleLabels.add(rule.name + " · " + rule.address);
-                        }
-                        luckyRuleAdapter.notifyDataSetChanged();
-                        StringBuilder ruleSummary = new StringBuilder("已登录规则：\n");
-                        for (com.omniplay.tv.data.LuckyStunClient.Rule rule : result.rules) {
-                            ruleSummary.append("• ").append(rule.name).append("：").append(rule.address).append("\n");
-                        }
-                        luckyRuleList.setText(ruleSummary.toString().trim());
-                        if (result.selectedRule != null) {
-                            int index = luckyRuleIds.indexOf(result.selectedRule.id);
-                            if (index >= 0) {
-                                luckyRuleSpinner.setSelection(index);
-                            }
-                        }
-                        luckyStatus.setText(result.message + "\n当前服务端：" + api.serverUrl());
-                        luckyUpdate.setEnabled(true);
-                    },
-                    error -> {
-                        luckyStatus.setText("Lucky STUN 更新失败：" + error.getMessage());
-                        luckyUpdate.setEnabled(true);
-                    });
-        });
+        EditText tmdbKey = input("TMDB API Key（或留空用反代）", api.engine().tmdb().apiKey());
+        page.addView(tmdbKey, margin(matchWidth(), 0, dp(8), 0, 0));
+        EditText tmdbProxy = inputWithLeadingIcon("留空直连官方 API；无法直连时可填写反向代理地址（支持带路径前缀）", api.engine().tmdb().proxyUrl());
+        page.addView(tmdbProxy, margin(matchWidth(), 0, dp(12), 0, 0));
 
         if (message != null && !message.isEmpty()) {
             TextView error = body(message);
             error.setTextColor(COLOR_DANGER);
             page.addView(error);
         }
+        TextView setupStatus = text("", 12, Typeface.BOLD, COLOR_MUTED);
+        page.addView(setupStatus, margin(matchWidth(), 0, dp(8), 0, 0));
 
-        Button login = button("登录");
-        page.addView(login, margin(matchWidth(), 0, dp(18), 0, 0));
-        login.setOnClickListener(view -> {
-            showLoading("正在登录");
+        Button enter = button("进入");
+        page.addView(enter, margin(matchWidth(), 0, dp(14), 0, 0));
+        enter.setOnClickListener(view -> showHome());
+
+        Button saveAndScan = button("保存并扫描");
+        page.addView(saveAndScan, margin(matchWidth(), 0, dp(10), 0, 0));
+        saveAndScan.setOnClickListener(view -> {
+            String path = pathInput.getText().toString().trim();
+            if (path.isEmpty()) {
+                setupStatus.setText("请填写媒体源地址。");
+                return;
+            }
+            api.engine().tmdb().setApiKey(tmdbKey.getText().toString().trim());
+            api.engine().tmdb().setProxyUrl(tmdbProxy.getText().toString().trim());
+            String kind = selectedKind[0];
+            api.engine().saveSource(kind, nameInput.getText().toString().trim(), path,
+                    usernameInput.getText().toString().trim(), passwordInput.getText().toString().trim());
+            showLoading("正在扫描媒体源");
             runAsync(
-                    () -> api.login(
-                            serverInput.getText().toString(),
-                            usernameInput.getText().toString(),
-                            passwordInput.getText().toString()),
-                    status -> showHome(),
-                    error -> showSetup(error.getMessage()));
+                    () -> api.engine().scanAll(status -> main.post(() -> {
+                        if (screen == Screen.SETUP) {
+                            setupStatus.setText(status);
+                        }
+                    })),
+                    report -> {
+                        if (screen != Screen.SETUP) {
+                            return;
+                        }
+                        setupStatus.setText(report.message + " 待刮削 " + api.engine().scrapeQueueCount() + " 个条目。");
+                        sourceSummary.setText("当前媒体源：" + api.engine().sources().size() + " 个。");
+                        if (report.success) {
+                            showHome();
+                        }
+                    },
+                    error -> setupStatus.setText("扫描失败：" + error.getMessage()));
+        });
+
+        Button rescan = button("重新扫描");
+        page.addView(rescan, margin(matchWidth(), 0, dp(10), 0, 0));
+        rescan.setOnClickListener(view -> {
+            api.engine().tmdb().setApiKey(tmdbKey.getText().toString().trim());
+            api.engine().tmdb().setProxyUrl(tmdbProxy.getText().toString().trim());
+            showLoading("正在扫描媒体源");
+            runAsync(
+                    () -> api.engine().scanAll(null),
+                    report -> {
+                        if (screen != Screen.SETUP) {
+                            return;
+                        }
+                        setupStatus.setText(report.message + " 待刮削 " + api.engine().scrapeQueueCount() + " 个条目。");
+                        if (report.success) {
+                            showHome();
+                        }
+                    },
+                    error -> setupStatus.setText("扫描失败：" + error.getMessage()));
+        });
+
+        Button scrape = button("刮削海报");
+        page.addView(scrape, margin(matchWidth(), 0, dp(6), 0, 0));
+        scrape.setOnClickListener(view -> {
+            api.engine().tmdb().setApiKey(tmdbKey.getText().toString().trim());
+            api.engine().tmdb().setProxyUrl(tmdbProxy.getText().toString().trim());
+            if (!api.engine().tmdb().isConfigured()) {
+                setupStatus.setText(api.engine().tmdbStatusMessage());
+                return;
+            }
+            setupStatus.setText("正在刮削海报...");
+            runAsync(
+                    () -> {
+                        api.engine().scrapePending(status -> main.post(() -> {
+                            if (screen == Screen.SETUP) {
+                                setupStatus.setText(status);
+                            }
+                        }));
+                        return null;
+                    },
+                    ignored -> {
+                        if (screen == Screen.SETUP) {
+                            showHome();
+                        }
+                    },
+                    error -> setupStatus.setText("刮削失败：" + error.getMessage()));
+        });
+
+        Button testConnection = button("测试连接");
+        page.addView(testConnection, margin(matchWidth(), 0, dp(10), 0, 0));
+        testConnection.setOnClickListener(view -> {
+            String kind = selectedKind[0];
+            String path = pathInput.getText().toString().trim();
+            if (kind.equals("local")) {
+                java.io.File dir = new java.io.File(path);
+                setupStatus.setText(dir.isDirectory()
+                        ? "本地目录可访问：" + dir.getAbsolutePath()
+                        : "本地目录不存在或不可读。");
+                return;
+            }
+            if (path.isEmpty()) {
+                setupStatus.setText("请填写媒体源地址后再测试连接。");
+                return;
+            }
+            String username = usernameInput.getText().toString().trim();
+            String password = passwordInput.getText().toString().trim();
+            setupStatus.setText("正在测试连接...");
+            testConnection.setEnabled(false);
+            runAsync(
+                    () -> {
+                        if (kind.equals("smb")) {
+                            api.engine().testSmbConnection(path, username, password);
+                        } else {
+                            com.omniplay.tv.local.WebDavClient client =
+                                    new com.omniplay.tv.local.WebDavClient(
+                                            path, new com.omniplay.tv.local.WebDavClient.Credential(username, password));
+                            client.list(client.rootUrl());
+                        }
+                        return null;
+                    },
+                    ignored -> {
+                        testConnection.setEnabled(true);
+                        setupStatus.setText("连接成功，可以保存并扫描。");
+                    },
+                    error -> {
+                        testConnection.setEnabled(true);
+                        setupStatus.setText("连接失败：" + error.getMessage());
+                    });
         });
     }
 
@@ -251,7 +314,9 @@ public final class PhoneMainActivity extends Activity {
         heading.setOrientation(LinearLayout.VERTICAL);
         header.addView(heading, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         heading.addView(title("媒体库"));
-        TextView server = text(api.serverUrl(), 13, Typeface.NORMAL, COLOR_MUTED);
+        TextView server = text(api.engine().sources().isEmpty()
+                ? "独立版 · 本地媒体库"
+                : "独立版 · " + api.engine().sources().size() + " 个媒体源", 13, Typeface.NORMAL, COLOR_MUTED);
         server.setSingleLine(true);
         server.setEllipsize(TextUtils.TruncateAt.MIDDLE);
         heading.addView(server);
@@ -275,7 +340,7 @@ public final class PhoneMainActivity extends Activity {
         }
 
         if (items.isEmpty()) {
-            page.addView(body("媒体库为空，请先在服务端添加媒体源并扫描。"));
+            page.addView(body("媒体库为空，请添加媒体源并扫描。"));
         }
     }
 
@@ -402,7 +467,8 @@ public final class PhoneMainActivity extends Activity {
     private void playFile(Models.VideoFile file) {
         screen = Screen.PLAYER;
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        syncKeepScreenOn();
         root.removeAllViews();
         root.setBackgroundColor(Color.BLACK);
 
@@ -414,6 +480,11 @@ public final class PhoneMainActivity extends Activity {
 
         LinearLayout controls = playerControls();
         root.addView(controls, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(64), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
+
+        if (file.playbackUrl == null || file.playbackUrl.isEmpty()) {
+            renderPlayerError("播放地址未配置，请重新扫描媒体源。");
+            return;
+        }
 
         activePlaybackFile = file;
         runAsync(
@@ -429,13 +500,22 @@ public final class PhoneMainActivity extends Activity {
                     } else {
                         loadDefaultSubtitle(file);
                         startProgressUpdates(file);
+                        syncKeepScreenOn();
                     }
                 },
                 error -> renderPlayerError(error.getMessage()));
     }
 
     private PlaybackTarget resolvePlaybackTarget(Models.VideoFile file) throws Exception {
-        String streamUrl = api.streamUrl(file.id);
+        String streamUrl = file.playbackUrl;
+        if (streamUrl.isEmpty()) {
+            throw new IOException("播放地址未配置，请重新扫描媒体源。");
+        }
+        if (streamUrl.startsWith("smb://")) {
+            String proxyUrl = SmbStreamServer.shared().prepare(
+                    api.engine().smbClientForUrl(streamUrl), streamUrl);
+            return new PlaybackTarget(proxyUrl, "");
+        }
         if (!isIsoFile(file)) {
             return new PlaybackTarget(streamUrl, api.cookieHeader());
         }
@@ -488,6 +568,7 @@ public final class PhoneMainActivity extends Activity {
                 }
 
                 postPlaybackProgress(file);
+                syncKeepScreenOn();
                 main.postDelayed(this, 10000);
             }
         };
@@ -562,6 +643,7 @@ public final class PhoneMainActivity extends Activity {
         pause.setOnClickListener(view -> {
             if (playerView != null) {
                 playerView.togglePaused();
+                syncKeepScreenOn();
             }
         });
 
@@ -616,6 +698,7 @@ public final class PhoneMainActivity extends Activity {
                     keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
                     keyCode == KeyEvent.KEYCODE_SPACE) {
                 playerView.togglePaused();
+                syncKeepScreenOn();
                 return true;
             }
             if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_MEDIA_REWIND) {
@@ -654,8 +737,25 @@ public final class PhoneMainActivity extends Activity {
         }
     }
 
+    /**
+     * 只有播放器真正在播放时才保持屏幕常亮；暂停或播放结束后清掉
+     * FLAG_KEEP_SCREEN_ON，让系统按正常策略息屏。
+     */
+    private void syncKeepScreenOn() {
+        if (screen != Screen.PLAYER || playerView == null) {
+            return;
+        }
+        boolean keepOn = playerView.isPlaying();
+        if (keepOn) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+    }
+
     private void destroyPlayer() {
         RemoteIsoStreamServer.shared().clear();
+        SmbStreamServer.shared().clear();
         if (playerView != null) {
             stopProgressUpdates();
             flushPlaybackProgress();
@@ -681,6 +781,51 @@ public final class PhoneMainActivity extends Activity {
         super.onDestroy();
     }
 
+    private Button kindToggleButton(String kind, String label, final String[] selectedKind, final TextView hint) {
+        boolean isSelected = kind.equals(selectedKind[0]);
+        Button button = new Button(this);
+        applyKindToggleStyle(button, label, isSelected);
+        button.setOnClickListener(view -> {
+            selectedKind[0] = kind;
+            for (Map.Entry<String, Button> entry : kindToggleButtons.entrySet()) {
+                applyKindToggleStyle(entry.getValue(), kindLabel(entry.getKey()),
+                        entry.getKey().equals(selectedKind[0]));
+            }
+            hint.setText(kindHint(selectedKind[0]));
+        });
+        kindToggleButtons.put(kind, button);
+        return button;
+    }
+
+    private static String kindLabel(String kind) {
+        if (kind.equals("webdav")) {
+            return "WebDAV";
+        }
+        if (kind.equals("smb")) {
+            return "SMB";
+        }
+        return "本地目录";
+    }
+
+    private static String kindHint(String kind) {
+        if (kind.equals("smb")) {
+            return "SMB：填写 smb://主机/共享 形式的地址，例如 smb://192.168.0.10/video（可加 :445 端口）。";
+        }
+        if (kind.equals("webdav")) {
+            return "WebDAV：填写 https://nas:5006/dav 形式的地址前缀。";
+        }
+        return "本地目录：填写绝对路径，例如 /storage/emulated/0/Movies。";
+    }
+
+    private void applyKindToggleStyle(Button button, String label, boolean selected) {
+        button.setText((selected ? "\u2713 " : "  ") + label);
+        button.setTextColor(selected ? COLOR_TEXT : COLOR_MUTED);
+        button.setBackground(rounded(
+                selected ? COLOR_SURFACE_ALT : COLOR_SURFACE,
+                selected ? COLOR_FOCUS : 0,
+                selected ? dp(1) : 0, dp(8)));
+    }
+
     private <T> void runAsync(Task<T> task, Success<T> success, Failure failure) {
         io.execute(() -> {
             try {
@@ -703,6 +848,21 @@ public final class PhoneMainActivity extends Activity {
         editText.setPadding(dp(14), 0, dp(14), 0);
         editText.setBackground(rounded(COLOR_SURFACE_ALT, 0, 0, dp(8)));
         editText.setMinHeight(dp(52));
+        return editText;
+    }
+
+    private EditText inputWithLeadingIcon(String hint, String value) {
+        EditText editText = input(hint, value);
+        try {
+            android.graphics.drawable.Drawable icon = getDrawable(R.drawable.ic_proxy_gateway);
+            if (icon != null) {
+                int size = dp(18);
+                icon.setBounds(0, 0, size, size);
+                editText.setCompoundDrawables(icon, null, null, null);
+                editText.setPadding(dp(14) + size + dp(8), 0, dp(14), 0);
+            }
+        } catch (Exception ignored) {
+        }
         return editText;
     }
 

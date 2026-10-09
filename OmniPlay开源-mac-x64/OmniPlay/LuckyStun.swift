@@ -18,13 +18,15 @@ struct LuckyStunRefreshResult {
 final class LuckyStunClient {
     static let shared = LuckyStunClient()
 
-    private let loginPaths = ["/api/login", "/api/auth/login", "/api/user/login", "/api/auth/signin", "/login"]
-    private let rulePaths = [
-        "/api/stun", "/api/stun/rules", "/api/stun/list", "/api/penetration",
-        "/api/penetration/rules", "/api/nat/stun", "/api/config/stun", "/api/rules", "/api/getstunlist"
-    ]
+    private let session: URLSession
 
-    private init() {}
+    private init() {
+        session = Self.makeSession()
+    }
+
+    init(session: URLSession) {
+        self.session = session
+    }
 
     func fetch(
         managementURL rawManagementURL: String,
@@ -34,72 +36,123 @@ final class LuckyStunClient {
         selectedRuleName: String
     ) async throws -> [LuckyStunRule] {
         let managementURL = try normalizeManagementURL(rawManagementURL)
-        var cookies: [String] = []
-        var token: String?
-
-        if !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !password.isEmpty {
-            (token, cookies) = try await login(baseURL: managementURL, username: username.trimmingCharacters(in: .whitespacesAndNewlines), password: password, cookies: cookies)
+        let account = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !account.isEmpty, !password.isEmpty else {
+            throw clientError(code: 4, message: "请填写 Lucky 管理账号和密码。")
         }
 
-        var lastError = "没有识别到规则列表。"
-        for path in rulePaths {
-            do {
-                let response = try await request(URL(string: managementURL + path)!, method: "GET", body: nil, token: token, cookies: cookies)
-                guard (200..<300).contains(response.statusCode) else { lastError = "HTTP \(response.statusCode)"; continue }
-                let rules = parseRules(response.data)
-                if !rules.isEmpty { return rules }
-                lastError = "响应中没有识别到穿透规则。"
-            } catch { lastError = error.localizedDescription }
+        let token = try await login(baseURL: managementURL, account: account, password: password)
+        let rulesURL = requestURL("api/stunrulelist", under: managementURL)
+        let response = try await request(
+            rulesURL,
+            method: "GET",
+            body: nil,
+            token: token,
+            baseURL: managementURL
+        )
+        guard (200..<300).contains(response.statusCode) else {
+            throw clientError(
+                code: response.statusCode,
+                message: "无法读取 Lucky STUN 规则：\(rulesURL.path) 返回 HTTP \(response.statusCode)。"
+            )
         }
-        throw NSError(domain: "OmniPlayLuckyStun", code: 1, userInfo: [NSLocalizedDescriptionKey: "无法读取 Lucky STUN 规则：\(lastError)"])
+        guard let object = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any],
+              let result = integer(object["ret"]) else {
+            throw clientError(code: 2, message: "Lucky STUN 返回了无法解析的规则数据。")
+        }
+        guard result == 0 else {
+            throw clientError(code: result, message: "无法读取 Lucky STUN 规则：\(message(from: object))")
+        }
+        return parseRules(response.data)
     }
 
-    func selectedRule(from rules: [LuckyStunRule], id: String, name: String) -> LuckyStunRule? {
-        if !id.isEmpty, let rule = rules.first(where: { $0.id.caseInsensitiveCompare(id) == .orderedSame }) { return rule }
-        if !name.isEmpty, let rule = rules.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) { return rule }
+    func selectedRule(
+        from rules: [LuckyStunRule],
+        id: String,
+        name: String
+    ) -> LuckyStunRule? {
+        if !id.isEmpty, let rule = rules.first(where: { $0.id.caseInsensitiveCompare(id) == .orderedSame }) {
+            return rule
+        }
+        if !name.isEmpty, let rule = rules.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            return rule
+        }
         return rules.first
     }
 
     static func normalizeAddress(_ value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        let candidate = trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") ? trimmed : "http://\(trimmed)"
+        let candidate = trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
+            ? trimmed
+            : "http://\(trimmed)"
         guard let url = URL(string: candidate), let host = url.host, !host.isEmpty else { return nil }
-        return candidate.trimmedTrailingSlash
+        var result = candidate
+        while result.hasSuffix("/") { result.removeLast() }
+        return result
     }
 
-    private func login(baseURL: String, username: String, password: String, cookies: [String]) async throws -> (String?, [String]) {
-        let body = try JSONSerialization.data(withJSONObject: ["username": username, "password": password])
-        var currentCookies = cookies
-        var lastStatus = 400
-        for path in loginPaths {
-            do {
-                let response = try await request(URL(string: baseURL + path)!, method: "POST", body: body, token: nil, cookies: currentCookies)
-                currentCookies = mergeCookies(currentCookies, response.cookies)
-                lastStatus = response.statusCode
-                guard (200..<300).contains(response.statusCode) else { continue }
-                var token = findString(in: response.data, keys: ["token", "accessToken", "access_token", "jwt", "authorization"])
-                if let value = token, !value.lowercased().hasPrefix("bearer ") { token = "Bearer \(value)" }
-                return (token, currentCookies)
-            } catch { continue }
+    private func login(
+        baseURL: URL,
+        account: String,
+        password: String
+    ) async throws -> String {
+        let loginURL = requestURL("api/login", under: baseURL)
+        let body = try JSONSerialization.data(withJSONObject: [
+            "Account": account,
+            "Password": password,
+            "TwoFA": ""
+        ])
+        let response = try await request(
+            loginURL,
+            method: "POST",
+            body: body,
+            token: nil,
+            baseURL: baseURL
+        )
+        guard (200..<300).contains(response.statusCode) else {
+            throw clientError(
+                code: response.statusCode,
+                message: "Lucky STUN 登录失败：\(loginURL.path) 返回 HTTP \(response.statusCode)。"
+            )
         }
-        if lastStatus == 401 || lastStatus == 403 { throw NSError(domain: "OmniPlayLuckyStun", code: 401, userInfo: [NSLocalizedDescriptionKey: "Lucky STUN 登录失败，请检查账号和密码。"]) }
-        return (nil, currentCookies)
+        guard let object = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any],
+              let result = integer(object["ret"]) else {
+            throw clientError(code: 2, message: "Lucky STUN 返回了无法解析的登录数据。")
+        }
+        guard result == 0 else {
+            throw clientError(code: result, message: "Lucky STUN 登录失败：\(message(from: object))")
+        }
+        guard let token = findValue(object, keys: ["token"]), !token.isEmpty else {
+            throw clientError(code: 2, message: "Lucky STUN 登录成功，但响应中没有管理令牌。")
+        }
+        return token
     }
 
-    private func request(_ url: URL, method: String, body: Data?, token: String?, cookies: [String]) async throws -> (data: Data, statusCode: Int, cookies: [String]) {
+    private func request(
+        _ url: URL,
+        method: String,
+        body: Data?,
+        token: String?,
+        baseURL: URL
+    ) async throws -> (data: Data, statusCode: Int) {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 12
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("OmniPlay-LuckySTUN", forHTTPHeaderField: "User-Agent")
-        if let token, !token.isEmpty { request.setValue(token, forHTTPHeaderField: "Authorization") }
-        if !cookies.isEmpty { request.setValue(cookies.joined(separator: "; "), forHTTPHeaderField: "Cookie") }
-        if let body { request.httpBody = body; request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type") }
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw NSError(domain: "OmniPlayLuckyStun", code: 2, userInfo: [NSLocalizedDescriptionKey: "Lucky STUN 返回了无效响应。"]) }
-        let setCookies = (http.allHeaderFields["Set-Cookie"] as? String).map { [$0] } ?? http.allHeaderFields.reduce(into: [String]()) { result, item in if String(describing: item.key).caseInsensitiveCompare("Set-Cookie") == .orderedSame, let value = item.value as? String { result.append(value) } }
-        return (data, http.statusCode, setCookies.map { String($0.split(separator: ";", maxSplits: 1).first ?? Substring($0)) })
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/605.1.15", forHTTPHeaderField: "User-Agent")
+        request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        if let token, !token.isEmpty { request.setValue(token, forHTTPHeaderField: "Lucky-Admin-Token") }
+        setBrowserOriginHeaders(on: &request, baseURL: baseURL)
+        if let body {
+            request.httpBody = body
+            request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        }
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw clientError(code: 2, message: "Lucky STUN 返回了无效响应。")
+        }
+        return (data, http.statusCode)
     }
 
     private func parseRules(_ data: Data) -> [LuckyStunRule] {
@@ -111,20 +164,29 @@ final class LuckyStunClient {
     }
 
     private func collectRules(_ value: Any, fallbackName: String, into rules: inout [LuckyStunRule]) {
-        if let array = value as? [Any] { array.forEach { collectRules($0, fallbackName: fallbackName, into: &rules) }; return }
+        if let array = value as? [Any] {
+            array.forEach { collectRules($0, fallbackName: fallbackName, into: &rules) }
+            return
+        }
         guard let object = value as? [String: Any] else { return }
         let id = findValue(object, keys: ["id", "ruleId", "uuid", "key", "index"]) ?? ""
         let name = findValue(object, keys: ["name", "title", "ruleName", "remark", "description"]) ?? fallbackName
-        if let address = findAddress(object), let normalized = Self.normalizeAddress(address), address.contains(".") || address.contains(":") {
-            rules.append(LuckyStunRule(id: id.isEmpty ? "\(name):\(normalized)" : id, name: name, address: normalized))
+        let address = findAddress(object)
+        if let address, let normalized = Self.normalizeAddress(address), address.contains(".") || address.contains(":") {
+            let resolvedID = id.isEmpty ? "\(name):\(normalized)" : id
+            rules.append(LuckyStunRule(id: resolvedID, name: name, address: normalized))
         }
-        object.values.forEach { child in if child is [String: Any] || child is [Any] { collectRules(child, fallbackName: name, into: &rules) } }
+        object.values.forEach { child in
+            if child is [String: Any] || child is [Any] { collectRules(child, fallbackName: name, into: &rules) }
+        }
     }
 
     private func findAddress(_ object: [String: Any]) -> String? {
-        let keys = ["address", "url", "remoteAddress", "publicAddress", "externalAddress", "penetrationAddress", "forwardAddress", "stunAddress", "remoteUrl", "domain", "host"]
+        let keys = ["address", "url", "remoteAddress", "publicAddress", "publicAddr", "externalAddress", "penetrationAddress", "forwardAddress", "stunAddress", "remoteUrl", "domain", "host"]
         if let value = findValue(object, keys: keys), !value.lowercased().contains("/api/") { return value }
-        if let host = findValue(object, keys: ["remoteHost", "publicHost", "externalHost"]), let port = findValue(object, keys: ["remotePort", "publicPort", "externalPort", "port"]) { return "\(host):\(port)" }
+        let host = findValue(object, keys: ["remoteHost", "publicHost", "externalHost"])
+        let port = findValue(object, keys: ["remotePort", "publicPort", "externalPort", "port"])
+        if let host, let port { return "\(host):\(port)" }
         return nil
     }
 
@@ -135,23 +197,89 @@ final class LuckyStunClient {
         return nil
     }
 
-    private func findString(in data: Data, keys: [String]) -> String? { guard let object = try? JSONSerialization.jsonObject(with: data) else { return nil }; return findString(in: object, keys: keys) }
+    private func normalizeManagementURL(_ value: String) throws -> URL {
+        var candidate = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !candidate.contains("://") { candidate = "http://\(candidate)" }
+        guard var components = URLComponents(string: candidate),
+              let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              components.host?.isEmpty == false else {
+            throw clientError(code: 3, message: "Lucky STUN 管理地址无效。")
+        }
+        components.query = nil
+        components.fragment = nil
+        var pathComponents = components.path.split(separator: "/").map(String.init)
+        if pathComponents.last?.lowercased() == "api" { pathComponents.removeLast() }
+        components.path = pathComponents.isEmpty ? "/" : "/\(pathComponents.joined(separator: "/"))/"
+        guard let url = components.url else {
+            throw clientError(code: 3, message: "Lucky STUN 管理地址无效。")
+        }
+        return url
+    }
 
-    private func findString(in value: Any, keys: [String]) -> String? {
-        if let object = value as? [String: Any] { if let direct = findValue(object, keys: keys) { return direct }; for child in object.values { if let nested = findString(in: child, keys: keys) { return nested } } }
-        else if let array = value as? [Any] { for child in array { if let nested = findString(in: child, keys: keys) { return nested } } }
+    private func requestURL(_ path: String, under baseURL: URL) -> URL {
+        let endpoint = path.split(separator: "/").reduce(baseURL) { url, component in
+            url.appendingPathComponent(String(component))
+        }
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else { return endpoint }
+        components.queryItems = [URLQueryItem(name: "_", value: requestNonce())]
+        return components.url ?? endpoint
+    }
+
+    private func requestNonce(now: Date = Date()) -> String {
+        let milliseconds = String(Int64(now.timeIntervalSince1970 * 1_000))
+        guard milliseconds.count > 1 else { return milliseconds }
+        let prefix = milliseconds.dropLast()
+        let checksum = prefix.compactMap(\.wholeNumberValue).reduce(0, +) % 8
+        return prefix + String(checksum)
+    }
+
+    private func setBrowserOriginHeaders(on request: inout URLRequest, baseURL: URL) {
+        guard let components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme,
+              let host = components.host else { return }
+        let renderedHost = host.contains(":") ? "[\(host)]" : host
+        let port = components.port.map { ":\($0)" } ?? ""
+        request.setValue("\(scheme)://\(renderedHost)\(port)", forHTTPHeaderField: "Origin")
+        request.setValue(baseURL.absoluteString, forHTTPHeaderField: "Referer")
+    }
+
+    private func integer(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let value = value as? NSNumber { return value.intValue }
+        if let value = value as? String { return Int(value) }
         return nil
     }
 
-    private func mergeCookies(_ old: [String], _ new: [String]) -> [String] { var result = old; for cookie in new { let key = cookie.split(separator: "=", maxSplits: 1).first.map(String.init) ?? cookie; result.removeAll { $0.hasPrefix("\(key)=") }; result.append(cookie) }; return result }
+    private func message(from object: [String: Any]) -> String {
+        let rawMessage = (object["msg"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? (object["message"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? "未知错误"
+        switch rawMessage {
+        case "IncorrectAccountOrPassword":
+            return "账号或密码错误"
+        case "LoginFailed":
+            return "登录失败"
+        case "NoPermission", "PermissionDenied":
+            return "当前账号没有访问权限"
+        case "TokenExpired", "InvalidToken":
+            return "登录凭证已失效"
+        default:
+            return rawMessage
+        }
+    }
 
-    private func normalizeManagementURL(_ value: String) throws -> String {
-        var candidate = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !candidate.contains("://") { candidate = "http://\(candidate)" }
-        guard var components = URLComponents(string: candidate), let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme), components.host?.isEmpty == false else { throw NSError(domain: "OmniPlayLuckyStun", code: 3, userInfo: [NSLocalizedDescriptionKey: "Lucky STUN 管理地址无效。"]) }
-        if components.path.lowercased().hasSuffix("/api") { components.path = String(components.path.dropLast(4)).trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
-        components.query = nil; components.fragment = nil
-        return (components.url?.absoluteString ?? candidate).trimmedTrailingSlash
+    private func clientError(code: Int, message: String) -> NSError {
+        NSError(domain: "OmniPlayLuckyStun", code: code, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    private static func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpCookieAcceptPolicy = .always
+        configuration.httpShouldSetCookies = true
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
     }
 }
 
@@ -160,95 +288,119 @@ final class LuckyStunCoordinator {
     static let shared = LuckyStunCoordinator()
     static let sourceUpdatedNotification = Notification.Name("OmniPlayLuckyStunSourceUpdated")
     static let rulesUpdatedNotification = Notification.Name("OmniPlayLuckyStunRulesUpdated")
+
     private var automaticTask: Task<Void, Never>?
-    private var isRefreshing = false
+    private var refreshingSourceIDs = Set<Int64>()
     private(set) var cachedRules: [LuckyStunRule] = []
+
     private init() {}
 
-    func refresh(force: Bool = true) async -> LuckyStunRefreshResult {
-        let defaults = UserDefaults.standard
-        let managementURL = defaults.string(forKey: "luckyStunManagementURL") ?? ""
-        let username = defaults.string(forKey: "luckyStunUsername") ?? ""
-        let password = defaults.string(forKey: "luckyStunPassword") ?? ""
-        let selectedID = defaults.string(forKey: "luckyStunRuleID") ?? ""
-        let selectedName = defaults.string(forKey: "luckyStunRuleName") ?? ""
-        guard !managementURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return LuckyStunRefreshResult(rules: [], selectedRule: nil, updatedSourceCount: 0, message: "请填写 Lucky STUN 管理地址。") }
-        guard !isRefreshing else { return LuckyStunRefreshResult(rules: [], selectedRule: nil, updatedSourceCount: 0, message: "Lucky STUN 更新正在进行。") }
-        isRefreshing = true; defer { isRefreshing = false }
+    func refresh(sourceID: Int64) async -> LuckyStunRefreshResult {
+        guard !refreshingSourceIDs.contains(sourceID) else {
+            return LuckyStunRefreshResult(rules: [], selectedRule: nil, updatedSourceCount: 0, message: "Lucky STUN 更新正在进行。")
+        }
+        guard let dbQueue = AppDatabase.shared.dbQueue,
+              let source = try? await dbQueue.read({ db in try MediaSource.fetchOne(db, key: sourceID) }),
+              let configuration = source.addressConfiguration().luckyStun else {
+            return LuckyStunRefreshResult(rules: [], selectedRule: nil, updatedSourceCount: 0, message: "未找到 Lucky STUN 媒体源配置。")
+        }
+        refreshingSourceIDs.insert(sourceID)
+        defer { refreshingSourceIDs.remove(sourceID) }
         do {
-            let rules = try await LuckyStunClient.shared.fetch(managementURL: managementURL, username: username, password: password, selectedRuleID: selectedID, selectedRuleName: selectedName)
+            let rules = try await LuckyStunClient.shared.fetch(
+                managementURL: configuration.managementURL,
+                username: configuration.username,
+                password: configuration.password,
+                selectedRuleID: configuration.ruleID,
+                selectedRuleName: configuration.ruleName
+            )
             cachedRules = rules
             NotificationCenter.default.post(name: Self.rulesUpdatedNotification, object: rules)
-            let selected = LuckyStunClient.shared.selectedRule(from: rules, id: selectedID, name: selectedName)
-            guard let selected, let normalizedAddress = LuckyStunClient.normalizeAddress(selected.address) else { return LuckyStunRefreshResult(rules: rules, selectedRule: selected, updatedSourceCount: 0, message: "已读取规则，但没有有效的穿透地址。") }
-            defaults.set(selected.id, forKey: "luckyStunRuleID"); defaults.set(selected.name, forKey: "luckyStunRuleName")
-            let updatedCount = updateConfiguredSources(rules: rules, selectedRule: selected, selectedAddress: normalizedAddress)
-            defaults.set(Date().timeIntervalSince1970, forKey: "luckyStunLastUpdatedAt")
+            let selected = LuckyStunClient.shared.selectedRule(from: rules, id: configuration.ruleID, name: configuration.ruleName)
+            guard let selected, let normalizedAddress = LuckyStunClient.normalizeAddress(selected.address) else {
+                return LuckyStunRefreshResult(rules: rules, selectedRule: selected, updatedSourceCount: 0, message: "已读取规则，但没有有效的穿透地址。")
+            }
+            let updatedAddress = Self.appendingPathSuffix(configuration.pathSuffix, to: normalizedAddress)
+            let updatedCount = updateSource(
+                sourceID: sourceID,
+                selectedRule: selected,
+                selectedAddress: updatedAddress
+            )
             if updatedCount > 0 { NotificationCenter.default.post(name: Self.sourceUpdatedNotification, object: nil) }
-            return LuckyStunRefreshResult(rules: rules, selectedRule: selected, updatedSourceCount: updatedCount, message: updatedCount > 0 ? "已更新规则“\(selected.name)”并同步 \(updatedCount) 个媒体源：\(normalizedAddress)" : "规则“\(selected.name)”检测成功，地址未变化：\(normalizedAddress)")
-        } catch { return LuckyStunRefreshResult(rules: [], selectedRule: nil, updatedSourceCount: 0, message: "Lucky STUN 更新失败：\(error.localizedDescription)") }
-    }
-
-    func startAutomaticUpdates() {
-        automaticTask?.cancel(); automaticTask = nil
-        guard UserDefaults.standard.bool(forKey: "luckyStunAutoUpdate") else { return }
-        automaticTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled { guard let self else { return }; let interval = max(5, UserDefaults.standard.integer(forKey: "luckyStunUpdateIntervalMinutes")); let last = UserDefaults.standard.double(forKey: "luckyStunLastUpdatedAt"); if last == 0 || Date().timeIntervalSince1970 - last >= Double(interval * 60) { _ = await self.refresh(force: false) }; try? await Task.sleep(nanoseconds: UInt64(interval) * 60 * 1_000_000_000) }
+            let message = updatedCount > 0
+                ? "已更新规则“\(selected.name)”：\(normalizedAddress)"
+                : "规则“\(selected.name)”检测成功，地址未变化：\(normalizedAddress)"
+            return LuckyStunRefreshResult(rules: rules, selectedRule: selected, updatedSourceCount: updatedCount, message: message)
+        } catch {
+            return LuckyStunRefreshResult(rules: [], selectedRule: nil, updatedSourceCount: 0, message: "Lucky STUN 更新失败：\(error.localizedDescription)")
         }
     }
 
-    private func updateConfiguredSources(rules: [LuckyStunRule], selectedRule: LuckyStunRule, selectedAddress: String) -> Int {
+    func startAutomaticUpdates() {
+        automaticTask?.cancel()
+        automaticTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.refreshDueSources()
+                try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+            }
+        }
+    }
+
+    private func refreshDueSources() async {
+        guard let dbQueue = AppDatabase.shared.dbQueue,
+              let sources = try? await dbQueue.read({ db in try MediaSource.fetchAll(db, sql: "SELECT * FROM mediaSource WHERE isEnabled = 1") }) else { return }
+        let now = Date().timeIntervalSince1970
+        for source in sources {
+            guard let sourceID = source.id,
+                  let configuration = source.addressConfiguration().luckyStun,
+                  configuration.autoUpdate else { continue }
+            let interval = max(5, configuration.updateIntervalMinutes)
+            if configuration.lastUpdatedAt == 0 || now - configuration.lastUpdatedAt >= Double(interval * 60) {
+                _ = await refresh(sourceID: sourceID)
+            }
+        }
+    }
+
+    private func updateSource(sourceID: Int64, selectedRule: LuckyStunRule, selectedAddress: String) -> Int {
         guard let dbQueue = AppDatabase.shared.dbQueue else { return 0 }
         do {
             return try dbQueue.write { db in
-                let current = try MediaSource.fetchAll(db, sql: "SELECT * FROM mediaSource")
-                var count = 0
-                for var source in current {
-                    guard let protocolKind = source.protocolKind, protocolKind != .local, protocolKind != .direct else { continue }
-                    var configuration = source.addressConfiguration()
-                    var changed = false
-                    let hasExplicitLuckyBinding = configuration.externalAddresses.contains { $0.useLuckyStun && (!$0.luckyRuleId.isEmpty || !$0.luckyRuleName.isEmpty) }
-                    for index in configuration.externalAddresses.indices {
-                        guard configuration.externalAddresses[index].useLuckyStun else { continue }
-                        let configured = configuration.externalAddresses[index]
-                        let matchedRule = rules.first { rule in
-                            (!configured.luckyRuleId.isEmpty && rule.id.caseInsensitiveCompare(configured.luckyRuleId) == .orderedSame)
-                                || (!configured.luckyRuleName.isEmpty && rule.name.caseInsensitiveCompare(configured.luckyRuleName) == .orderedSame)
-                        }
-                        guard let matchedRule, let updatedAddress = LuckyStunClient.normalizeAddress(matchedRule.address) else { continue }
-                        let previousAddress = configured.address
-                        if configuration.externalAddresses[index].address.caseInsensitiveCompare(updatedAddress) != .orderedSame {
-                            configuration.externalAddresses[index].address = updatedAddress
-                            configuration.externalAddresses[index].luckyRuleId = matchedRule.id
-                            configuration.externalAddresses[index].luckyRuleName = matchedRule.name
-                            changed = true
-                        }
-                        if source.baseUrl.caseInsensitiveCompare(previousAddress) == .orderedSame || configuration.activeAddress.caseInsensitiveCompare(previousAddress) == .orderedSame {
-                            source.baseUrl = updatedAddress
-                            configuration.activeAddress = updatedAddress
-                            configuration.activeLabel = configuration.externalAddresses[index].displayLabel
-                            changed = true
-                        }
-                    }
-                    if protocolKind == .omniplayDocker && !hasExplicitLuckyBinding && source.baseUrl.caseInsensitiveCompare(selectedAddress) != .orderedSame {
-                        let previousAddress = source.baseUrl
-                        if configuration.localAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { configuration.localAddress = previousAddress }
-                        if !configuration.externalAddresses.contains(where: { $0.address.caseInsensitiveCompare(selectedAddress) == .orderedSame }) {
-                            configuration.externalAddresses.append(MediaSourceExternalAddress(address: selectedAddress, label: selectedRule.name, useLuckyStun: true, luckyRuleId: selectedRule.id, luckyRuleName: selectedRule.name))
-                        }
-                        source.baseUrl = selectedAddress
-                        configuration.activeAddress = selectedAddress
-                        configuration.activeLabel = selectedRule.name.isEmpty ? "外网" : selectedRule.name
-                        changed = true
-                    }
-                    if changed { source.setAddressConfiguration(configuration); try source.update(db); count += 1 }
-                }
-                return count
+                guard var source = try MediaSource.fetchOne(db, key: sourceID) else { return 0 }
+                var addressConfiguration = source.addressConfiguration()
+                guard var luckyConfiguration = addressConfiguration.luckyStun else { return 0 }
+                let addressChanged = source.baseUrl.caseInsensitiveCompare(selectedAddress) != .orderedSame
+                luckyConfiguration.ruleID = selectedRule.id
+                luckyConfiguration.ruleName = selectedRule.name
+                luckyConfiguration.lastUpdatedAt = Date().timeIntervalSince1970
+                addressConfiguration.luckyStun = luckyConfiguration
+                addressConfiguration.localAddress = selectedAddress
+                addressConfiguration.localLabel = ""
+                addressConfiguration.activeAddress = selectedAddress
+                addressConfiguration.activeLabel = ""
+                source.baseUrl = selectedAddress
+                source.setAddressConfiguration(addressConfiguration)
+                try source.update(db)
+                return addressChanged ? 1 : 0
             }
         } catch { return 0 }
+    }
+
+    private static func appendingPathSuffix(_ suffix: String, to address: String) -> String {
+        let trimmedSuffix = suffix.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !trimmedSuffix.isEmpty, var components = URLComponents(string: address) else { return address }
+        let basePath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        components.path = "/" + [basePath, trimmedSuffix].filter { !$0.isEmpty }.joined(separator: "/")
+        var result = components.url?.absoluteString ?? address
+        while result.hasSuffix("/") { result.removeLast() }
+        return result
     }
 }
 
 private extension String {
-    var trimmedTrailingSlash: String { var value = self; while value.hasSuffix("/") { value.removeLast() }; return value }
+    var trimmedTrailingSlash: String {
+        var value = self
+        while value.hasSuffix("/") { value.removeLast() }
+        return value
+    }
 }
