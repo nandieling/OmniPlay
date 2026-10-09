@@ -2,7 +2,9 @@
 
 觅影 OmniPlay 是一款面向本地硬盘、外接硬盘、NAS 和家庭媒体服务器场景的媒体库播放器：扫描媒体文件、自动刮削 TMDB / 豆瓣元数据、生成海报墙与分集剧照，并用 mpv / FFmpeg 播放栈完成本地与远程播放。
 
-本仓库是 OmniPlay 的多端合集，包含 4 个客户端工程和 1 个服务端工程。功能以 `OmniPlay开源-mac-ARM` 为基准，其他端持续向它对齐，但交互按平台习惯各自重做，不照搬同一套布局。
+本仓库是 OmniPlay 的多端合集，包含 4 个客户端工程。功能以 `OmniPlay开源-mac-ARM` 为基准，其他端持续向它对齐，但交互按平台习惯各自重做，不照搬同一套布局。
+
+早期从套件版拆出的 `OmniPlay-docker` 服务端已停止开发，本文件不再收录；目录保留备查，部署说明见该目录内的 README。
 
 ## 版本一览
 
@@ -12,7 +14,6 @@
 | `OmniPlay开源-mac-x64` | macOS 14+（Intel） | 同上 | 1.8 | 同一套工程的 x86_64 版本，已同步 ARM 版 1.8 |
 | `OmniPlay-win` | Windows 10 / 11 x64 | Avalonia + .NET 10 + SQLite + libmpv | — | 独立重写，App 名「览影」，方案入口 `OmniPlay.Windows.slnx` |
 | `OmniPlay-安卓TV` | Android TV / 手机（minSdk 26） | Java + libmpv（NDK / JNI） | 1.17 | 双入口启动器：TV 遥控器 D-pad 导航 + 手机触摸海报网格 |
-| `OmniPlay-docker` | 任意 Docker 主机 / NAS | .NET 服务端 + Web UI + FFmpeg | — | 默认端口 45722，提供刮削、HLS 播放、转码与播放进度同步 |
 
 各端详细说明分别在自己的 README 里，本文件只讲共性和入口：
 
@@ -20,7 +21,6 @@
 - [macOS x64 版同步记录](OmniPlay开源-mac-x64/2026-10-07-sync-with-arm-1.8.md)：与 ARM 版的差异收敛过程。
 - [Windows 版 README](OmniPlay-win/README.md)：构建、打包、日志与播放诊断、TMDB 配置、离线环境说明。
 - [安卓 TV 版 README](OmniPlay-安卓TV/README.md)：遥控器焦点导航、自研 WebDAV 传输层、主题体系、逐版本演进记录。
-- [Docker 版 README](OmniPlay-docker/README.md)：compose 部署、目录挂载、硬件转码、环境变量。
 
 ## 共同能力
 
@@ -37,7 +37,7 @@
 
 - 本地文件夹、外接硬盘、已挂载的 NAS 目录。
 - WebDAV：局域网预扫描 + 手动填地址，浏览共享目录后点星标挂载，账号密码保存到系统钥匙串（macOS）或本机偏好。
-- 家庭媒体服务器：OmniPlay Docker、Plex、Emby、Jellyfin，支持登录或访问令牌，选择要挂载的媒体库。
+- 家庭媒体服务器：Plex、Emby、Jellyfin，支持登录或访问令牌，选择要挂载的媒体库；已停止开发的 OmniPlay Docker 服务端仍可接入，并同步媒体库与播放进度。
 - Lucky STUN 穿透媒体源：每个源独立保存 Lucky 管理端地址与穿透规则，可自动刷新穿透地址。
 - SMB 网络共享（Windows / 安卓 TV）：直连播放，依赖设备本地 Range 代理。
 - 媒体源支持启用/停用、重命名、移除并清理索引。
@@ -66,22 +66,22 @@
 
 ## 能力支持矩阵
 
-| 能力 | mac ARM / x64 | Windows | 安卓 TV | Docker 服务端 |
-| --- | --- | --- | --- | --- |
-| 本地文件夹媒体源 | 是 | 是 | 是 | 是（只读挂载目录） |
-| WebDAV | 是 | 是 | 是 | 是 |
-| SMB | 仅局域网发现 | 是 | 是 | 否 |
-| Plex / Emby / Jellyfin | 是 | 是 | 否 | 否 |
-| OmniPlay Docker 接入与进度同步 | 是 | 否 | 是 | 本体 |
-| Lucky STUN 穿透 | 是 | 是 | 否 | 否 |
-| TMDB 刮削与中文译名 | 是 | 是 | 是 | 是 |
-| 豆瓣补充信息 | 是 | 是 | 是 | 是 |
-| 分集剧照与自定义副标题 | 是 | 是 | 是 | 是 |
-| 导演 / 主演分类文件夹 | 是 | 是 | 否 | 否 |
-| 蓝光 ISO / BDMV | 是 | 是 | 是 | 是（扫描侧） |
-| 离线缓存 | 是 | 是 | 否（1.15 起从 TV 界面撤下） | 字幕 / HLS 缓存 |
-| 主题配色 | 5 套浅色 | 5 套（含深色） | 5 浅 + 3 深 | 固定浅色 |
-| 播放器 | MPVKit-GPL / libmpv | libmpv（x64） | libmpv（NDK） | FFmpeg → HLS |
+| 能力 | mac ARM / x64 | Windows | 安卓 TV |
+| --- | --- | --- | --- |
+| 本地文件夹媒体源 | 是 | 是 | 是 |
+| WebDAV | 是 | 是 | 是 |
+| SMB | 仅局域网发现 | 是 | 是 |
+| Plex / Emby / Jellyfin | 是 | 是 | 否 |
+| OmniPlay Docker 接入与进度同步 | 是 | 否 | 是 |
+| Lucky STUN 穿透 | 是 | 是 | 否 |
+| TMDB 刮削与中文译名 | 是 | 是 | 是 |
+| 豆瓣补充信息 | 是 | 是 | 是 |
+| 分集剧照与自定义副标题 | 是 | 是 | 是 |
+| 导演 / 主演分类文件夹 | 是 | 是 | 否 |
+| 蓝光 ISO / BDMV | 是 | 是 | 是 |
+| 离线缓存 | 是 | 是 | 否（1.15 起从 TV 界面撤下） |
+| 主题配色 | 5 套浅色 | 5 套（含深色） | 5 浅 + 3 深 |
+| 播放器 | MPVKit-GPL / libmpv | libmpv（x64） | libmpv（NDK） |
 
 ## 快速上手
 
@@ -127,19 +127,9 @@ cd OmniPlay-安卓TV
 
 TV 与手机共用一个 APK，双启动入口由 `LauncherActivity` 分发。NDK 与模拟器数据留在本机（见 `.gitignore`），首次构建需要本机 Android SDK。
 
-### Docker 服务端
-
-```bash
-cd OmniPlay-docker
-docker compose up -d --build          # 通用版
-docker compose -f compose.hwaccel.yml up -d --build   # Intel VAAPI / QSV 硬解
-```
-
-访问 `http://NAS_IP:45722`，首次打开注册管理员账号。媒体目录通过 compose 的 volumes 只读挂载，再在 Web UI 里添加容器内路径。
-
 ## TMDB 与反向代理网关
 
-公开仓库不内置个人 TMDB 凭据。各端都支持在设置页填写 API Key 或 v4 Read Access Token，Windows 与 Docker 也支持环境变量：
+公开仓库不内置个人 TMDB 凭据。各端都支持在设置页填写 API Key 或 v4 Read Access Token，Windows 也可以通过环境变量提供：
 
 ```powershell
 $env:OMNIPLAY_TMDB_API_KEY='your-api-key'
@@ -170,7 +160,7 @@ export default {
 };
 ```
 
-之后在各端设置页填写 `https://你的域名/tmdb`（或直接用根域名）。Docker 场景下代理地址写在容器可达的地址里：host 网络下可填 `http://localhost:端口`，bridge 网络需要填宿主机局域网 IP。
+之后在各端设置页填写 `https://你的域名/tmdb`（或直接用根域名）。
 
 ## 数据与日志位置
 
@@ -179,12 +169,11 @@ export default {
 | macOS | `~/Library/Application Support/OmniPlay/omniplay.sqlite` | 海报、剧照由应用内部管理；离线缓存在设置中指定的目录 |
 | Windows | `%LOCALAPPDATA%\OmniPlay\data\omniplay.sqlite` | 海报 `posters\`、缩略图 `thumbnails\`、日志 `logs\app.log`；根目录可用 `OMNIPLAY_APP_ROOT` 覆盖 |
 | 安卓 TV | 应用私有目录内的 SQLite | 海报与剧照走本机缓存目录 |
-| Docker | 容器内 `/var/lib/omniplay` | 缓存 `/var/cache/omniplay`，媒体挂载到 `/media` |
 
 ## 开发约定
 
 - 功能与交互以 `OmniPlay开源-mac-ARM` 为准，其他端向它对齐；移植时在对应版本目录留一份 `YYYY-MM-DD-<主题>.md` 记录改动与验证结果。
-- 每个版本都是独立工程，依赖、构建脚本和测试互不共享：macOS 用 Xcode / `xcodebuild`，Windows 用 `.slnx` + `dotnet`，安卓 TV 用 Gradle，服务端用 Docker。
+- 每个版本都是独立工程，依赖、构建脚本和测试互不共享：macOS 用 Xcode / `xcodebuild`，Windows 用 `.slnx` + `dotnet`，安卓 TV 用 Gradle。
 - 构建产物、IDE 状态、Android SDK 与模拟器镜像、NuGet 缓存、TMDB 凭据和本地媒体样本一律不入库，规则见 [.gitignore](.gitignore)。安装包等发布物请挂到 GitHub Releases。
 
 ## 许可证与三方组件
