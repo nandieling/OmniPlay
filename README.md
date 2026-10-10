@@ -147,38 +147,67 @@ TV 与手机共用一个 APK，双启动入口由 `LauncherActivity` 分发。ND
 
 ## TMDB 与反向代理网关
 
-公开仓库不内置个人 TMDB 凭据。各端都支持在设置页填写 API Key 或 v4 Read Access Token，Windows 也可以通过环境变量提供：
+第一步：
+1. 登录 [Cloudflare 控制台](https://dash.cloudflare.com/)，进入 Compute (Workers & Pages) -> Workers。
+2. 点击 Create application -> Create Worker，命名为 `tmdb-proxy` 并点击 Deploy。
 
-```powershell
-$env:OMNIPLAY_TMDB_API_KEY='your-api-key'
-$env:OMNIPLAY_TMDB_ACCESS_TOKEN='your-tmdb-read-access-token'
-$env:OMNIPLAY_TMDB_LANGUAGE='zh-CN'
+第二步：配置反代代码
+
+1. 点击 Edit code，将默认代码全部清空，替换为以下脚本：
 ```
+// 自定义你的访问密码/暗号（建议字母+数字）
+const SECRET_TOKEN = "mySecret888"; 
 
-`ACCESS_TOKEN` 与 `API_KEY` 同时存在时优先使用 Bearer Token。
-
-网络无法直连 `https://api.themoviedb.org` 时，设置页的「TMDB API 代理网关」可以把 API 请求改道到自己的反向代理，各端实现一致（macOS `TMDBService.proxyAPIBaseURL` / Windows `TmdbProxyGateway`）：
-
-- 填写网关根地址即可，例如 `https://tmdb.example.com`，客户端会自动补 `https://` 与 `/3` 路径。
-- 支持带路径前缀的网关，例如 `https://worker.example.com/tmdb` 会被解析成 `https://worker.example.com/tmdb/3`。
-- 只转发 API 请求，海报与剧照仍从 `https://image.tmdb.org` 直取。
-- 这是 TMDB 专用反代，不是通用 HTTP/SOCKS 出站代理。
-
-用 Cloudflare Workers 搭一个最小转发即可：把 `example.com/*` 加为你的域名，创建 Worker 并把路径透传到 `https://api.themoviedb.org/3/...`，保留 `Authorization` 与查询参数：
-
-```js
 export default {
-  async fetch(request) {
-    const upstream = new URL(request.url);
-    upstream.hostname = "api.themoviedb.org";
-    upstream.protocol = "https:";
-    upstream.pathname = upstream.pathname.replace(/^\/(tmdb\/)?3/, "/3");
-    return fetch(new Request(upstream, request));
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    // 1. 验证路径是否以你的密钥开头
+    const secretPrefix = `/${SECRET_TOKEN}`;
+    if (!url.pathname.startsWith(secretPrefix)) {
+      return new Response("403 Forbidden: Invalid Secret Token", { status: 403 });
+    }
+
+    // 2. 剥离密钥前缀，还原真实请求路径
+    let realPath = url.pathname.replace(secretPrefix, "") || "/";
+
+    // 3. 分流转发到 TMDB API 或 图片服务器
+    let targetHost = "api.themoviedb.org";
+    if (realPath.startsWith("/image/")) {
+      targetHost = "image.tmdb.org";
+      realPath = realPath.replace(/^\/image/, "");
+    } else if (realPath.startsWith("/t/p/")) {
+      // 兼容直接请求 /t/p/ 的海报路径
+      targetHost = "image.tmdb.org";
+    }
+
+    const targetUrl = `https://${targetHost}${realPath}${url.search}`;
+
+    const modifiedRequest = new Request(targetUrl, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+      redirect: "follow",
+    });
+
+    // 伪装 Host
+    modifiedRequest.headers.set("Host", targetHost);
+    modifiedRequest.headers.set("Referer", `https://${targetHost}`);
+
+    return fetch(modifiedRequest);
   },
 };
 ```
+点击右上角 **Deploy** 保存。
 
-之后在各端设置页填写 `https://你的域名/tmdb`（或直接用根域名）。
+第三步：绑定自定义域名（关键）
+
+- 由于 `.workers.dev` 默认子域名在国内通常无法直连，进入该 Worker 的 Settings -> Domains & Routes。
+- 点击 Add -> Custom Domain，绑定你托管在 Cloudflare 上的二级域名（例如 `tmdb.yourdomain.com`）。
+
+刮削软件中的填法：
+在 MoviePilot / TMM / NASTool 中，将 TMDB API 地址填为：
+https://tmdb.yourdomain.com/mySecret888
 
 ## 数据与日志位置
 
