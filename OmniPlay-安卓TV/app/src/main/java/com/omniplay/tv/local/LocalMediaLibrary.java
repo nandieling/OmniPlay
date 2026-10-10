@@ -264,6 +264,52 @@ public final class LocalMediaLibrary {
         return upsertUnscrapedEntity("tv", title);
     }
 
+    /**
+     * 文件与条目的绑定关系。已登记过的文件保持它原来的条目（还没刮削时顺手把名字换成新算出来的），
+     * 只有真正的新文件、或者条目已经不见了，才新建条目。
+     * <p>
+     * 以前扫描是无脑 upsert 新条目，可 {@code videoFile} 走的是 INSERT OR IGNORE——文件行还挂在旧条目上，
+     * 新条目建出来就是个空壳，下一句剪枝就又把它删了。后果有两处：海报墙上的名字永远停在第一次入库
+     * 那版（改不动），而刮削队列里留下一堆指向空壳条目的行，删不掉也刮不完，首页就一直挂着「待刮削 N」。
+     */
+    public long bindEntityForFile(String mediaType, String fileId, String title) {
+        String table = "tv".equals(mediaType) ? "tvShow" : "movie";
+        String column = "tv".equals(mediaType) ? "showId" : "movieId";
+        SQLiteDatabase db = helper.getWritableDatabase();
+        long existing = 0;
+        boolean fileKnown = false;
+        try (Cursor cursor = db.rawQuery("SELECT " + column + " FROM videoFile WHERE id = ?",
+                new String[]{fileId})) {
+            if (cursor.moveToFirst()) {
+                fileKnown = true;
+                existing = cursor.isNull(0) ? 0 : cursor.getLong(0);
+            }
+        }
+        if (existing > 0) {
+            boolean alive = false;
+            try (Cursor cursor = db.rawQuery("SELECT scraped FROM " + table + " WHERE id = ?",
+                    new String[]{String.valueOf(existing)})) {
+                if (cursor.moveToFirst()) {
+                    alive = true;
+                    if (cursor.getInt(0) == 0 && title != null && !title.isEmpty()) {
+                        // 没刮削的条目改名是安全的：名字只来自文件名，用户还没看过它。
+                        db.execSQL("UPDATE " + table + " SET title = ? WHERE id = ? AND scraped = 0",
+                                new Object[]{title, existing});
+                    }
+                }
+            }
+            if (alive) {
+                return existing;
+            }
+        }
+        long id = upsertUnscrapedEntity(mediaType, title);
+        if (fileKnown && id != existing) {
+            db.execSQL("UPDATE videoFile SET " + column + " = ? WHERE id = ?",
+                    new Object[]{id, fileId});
+        }
+        return id;
+    }
+
     private long upsertUnscrapedEntity(String mediaType, String title) {
         String table = mediaType.equals("tv") ? "tvShow" : "movie";
         String dateColumn = mediaType.equals("tv") ? "firstAirDate" : "releaseDate";
@@ -334,12 +380,138 @@ public final class LocalMediaLibrary {
         }
     }
 
+    /** 手动匹配或自定义编辑过的条目：自动刮削不再覆盖它（与 mac 版 isLocked 同一含义）。 */
+    public boolean isEntityLocked(String mediaType, long entityId) {
+        String table = "tv".equals(mediaType) ? "tvShow" : "movie";
+        try (Cursor cursor = helper.getReadableDatabase().rawQuery(
+                "SELECT isLocked FROM " + table + " WHERE id = ?", new String[]{String.valueOf(entityId)})) {
+            return cursor.moveToFirst() && cursor.getInt(0) == 1;
+        }
+    }
+
+    /**
+     * 手动匹配：把用户挑中那条 TMDB 结果写进实体并锁住，之后整库扫描不再覆盖。
+     * 类型对不上时（文件名被当成电影扫出来、其实是一部剧集）换一张表重建实体，文件行跟着搬走，
+     * 返回值是之后该用的实体 id——同类型改绑时 id 不变。
+     */
+    public long applyManualMatch(String mediaType, long entityId, TmdbClient.Result result,
+                                 String genres, String directors, String casts) {
+        String targetKind = "tv".equals(result.mediaType) ? "tv" : "movie";
+        SQLiteDatabase db = helper.getWritableDatabase();
+        long targetId;
+        if (targetKind.equals(mediaType)) {
+            targetId = entityId;
+            applyScrapeResult(targetKind, targetId, result);
+        } else {
+            targetId = insertScrapedEntity(db, targetKind, result);
+            String fromTable = "tv".equals(mediaType) ? "tvShow" : "movie";
+            String toColumn = "tv".equals(targetKind) ? "showId" : "movieId";
+            String fromColumn = "tv".equals(mediaType) ? "showId" : "movieId";
+            db.execSQL("UPDATE videoFile SET " + toColumn + " = ?, " + fromColumn + " = 0"
+                            + ", mediaKind = ? WHERE " + fromColumn + " = ?",
+                    new Object[]{targetId, targetKind, entityId});
+            db.execSQL("DELETE FROM scrapeQueue WHERE mediaType = ? AND entityId = ?",
+                    new Object[]{mediaType, String.valueOf(entityId)});
+            db.execSQL("DELETE FROM tvEpisode WHERE showId = ?", new Object[]{entityId});
+            db.execSQL("DELETE FROM " + fromTable + " WHERE id = ?", new Object[]{entityId});
+        }
+        String table = "tv".equals(targetKind) ? "tvShow" : "movie";
+        String[] current = readCredits(db, table, targetId);
+        try (android.database.sqlite.SQLiteStatement statement = db.compileStatement(
+                "UPDATE " + table + " SET genres = ?, directors = ?, casts = ?, isLocked = 1 WHERE id = ?")) {
+            statement.bindString(1, keepExisting(current[0], genres));
+            statement.bindString(2, keepExisting(current[1], directors));
+            statement.bindString(3, keepExisting(current[2], casts));
+            statement.bindLong(4, targetId);
+            statement.executeUpdateDelete();
+        }
+        return targetId;
+    }
+
+    /**
+     * 详情页「自定义编辑」：手填资料并锁定，对应 mac 版的「保存修改并锁定」。
+     * 片名留空表示不改名，只更新其余字段。
+     */
+    public void applyCustomEdit(String mediaType, long entityId, String title, String releaseDate,
+                               double voteAverage, String genres, String directors, String casts) {
+        String table = "tv".equals(mediaType) ? "tvShow" : "movie";
+        String dateColumn = "tv".equals(mediaType) ? "firstAirDate" : "releaseDate";
+        String trimmed = title == null ? "" : title.trim();
+        boolean rename = !trimmed.isEmpty();
+        SQLiteDatabase db = helper.getWritableDatabase();
+        try (android.database.sqlite.SQLiteStatement statement = db.compileStatement(
+                "UPDATE " + table + " SET " + (rename ? "title = ?, " : "") + dateColumn
+                        + " = ?, voteAverage = ?, genres = ?, directors = ?, casts = ?, isLocked = 1"
+                        + " WHERE id = ?")) {
+            int index = 1;
+            if (rename) {
+                statement.bindString(index++, trimmed);
+            }
+            statement.bindString(index++, releaseDate == null ? "" : releaseDate.trim());
+            statement.bindDouble(index++, voteAverage);
+            statement.bindString(index++, genres == null ? "" : genres.trim());
+            statement.bindString(index++, directors == null ? "" : directors.trim());
+            statement.bindString(index++, casts == null ? "" : casts.trim());
+            statement.bindLong(index, entityId);
+            statement.executeUpdateDelete();
+        }
+    }
+
+    private long insertScrapedEntity(SQLiteDatabase db, String mediaType, TmdbClient.Result result) {
+        String table = "tv".equals(mediaType) ? "tvShow" : "movie";
+        String dateColumn = "tv".equals(mediaType) ? "firstAirDate" : "releaseDate";
+        try (android.database.sqlite.SQLiteStatement insert = db.compileStatement(
+                "INSERT INTO " + table + " (title, " + dateColumn + ", overview, posterUrl, voteAverage,"
+                        + " isLocked, scraped, tmdbId) VALUES (?,?,?,?,?,1,1,?)")) {
+            insert.bindString(1, result.title == null || result.title.isEmpty()
+                    ? String.valueOf(result.id) : result.title);
+            insert.bindString(2, result.releaseDate == null ? "" : result.releaseDate);
+            insert.bindString(3, result.overview == null ? "" : result.overview);
+            insert.bindString(4, result.basePosterUrl() == null ? "" : result.basePosterUrl());
+            insert.bindDouble(5, result.voteAverage);
+            insert.bindLong(6, result.id);
+            return insert.executeInsert();
+        }
+    }
+
+    private static String[] readCredits(SQLiteDatabase db, String table, long entityId) {
+        try (Cursor cursor = db.rawQuery("SELECT genres, directors, casts FROM " + table + " WHERE id = ?",
+                new String[]{String.valueOf(entityId)})) {
+            if (cursor.moveToFirst()) {
+                return new String[]{nullToEmpty(cursor.getString(0)), nullToEmpty(cursor.getString(1)),
+                        nullToEmpty(cursor.getString(2))};
+            }
+        }
+        return new String[]{"", "", ""};
+    }
+
+    /** 名单已有内容就保留（可能是用户手填的），只在新值非空时补上。 */
+    private static String keepExisting(String existing, String fresh) {
+        if (existing != null && !existing.isEmpty()) {
+            return existing;
+        }
+        return fresh == null ? "" : fresh;
+    }
+
+    /** 实体是否已经刮到元数据（movie / tvShow 的 scraped 标记）。 */
+    private boolean isScraped(SQLiteDatabase db, String mediaType, long entityId) {
+        String table = "tv".equals(mediaType) ? "tvShow" : "movie";
+        try (Cursor cursor = db.rawQuery("SELECT scraped FROM " + table + " WHERE id = ?",
+                new String[]{String.valueOf(entityId)})) {
+            return cursor.moveToFirst() && cursor.getInt(0) == 1;
+        }
+    }
+
     /** Re-queues a scrape for one entity, optionally with a user-supplied search query. */
     public void requeueScrape(String mediaType, long entityId, String query, String year,
                               String secondaryQuery, int preferredSeason) {
         SQLiteDatabase db = helper.getWritableDatabase();
         db.delete("scrapeQueue", "mediaType = ? AND entityId = ?", new String[]{mediaType, String.valueOf(entityId)});
-        enqueueScrape(mediaType, entityId, query, year, secondaryQuery, preferredSeason, "");
+        // 用户主动要求重刮，说明他要的就是新结果：解锁，否则这一刮会被锁标记挡住。
+        db.execSQL("UPDATE " + ("tv".equals(mediaType) ? "tvShow" : "movie")
+                + " SET isLocked = 0 WHERE id = ?", new Object[]{entityId});
+        // 手动重新匹配：即使已经刮过也要强制再刮一次。
+        enqueueScrape(mediaType, entityId, query, year, secondaryQuery, preferredSeason, "", true);
     }
 
     public StoredEntity entity(String mediaType, long entityId) {
@@ -467,13 +639,52 @@ public final class LocalMediaLibrary {
                 }
             }
         }
-        if (owned.isEmpty()) {
+        return deleteFileRows(owned);
+    }
+
+    /**
+     * 删掉所有「媒体源已经不在了」的文件行。扫描进行中移除媒体源时，那一轮扫描仍会把它
+     * 扫到的文件登记回来，只靠 {@link #purgeSource(int)} 清不干净，海报会一直活到下一次扫描。
+     */
+    public int purgeUnknownSources(java.util.Collection<Integer> liveSourceIds) {
+        List<String> stale = new ArrayList<>();
+        try (Cursor cursor = helper.getReadableDatabase().rawQuery("SELECT id FROM videoFile", null)) {
+            while (cursor.moveToNext()) {
+                String id = cursor.getString(0);
+                int sourceId = sourceIdOf(id);
+                if (sourceId >= 0 && (liveSourceIds == null || !liveSourceIds.contains(sourceId))) {
+                    stale.add(id);
+                }
+            }
+        }
+        return deleteFileRows(stale);
+    }
+
+    /** fileId 里的媒体源 id；不是 {@code local-<id>:<路径>} 形态的返回 -1。 */
+    private static int sourceIdOf(String fileId) {
+        if (fileId == null || !fileId.startsWith("local-")) {
+            return -1;
+        }
+        int colon = fileId.indexOf(':');
+        if (colon <= 6) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(fileId.substring("local-".length(), colon));
+        } catch (NumberFormatException ignored) {
+            return -1;
+        }
+    }
+
+    /** 一批文件行连同进度覆盖与离线记录一起删掉，再裁掉因此变空的实体。 */
+    private int deleteFileRows(List<String> fileIds) {
+        if (fileIds.isEmpty()) {
             return 0;
         }
         SQLiteDatabase db = helper.getWritableDatabase();
         db.beginTransaction();
         try {
-            for (String fileId : owned) {
+            for (String fileId : fileIds) {
                 db.delete("videoFile", "id = ?", new String[]{fileId});
                 db.delete("offlineCache", "fileId = ?", new String[]{fileId});
                 progressOverrides.remove(fileId);
@@ -483,7 +694,7 @@ public final class LocalMediaLibrary {
         } finally {
             db.endTransaction();
         }
-        return owned.size();
+        return fileIds.size();
     }
 
     /**
@@ -499,6 +710,10 @@ public final class LocalMediaLibrary {
         db.execSQL("DELETE FROM tvEpisode WHERE showId NOT IN (SELECT id FROM tvShow)");
         db.execSQL("DELETE FROM scrapeQueue WHERE sourceFileId <> '' "
                 + "AND sourceFileId NOT IN (SELECT id FROM videoFile)");
+        // 指向已经不存在的条目的队列行：刮不到、也永远删不掉，「待刮削 N」就是这么卡住的。
+        db.execSQL("DELETE FROM scrapeQueue WHERE "
+                + "(mediaType = 'movie' AND entityId NOT IN (SELECT id FROM movie)) "
+                + "OR (mediaType = 'tv' AND entityId NOT IN (SELECT id FROM tvShow))");
     }
 
     public List<StoredFile> filesForMovie(long movieId) {
@@ -587,11 +802,23 @@ public final class LocalMediaLibrary {
 
     public void enqueueScrape(String mediaType, long entityId, String query, String year,
                               String secondaryQuery, int preferredSeason, String sourceFileId) {
+        enqueueScrape(mediaType, entityId, query, year, secondaryQuery, preferredSeason, sourceFileId, false);
+    }
+
+    /**
+     * 扫描入队只管「还没刮到元数据」的实体，和 mac 版一样只刮需要刮削的新文件。
+     * 否则每次冷启都要把整库重刮一遍，白白发一堆 TMDB 请求，左上角提示也反复刷屏。
+     */
+    public void enqueueScrape(String mediaType, long entityId, String query, String year,
+                              String secondaryQuery, int preferredSeason, String sourceFileId,
+                              boolean force) {
         SQLiteDatabase db = helper.getWritableDatabase();
-        // One pending entry per entity: rescanning refreshes the query rather than stacking a
-        // duplicate, which would otherwise inflate the count and repeat the same TMDB lookup.
         db.delete("scrapeQueue", "mediaType = ? AND entityId = ?",
                 new String[]{mediaType, String.valueOf(entityId)});
+        // 一个实体在队列里只留一条；已经刮到元数据的直接跳过，除非调用方强制重刮。
+        if (!force && isScraped(db, mediaType, entityId)) {
+            return;
+        }
         try (android.database.sqlite.SQLiteStatement statement = db.compileStatement(
                 "INSERT INTO scrapeQueue (mediaType, entityId, query, year, secondaryQuery, preferredSeason, sourceFileId) "
                         + "VALUES (?,?,?,?,?,?,?)")) {
@@ -606,32 +833,45 @@ public final class LocalMediaLibrary {
         }
     }
 
+    /**
+     * Takes the next batch of pending scrapes and removes exactly those rows, so a queue longer
+     * than one batch keeps the rest instead of losing it (the old code cleared the whole table).
+     */
     public List<Map<String, Object>> nextScrapeBatches(int limit) {
         List<Map<String, Object>> batches = new ArrayList<>();
+        List<Object> args = new ArrayList<>();
         SQLiteDatabase db = helper.getReadableDatabase();
-        String sql = "SELECT mediaType, entityId, query, year, secondaryQuery, preferredSeason FROM scrapeQueue "
-                + "GROUP BY mediaType, entityId ORDER BY id ASC LIMIT " + Math.max(1, limit);
+        String sql = "SELECT id, mediaType, entityId, query, year, secondaryQuery, preferredSeason "
+                + "FROM scrapeQueue GROUP BY mediaType, entityId ORDER BY id ASC LIMIT "
+                + Math.max(1, limit);
         try (Cursor cursor = db.rawQuery(sql, null)) {
             while (cursor.moveToNext()) {
+                args.add(cursor.getLong(0));
                 Map<String, Object> batch = new HashMap<>();
-                batch.put("mediaType", cursor.getString(0));
-                batch.put("entityId", cursor.getLong(1));
-                batch.put("query", cursor.getString(2));
-                batch.put("year", cursor.getString(3));
-                batch.put("secondaryQuery", cursor.getString(4));
-                batch.put("preferredSeason", cursor.getInt(5));
+                batch.put("mediaType", cursor.getString(1));
+                batch.put("entityId", cursor.getLong(2));
+                batch.put("query", cursor.getString(3));
+                batch.put("year", cursor.getString(4));
+                batch.put("secondaryQuery", cursor.getString(5));
+                batch.put("preferredSeason", cursor.getInt(6));
                 batches.add(batch);
             }
         }
-        if (!batches.isEmpty()) {
-            db.delete("scrapeQueue", null, null);
+        if (!args.isEmpty()) {
+            StringBuilder placeholders = new StringBuilder();
+            for (int index = 0; index < args.size(); index++) {
+                placeholders.append(index == 0 ? "?" : ",?");
+            }
+            db.execSQL("DELETE FROM scrapeQueue WHERE id IN (" + placeholders + ")", args.toArray());
         }
         return batches;
     }
 
+    /** How many entities are still waiting for metadata, counting each entity once. */
     public int scrapeQueueCount() {
         SQLiteDatabase db = helper.getReadableDatabase();
-        try (Cursor cursor = db.rawQuery("SELECT COUNT(*) FROM scrapeQueue", null)) {
+        try (Cursor cursor = db.rawQuery(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM scrapeQueue GROUP BY mediaType, entityId)", null)) {
             return cursor.moveToFirst() ? cursor.getInt(0) : 0;
         }
     }

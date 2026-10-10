@@ -47,20 +47,16 @@ public final class LanDiscovery {
             this.url = url;
         }
 
+        /**
+         * 标题口径照 mac 版 {@code discoveredDeviceTitle}：探到设备名就用设备名，
+         * 探不到就是「WebDAV 192.168.0.150」。端口不掺进标题——下面那行地址本来就带端口，
+         * 同一台机器开两个 WebDAV 时，标题一样、地址不同才是 mac 上的读法。
+         */
         public String label() {
-            String kindLabel = kind.equals("smb") ? "SMB" : "WebDAV";
-            String hostPart = name == null || name.isEmpty() || name.equals(ip)
-                    ? ip : name + "（" + ip + "）";
-            return kindLabel + " · " + hostPart + portSuffix();
-        }
-
-        /** The port is only shown when it differs from the scheme default. */
-        private String portSuffix() {
-            if (kind.equals("smb") || port <= 0) {
-                return "";
+            if (name != null && !name.isEmpty() && !name.equals(ip)) {
+                return name;
             }
-            boolean standard = (url.startsWith("https") && port == 443) || (url.startsWith("http") && port == 80);
-            return standard ? "" : " · " + port;
+            return (kind.equals("smb") ? "SMB " : "WebDAV ") + ip;
         }
     }
 

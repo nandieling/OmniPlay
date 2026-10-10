@@ -7,6 +7,7 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.view.ViewGroup;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.TextView;
@@ -99,10 +100,11 @@ public final class Theme {
     public static boolean DARK = false;
 
     public static final float FOCUS_SCALE = 1.045f;
+    /** How much deeper a control's own fill goes when the remote lands on it. */
+    public static final float FOCUS_DARKEN = 0.42f;
     public static final int FOCUS_ANIMATION_MS = 120;
-    /** Resting border, in pixels; {@link #STROKE_FOCUS} is what a focused control draws. */
+    /** Border every control draws, at rest and while focused; only its colour ever changes. */
     public static int STROKE = 1;
-    public static int STROKE_FOCUS = 3;
     /** Fully rounded ends for pills. */
     public static final int PILL = 9999;
 
@@ -172,7 +174,6 @@ public final class Theme {
         this.density = context.getResources().getDisplayMetrics().density;
         this.screenWidth = context.getResources().getDisplayMetrics().widthPixels;
         STROKE = Math.max(1, Math.round(density));
-        STROKE_FOCUS = Math.max(2, Math.round(3 * density));
     }
 
     public Context context() {
@@ -234,6 +235,19 @@ public final class Theme {
     public static int withAlpha(int color, int alpha) {
         return Color.argb(Math.max(0, Math.min(255, alpha)), Color.red(color), Color.green(color),
                 Color.blue(color));
+    }
+
+    /**
+     * The same colour pushed towards black, alpha kept: what a focused control paints with,
+     * so "focused" reads as a deeper version of the control itself rather than as a ring drawn
+     * around it.
+     */
+    public static int darker(int color, float amount) {
+        float keep = 1f - Math.max(0f, Math.min(1f, amount));
+        return Color.argb(Color.alpha(color),
+                Math.round(Color.red(color) * keep),
+                Math.round(Color.green(color) * keep),
+                Math.round(Color.blue(color) * keep));
     }
 
     public static int blend(int from, int to, float amount) {
@@ -302,24 +316,30 @@ public final class Theme {
         };
     }
 
-    /** Filled pill that turns into the focus colour; used for toolbar and dialog buttons. */
+    // Focus is the control's own colour made deeper plus {@link #FOCUS_SCALE}, and its border
+    // stays exactly as thick as it is at rest: an accent ring around every control reads as noise
+    // on a TV sitting two meters away, and it made the whole screen look boxed in.
+
+    /** Filled pill: darker fill, slight grow; used for toolbar and dialog buttons. */
     public void styleButtonFocus(Button button, boolean active, int radius) {
-        GradientDrawable rest = panel(active ? GLASS_STRONG : GLASS, BORDER, STROKE, radius);
-        GradientDrawable focused = panel(GLASS_STRONG, FOCUS, STROKE_FOCUS, radius);
-        swapOnFocus(button, rest, focused, 0, dp(8), hasFocus ->
+        int restFill = active ? GLASS_STRONG : GLASS;
+        GradientDrawable rest = panel(restFill, BORDER, STROKE, radius);
+        GradientDrawable focused = panel(darker(restFill, FOCUS_DARKEN), BORDER, STROKE, radius);
+        swapOnFocus(button, rest, focused, 0, dp(6), hasFocus ->
                 button.setTextColor(hasFocus || active ? FOCUS : TEXT), null);
     }
 
     /** Settings and list rows: same shape, but the label never changes colour. */
     public void styleRowFocus(Button button) {
-        swapOnFocus(button, panel(GLASS, BORDER, STROKE, dp(10)),
-                panel(GLASS_STRONG, FOCUS, STROKE_FOCUS, dp(10)), 0, dp(8),
+        GradientDrawable rest = panel(GLASS, BORDER, STROKE, dp(10));
+        GradientDrawable focused = panel(darker(GLASS, FOCUS_DARKEN), BORDER, STROKE, dp(10));
+        swapOnFocus(button, rest, focused, 0, dp(6),
                 hasFocus -> button.setTextColor(TEXT), null);
     }
 
     public void styleInputFocus(EditText editText) {
         GradientDrawable rest = panel(SURFACE, BORDER, dp(1), dp(8));
-        GradientDrawable focused = panel(SURFACE, FOCUS, STROKE_FOCUS, dp(8));
+        GradientDrawable focused = panel(darker(SURFACE, FOCUS_DARKEN), BORDER, dp(1), dp(8));
         editText.setBackground(rest);
         editText.setOnFocusChangeListener((focusedView, hasFocus) -> focusedView.setBackground(
                 hasFocus ? focused : rest));
@@ -328,8 +348,8 @@ public final class Theme {
     /** A plain card that lifts when focused (list rows, source cards). */
     public void styleCardFocus(View card, Runnable onFocused) {
         swapOnFocus(card, panel(withAlpha(SURFACE, 0), Color.TRANSPARENT, 0, dp(10)),
-                panel(withAlpha(SURFACE, 235), FOCUS, STROKE_FOCUS, dp(10)), 0, dp(12),
-                noRepaint(), onFocused);
+                panel(darker(withAlpha(SURFACE, 235), FOCUS_DARKEN), BORDER, STROKE, dp(10)),
+                0, dp(10), noRepaint(), onFocused);
     }
 
     /**
@@ -338,15 +358,26 @@ public final class Theme {
      */
     public void stylePosterFocus(View card, FrameLayout frame, Runnable onFocused) {
         GradientDrawable frameRest = panel(SURFACE_ALT, BORDER, dp(1), dp(12));
-        GradientDrawable frameFocused = panel(SURFACE_ALT, FOCUS, STROKE_FOCUS, dp(12));
         GradientDrawable transparent = panel(Color.TRANSPARENT, Color.TRANSPARENT, 0, dp(8));
         frame.setBackground(frameRest);
         frame.setElevation(0);
         card.setBackground(transparent);
         card.setElevation(0);
+        // 海报是图片，光换底色看不出来；盖一层预先画好的暗色遮罩，聚焦时把它显出来。
+        View dim = new View(frame.getContext());
+        dim.setBackground(panel(withAlpha(Color.rgb(8, 12, 20), 140), BORDER, dp(1), dp(12)));
+        dim.setVisibility(View.INVISIBLE);
+        dim.setFocusable(false);
+        dim.setClickable(false);
+        frame.addView(dim, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         card.setOnFocusChangeListener((focusedView, hasFocus) -> {
             focusedView.setElevation(hasFocus ? dp(8) : 0);
-            frame.setBackground(hasFocus ? frameFocused : frameRest);
+            // 卡片是先建的、海报是后塞进来的，遮罩得在聚焦时自己排到最上面才盖得住图。
+            if (hasFocus) {
+                dim.bringToFront();
+            }
+            dim.setVisibility(hasFocus ? View.VISIBLE : View.INVISIBLE);
             animateFocusScale(focusedView, hasFocus);
             if (hasFocus && onFocused != null) {
                 onFocused.run();
@@ -356,26 +387,27 @@ public final class Theme {
 
     public void styleBadgeFocus(TextView badge) {
         swapOnFocus(badge, panel(GLASS_STRONG, BORDER, 0, dp(8)),
-                panel(GLASS_STRONG, FOCUS, STROKE_FOCUS, dp(8)), 0, dp(10), noRepaint(), null);
+                panel(darker(GLASS_STRONG, FOCUS_DARKEN), BORDER, 0, dp(8)),
+                0, dp(8), noRepaint(), null);
     }
 
     // Player controls sit on video: they keep a translucent plate, but focus is stated the same
     // loud way as everywhere else, or the remote feels random in a dark scene.
 
     public void stylePlayerButtonFocus(Button button) {
-        GradientDrawable rest = panel(withAlpha(DARK ? SURFACE : Color.WHITE, 74),
+        int restFill = withAlpha(DARK ? SURFACE : Color.WHITE, 74);
+        GradientDrawable rest = panel(restFill, withAlpha(Color.WHITE, 96), STROKE, dp(24));
+        GradientDrawable focused = panel(darker(restFill, FOCUS_DARKEN * 1.6f),
                 withAlpha(Color.WHITE, 96), STROKE, dp(24));
-        GradientDrawable focused = panel(withAlpha(DARK ? SURFACE : Color.WHITE, 232),
-                withAlpha(FOCUS, 240), STROKE_FOCUS, dp(24));
         swapOnFocus(button, rest, focused, 0, 0, hasFocus ->
                 button.setTextColor(hasFocus ? FOCUS : PLAYER_TEXT), null);
     }
 
     public void stylePlayerIconFocus(ImageButton button) {
-        GradientDrawable rest = panel(withAlpha(Color.WHITE, 34), withAlpha(Color.WHITE, 140),
-                STROKE, dp(24));
-        GradientDrawable focused = panel(withAlpha(DARK ? SURFACE : Color.WHITE, 232),
-                withAlpha(FOCUS, 240), STROKE_FOCUS, dp(24));
+        int restFill = withAlpha(Color.WHITE, 34);
+        GradientDrawable rest = panel(restFill, withAlpha(Color.WHITE, 140), STROKE, dp(24));
+        GradientDrawable focused = panel(darker(restFill, FOCUS_DARKEN * 1.6f),
+                withAlpha(Color.WHITE, 140), STROKE, dp(24));
         swapOnFocus(button, rest, focused, 0, 0, hasFocus -> {
             if (hasFocus) {
                 button.setColorFilter(FOCUS);
@@ -388,10 +420,10 @@ public final class Theme {
     /** Rows inside the player's audio / subtitle menu: glass over video, accent when selected. */
     public void stylePlayerMenuFocus(Button button, boolean selected) {
         int plate = DARK ? SURFACE : Color.WHITE;
-        GradientDrawable rest = panel(withAlpha(plate, selected ? 46 : 22),
+        int restFill = withAlpha(plate, selected ? 46 : 22);
+        GradientDrawable rest = panel(restFill, withAlpha(Color.WHITE, 120), STROKE, dp(10));
+        GradientDrawable focused = panel(darker(restFill, FOCUS_DARKEN * 1.6f),
                 withAlpha(Color.WHITE, 120), STROKE, dp(10));
-        GradientDrawable focused = panel(withAlpha(plate, 236), withAlpha(FOCUS, 240),
-                STROKE_FOCUS, dp(10));
         swapOnFocus(button, rest, focused, 0, 0, hasFocus -> button.setTextColor(
                 hasFocus ? FOCUS : (selected ? ACCENT : PLAYER_TEXT)), null);
     }

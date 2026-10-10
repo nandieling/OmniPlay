@@ -1718,6 +1718,7 @@ enum MediaSourceScanErrorCategory: String, Codable {
     case network
     case server
     case config
+    case database
     case unknown
 
     var displayName: String {
@@ -1726,6 +1727,7 @@ enum MediaSourceScanErrorCategory: String, Codable {
         case .network: return "网络错误"
         case .server: return "服务器错误"
         case .config: return "配置错误"
+        case .database: return "数据库错误"
         case .unknown: return "未知错误"
         }
     }
@@ -1830,6 +1832,18 @@ enum MediaSourceScanDiagnosticsFormatter {
             """
         }
         return ([header] + blocks).joined(separator: "\n\n")
+    }
+
+    /// 扫描「成功」但一个视频文件都没有时的可读报告：缺了这一步，界面只会把状态条
+    /// 闪一下就结束，用户完全看不出扫描其实已经跑完了。
+    static func emptyScanReport(sources: [MediaSource]) -> String {
+        let header = "扫描完成，但没有发现任何视频文件。"
+        let blocks = sources.map { source in
+            "[源] " + source.name + "\n协议=" + source.protocolType +
+                "\n端点=" + sanitizedEndpoint(from: source)
+        }
+        let hint = "请确认该地址指向真正存放视频的文件夹（不是 WebDAV 服务根目录），并且该账号有权限列出这个目录。"
+        return ([header] + blocks + [hint]).joined(separator: "\n\n")
     }
 
     static func sanitizedEndpoint(from raw: String) -> String {
@@ -2795,6 +2809,8 @@ private enum MediaSourceScanError: LocalizedError {
     case invalidBaseURL(String)
     case accessDenied(String)
     case requestFailed(String)
+    case credentialUnavailable(String)
+    case databaseWriteFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -2805,6 +2821,10 @@ private enum MediaSourceScanError: LocalizedError {
         case .accessDenied(let value):
             return "系统拒绝访问该路径：\(value)"
         case .requestFailed(let value):
+            return value
+        case .credentialUnavailable(let value):
+            return value
+        case .databaseWriteFailed(let value):
             return value
         }
     }
@@ -2913,6 +2933,18 @@ private struct WebDAVScanner: MediaSourceScanner {
         let contentLength: Int64
     }
 
+    private struct DirectoryListing {
+        let items: [DAVItem]
+        /// 跟随重定向之后真正响应该目录的地址。
+        let effectiveURL: URL
+    }
+
+    private struct PendingDirectory {
+        let url: URL
+        /// 该目录相对挂载根目录的路径前缀；根目录为空串，子目录形如 "电影/Season 1/"。
+        let relativePrefix: String
+    }
+
     private final class PROPFINDParser: NSObject, XMLParserDelegate {
         struct Entry {
             var href: String = ""
@@ -2994,31 +3026,36 @@ private struct WebDAVScanner: MediaSourceScanner {
             throw MediaSourceScanError.invalidBaseURL(source.baseUrl)
         }
 
-        let credential = resolveCredential(from: source.authConfig, fallbackURL: rawBaseURL)
+        let credential = try resolveCredential(from: source.authConfig, fallbackURL: rawBaseURL)
         let extSet: Set<String> = ["mp4", "mkv", "mov", "avi", "rmvb", "flv", "webm", "m2ts", "ts", "iso", "m4v", "wmv"]
 
-        var pendingDirectories: [URL] = [baseURL]
+        var pendingDirectories: [PendingDirectory] = [PendingDirectory(url: baseURL, relativePrefix: "")]
         var visitedDirectories: Set<String> = []
         var normalFiles: [ScannedMediaFile] = []
         var bdmvGroups: [String: [(file: ScannedMediaFile, size: Int64)]] = [:]
         let includeBluRayExtras = UserDefaults.standard.bool(forKey: "playBluRayExtras")
 
-        while let directoryURL = pendingDirectories.first {
+        while let directory = pendingDirectories.first {
             if Task.isCancelled { return [] }
             pendingDirectories.removeFirst()
 
-            let normalizedDirKey = normalizePath(directoryURL.path)
+            let normalizedDirKey = normalizePath(directory.url.path)
             if visitedDirectories.contains(normalizedDirKey) { continue }
             visitedDirectories.insert(normalizedDirKey)
 
-            let entries = try await listDirectory(at: directoryURL, credential: credential, baseURL: baseURL)
-            for entry in entries {
+            let listing = try await listDirectory(at: directory.url, credential: credential)
+            // 服务器常会把 /电影 规范化成 /电影/，或在跳转后落到别名路径。相对路径必须以
+            // 「真正响应这次 PROPFIND 的目录」为锚点推导，否则整棵子树都会被丢掉，
+            // 扫描结果显示成「成功，但 0 个文件」。
+            let anchorPath = normalizePath(listing.effectiveURL.path)
+            for entry in listing.items {
                 if Task.isCancelled { return [] }
-                guard let relativePath = relativePath(for: entry.url, baseURL: baseURL), !relativePath.isEmpty else { continue }
+                guard let childPath = relativeChildPath(of: entry.url, under: anchorPath) else { continue }
+                let relativePath = directory.relativePrefix + childPath
                 if containsHiddenPathComponent(relativePath) { continue }
 
                 if entry.isDirectory {
-                    pendingDirectories.append(entry.url)
+                    pendingDirectories.append(PendingDirectory(url: entry.url, relativePrefix: "\(relativePath)/"))
                     continue
                 }
 
@@ -3062,10 +3099,19 @@ private struct WebDAVScanner: MediaSourceScanner {
         return resolved
     }
 
-    private func resolveCredential(from authConfig: String?, fallbackURL: URL) -> AuthCredential? {
-        if let id = WebDAVCredentialStore.shared.credentialID(from: authConfig),
-           let stored = WebDAVCredentialStore.shared.loadCredential(id: id) {
-            return AuthCredential(username: stored.username, password: stored.password)
+    private func resolveCredential(from authConfig: String?, fallbackURL: URL) throws -> AuthCredential? {
+        if let id = WebDAVCredentialStore.shared.credentialID(from: authConfig) {
+            if let stored = WebDAVCredentialStore.shared.loadCredential(id: id) {
+                return AuthCredential(username: stored.username, password: stored.password)
+            }
+            // 钥匙串读不出来时不要再发匿名请求：服务器只会回 401，界面把它翻译成
+            // 「密码不对」，用户会一直去改一个本来正确的密码。
+            if let user = fallbackURL.user, !user.isEmpty {
+                return AuthCredential(username: user, password: fallbackURL.password ?? "")
+            }
+            throw MediaSourceScanError.credentialUnavailable(
+                "WebDAV 登录信息读取失败：钥匙串里没有这条凭据，或系统拒绝访问。请在「媒体源」里重新登录一次。"
+            )
         }
 
         if let legacy = WebDAVCredentialStore.shared.decodeLegacyCredential(from: authConfig) {
@@ -3078,7 +3124,7 @@ private struct WebDAVScanner: MediaSourceScanner {
         return nil
     }
 
-    private func listDirectory(at directoryURL: URL, credential: AuthCredential?, baseURL: URL) async throws -> [DAVItem] {
+    private func listDirectory(at directoryURL: URL, credential: AuthCredential?) async throws -> DirectoryListing {
         var request = URLRequest(url: directoryURL)
         request.httpMethod = "PROPFIND"
         request.setValue("1", forHTTPHeaderField: "Depth")
@@ -3126,17 +3172,20 @@ private struct WebDAVScanner: MediaSourceScanner {
 
                 let parser = PROPFINDParser()
                 let entries = try parser.parse(data: data)
-                let currentPath = normalizePath(directoryURL.path)
+                // href 必须相对「响应该次请求的资源」解析：跟随重定向或补斜杠之后，
+                // 请求原本的地址已经不再是解析基准。
+                let effectiveURL = http.url ?? directoryURL
+                let resolutionBaseURL = directoryURLForRelativeResolution(effectiveURL)
+                let anchorPath = normalizePath(effectiveURL.path)
 
                 var items: [DAVItem] = []
                 for entry in entries {
-                    guard let resolved = resolveHref(entry.href, baseURL: baseURL) else { continue }
-                    let path = normalizePath(resolved.path)
-                    if path == currentPath { continue }
+                    guard let resolved = resolveHref(entry.href, baseURL: resolutionBaseURL) else { continue }
+                    if normalizePath(resolved.path) == anchorPath { continue }
                     items.append(DAVItem(url: resolved, isDirectory: entry.isDirectory, contentLength: entry.contentLength))
                 }
                 log("PROPFIND success status=\(http.statusCode) elapsed=\(elapsedMS)ms entries=\(entries.count) items=\(items.count) url=\(directoryURL.absoluteString)")
-                return items
+                return DirectoryListing(items: items, effectiveURL: effectiveURL)
             } catch let error as URLError {
                 lastError = error
                 let retryableCodes: Set<URLError.Code> = [
@@ -3199,15 +3248,20 @@ private struct WebDAVScanner: MediaSourceScanner {
         return path
     }
 
-    private func relativePath(for url: URL, baseURL: URL) -> String? {
-        let fullPath = normalizePath(url.path)
-        let basePath = normalizePath(baseURL.path)
+    private func directoryURLForRelativeResolution(_ url: URL) -> URL {
+        guard !url.absoluteString.hasSuffix("/") else { return url }
+        return URL(string: url.absoluteString + "/") ?? url
+    }
 
-        if fullPath == basePath { return nil }
-        guard fullPath.hasPrefix(basePath) else { return nil }
-
-        var relative = String(fullPath.dropFirst(basePath.count))
-        if relative.hasPrefix("/") { relative.removeFirst() }
+    /// 条目相对「本次列出的目录」的路径；目录自身或跑到目录外的条目返回 nil。
+    private func relativeChildPath(of url: URL, under anchorPath: String) -> String? {
+        let path = normalizePath(url.path)
+        guard !path.isEmpty, path != anchorPath else { return nil }
+        let prefix = anchorPath.hasSuffix("/") ? anchorPath : "\(anchorPath)/"
+        guard path.hasPrefix(prefix) else { return nil }
+        var relative = String(path.dropFirst(prefix.count))
+        while relative.hasSuffix("/") { relative.removeLast() }
+        guard !relative.isEmpty else { return nil }
         return relative.removingPercentEncoding ?? relative
     }
 
@@ -3722,7 +3776,9 @@ extension MediaLibraryManager {
             }
         } catch {
             print("❌ 扫描入库失败：\(error)")
-            let category: MediaSourceScanErrorCategory = .unknown
+            // 入库失败过去一律记成 unknown，看起来就像「莫名其妙扫不出东西」；
+            // 现在按错误本身分类，数据库问题会被标成 database。
+            let category = classifyScanError(error, source: scanningSource)
             let message = userFacingMessage(for: category, sourceName: scanningSource.name, fallback: error.localizedDescription)
             return MediaSourceScanResult(
                 sourceId: sourceId,
@@ -3954,7 +4010,14 @@ extension MediaLibraryManager {
                 directors: Movie.encodePersonList(imported?.directors ?? []),
                 casts: Movie.encodePersonList(imported?.casts ?? [])
             )
-            try? dummyMovie.insert(db)
+            // 占位影片写不进去时必须把真正的原因报出来。以前这里是 try?，
+            // 结构缺列这类错误被吞掉后，只剩下一条 videoFile 插入抛出的
+            // 「FOREIGN KEY constraint failed」，看起来完全不像数据库的问题。
+            do {
+                try dummyMovie.insert(db, onConflict: .ignore)
+            } catch {
+                throw MediaSourceScanError.databaseWriteFailed("影片记录写入失败：\(error.localizedDescription)")
+            }
 
             var insertedCount = 0
             for item in group.items {
@@ -3970,7 +4033,11 @@ extension MediaLibraryManager {
                     duration: 0.0,
                     fileSize: item.file.fileSize
                 )
-                try newVideo.insert(db)
+                do {
+                    try newVideo.insert(db)
+                } catch {
+                    throw MediaSourceScanError.databaseWriteFailed("视频文件记录写入失败：\(error.localizedDescription)")
+                }
                 if let thumbnailPath = item.sidecar?.episodeMetadata?.thumbnailPath {
                     let sourceURL = URL(fileURLWithPath: thumbnailPath)
                     let destinationURL = localEpisodeThumbnailURL(for: newVideo.id)
@@ -4024,6 +4091,10 @@ extension MediaLibraryManager {
             switch scanError {
             case .invalidBaseURL, .unsupportedProtocol, .accessDenied:
                 return .config
+            case .credentialUnavailable:
+                return .auth
+            case .databaseWriteFailed:
+                return .database
             case .requestFailed(let message):
                 return classifyRequestMessage(message, source: source)
             }
@@ -4066,6 +4137,8 @@ extension MediaLibraryManager {
             return "“\(sourceName)”连接失败：服务端返回错误，请稍后重试。"
         case .config:
             return "“\(sourceName)”配置无效或不可访问，请检查源地址。"
+        case .database:
+            return "已找到视频文件，但没能写进媒体库，所以海报墙还是空的：\(fallback)"
         case .unknown:
             return "“\(sourceName)”扫描失败：\(fallback)"
         }

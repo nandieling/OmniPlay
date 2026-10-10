@@ -98,7 +98,7 @@ public final class ImageLoader {
             connection = (HttpURLConnection) new URL(url).openConnection();
             connection.setConnectTimeout(8000);
             connection.setReadTimeout(20000);
-            connection.setRequestProperty("User-Agent", "OmniPlay-Android/0.1");
+            connection.setRequestProperty("User-Agent", com.omniplay.tv.local.Http.USER_AGENT);
             if (cookieHeader != null && !cookieHeader.isEmpty()) {
                 connection.setRequestProperty("Cookie", cookieHeader);
             }

@@ -171,7 +171,7 @@ public final class Http {
         return new Response(status, headers, body);
     }
 
-    public static final String USER_AGENT = "OmniPlay-Android/1.17";
+    public static final String USER_AGENT = "OmniPlay-Android/1.22";
 
     private static byte[] readBody(InputStream input, String transferEncoding, String contentLength)
             throws IOException {

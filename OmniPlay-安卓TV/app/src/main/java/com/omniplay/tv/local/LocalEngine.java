@@ -73,6 +73,10 @@ public final class LocalEngine {
     private final Map<String, WebDavClient> webDavClients = new ConcurrentHashMap<>();
     private final Map<String, SmbClient> smbClients = new ConcurrentHashMap<>();
     private volatile boolean scraping;
+    /** Guards {@link #scraping} so only one scrape pass can be in flight. */
+    private final Object scrapeLock = new Object();
+    /** 一次刮削 200 个条目；队列更长时 {@link #scrapePending} 会继续取下一批。 */
+    private static final int SCRAPE_BATCH = 200;
     private volatile String scrapeStatus = "";
     private final AtomicInteger activeScrapes = new AtomicInteger();
     private final Set<String> episodeScrapeInFlight = ConcurrentHashMap.newKeySet();
@@ -117,30 +121,33 @@ public final class LocalEngine {
 
     public List<Source> sources() {
         List<Source> result = new ArrayList<>();
+        java.util.Set<Integer> ids = new java.util.HashSet<>();
         String raw = preferences.getString("sources", "");
-        if (raw.isEmpty()) {
-            return result;
-        }
-        for (String line : raw.split("\n")) {
-            if (line.isEmpty()) {
-                continue;
-            }
-            String[] parts = line.split("\u0001", -1);
-            if (parts.length < 4) {
-                continue;
-            }
-            try {
-                result.add(new Source(
-                        Integer.parseInt(parts[0]),
+        if (!raw.isEmpty()) {
+            for (String line : raw.split("\n")) {
+                if (line.isEmpty()) {
+                    continue;
+                }
+                String[] parts = line.split("\u0001", -1);
+                if (parts.length < 4) {
+                    continue;
+                }
+                try {
+                    int id = Integer.parseInt(parts[0]);
+                    ids.add(id);
+                    result.add(new Source(
+                            id,
                         parts[1],
                         parts[2],
                         parts[3],
                         parts.length > 4 ? parts[4] : "",
                         parts.length > 5 ? parts[5] : "",
                         parts.length <= 6 || Boolean.parseBoolean(parts[6])));
-            } catch (NumberFormatException ignored) {
+                } catch (NumberFormatException ignored) {
+                }
             }
         }
+        liveSourceIds = ids;
         return result;
     }
 
@@ -211,7 +218,23 @@ public final class LocalEngine {
         persistSources(updated);
     }
 
+    /**
+     * 还活着的媒体源 id 快照。扫描线程每个文件都要问一句「这个源还在不在」，不能每条
+     * 都回去读一遍偏好，所以在解析源列表和落盘的时候顺手带出来。
+     */
+    private volatile java.util.Set<Integer> liveSourceIds = java.util.Collections.emptySet();
+
+    /** 当前媒体源 id 集合，供扫描收尾清理「源已经不存在了」的文件行。 */
+    public java.util.Set<Integer> liveSourceIds() {
+        return liveSourceIds;
+    }
+
     private void persistSources(List<Source> sources) {
+        java.util.Set<Integer> ids = new java.util.HashSet<>();
+        for (Source source : sources) {
+            ids.add(source.id);
+        }
+        liveSourceIds = ids;
         StringBuilder builder = new StringBuilder();
         for (Source source : sources) {
             if (builder.length() > 0) {
@@ -241,7 +264,8 @@ public final class LocalEngine {
         if (last.isEmpty()) {
             return displayNameForKind(kind);
         }
-        return last;
+        // WebDAV 的路径段是百分号编码过的，直接截出来就是「%E7%94%B5%E5%BD%B1」这种一串符号。
+        return "webdav".equals(kind) ? UrlLabels.displayPath(last) : last;
     }
 
     private static String displayNameForKind(String kind) {
@@ -303,7 +327,14 @@ public final class LocalEngine {
                 return report;
             }
             Set<String> currentFileIds = new HashSet<>();
+            int sourceIndex = 0;
             for (Source source : enabled) {
+                sourceIndex++;
+                // 逐文件回调会在主线程上刷几百次横幅，是遥控器发卡的头一个来源；这里按源报一次。
+                if (listener != null) {
+                    listener.onScrapeProgress("扫描中 (" + sourceIndex + "/" + enabled.size()
+                            + ")：" + source.name);
+                }
                 if (source.kind.equals("local")) {
                     scanLocalSource(source, currentFileIds, report, listener);
                 } else if (source.kind.equals("smb")) {
@@ -313,13 +344,16 @@ public final class LocalEngine {
                 }
             }
             int removed = library.removeMissingFiles(new ArrayList<>(currentFileIds));
+            // 扫描进行中移除的媒体源，这一轮仍会把它扫到的文件登记回来；收尾按还活着的源再清一次。
+            removed += library.purgeUnknownSources(liveSourceIds);
             report.removedFiles = removed;
             report.success = true;
-            report.message = "扫描完成：文件 " + report.scannedFiles
-                    + "，新增 " + report.newFiles + "，新增条目 " + report.newEntities
+            // 收尾文案与 mac 版同一句话：新增 / 移除 / 共发现。
+            report.message = "扫描完成：新增 " + report.newFiles
+                    + "，移除 " + removed
+                    + "，共发现 " + report.scannedFiles + " 个文件。"
                     + (report.skippedStreams > 0
-                            ? "，蓝光非正片分卷跳过 " + report.skippedStreams : "")
-                    + (removed > 0 ? "，清理 " + removed + " 个失效文件。" : "。");
+                            ? "（蓝光非正片分卷跳过 " + report.skippedStreams + " 条）" : "");
         } catch (Exception error) {
             report.success = false;
             report.message = "扫描失败：" + error.getMessage();
@@ -461,6 +495,10 @@ public final class LocalEngine {
     private void registerFile(Source source, String relativePath, String fileName,
                               LocalMediaNameParser.EpisodeInfo episode,
                               Set<String> fileIds, ScanReport report, ProgressListener listener) {
+        if (!liveSourceIds.contains(source.id)) {
+            // 扫描进行中该源被移除了：这一轮还在往里灌文件，先停住，收尾会把它留下的行一起清掉。
+            return;
+        }
         String fileId = fileId(source.id, relativePath);
         boolean isTv = episode.isTvShow;
         String group = isTv
@@ -468,12 +506,17 @@ public final class LocalEngine {
                 : "";
         LocalMediaNameParser.SearchMetadata metadata =
                 LocalMediaNameParser.extractSearchMetadata(relativePath.isEmpty() ? fileName : relativePath);
+        // 入库名照 mac 版取「看得懂的片名」，而不是整条场景命名；未刮削时海报下就是它。
+        String prettyName = LocalMediaNameParser.displayTitle(relativePath, fileName);
+        // 剧集按「剧」建条目，标题必须每一集都算出同一个值，所以只用剧集目录名推导。
+        String showName = group.isEmpty() ? null : LocalMediaNameParser.displayTitle(group, group);
 
         long entityId;
         String entityTitle;
         if (isTv) {
-            entityTitle = !group.isEmpty() ? group : fileName;
-            entityId = library.upsertUnscrapedShow(entityTitle);
+            entityTitle = showName != null ? showName
+                    : (!group.isEmpty() ? group : LocalMediaNameParser.stripDisplay(fileName));
+            entityId = library.bindEntityForFile("tv", fileId, entityTitle);
             report.newEntities++;
             library.insertVideoFile(
                     new LocalMediaLibrary.ScannedFile(fileId, relativePath, fileName,
@@ -488,10 +531,9 @@ public final class LocalEngine {
                         episode.season, fileId);
             }
         } else {
-            entityTitle = metadata.fullCleanTitle != null && !metadata.fullCleanTitle.isEmpty()
-                    ? metadata.fullCleanTitle
-                    : LocalMediaNameParser.stripDisplay(fileName);
-            entityId = library.upsertUnscrapedMovie(entityTitle);
+            // 文件名算不出能看的名字时，退回「清洗过的文件名」；条目已存在的话由库里那条改名逻辑负责。
+            entityTitle = prettyName != null ? prettyName : LocalMediaNameParser.stripDisplay(fileName);
+            entityId = library.bindEntityForFile("movie", fileId, entityTitle);
             report.newEntities++;
             library.insertVideoFile(
                     new LocalMediaLibrary.ScannedFile(fileId, relativePath, fileName,
@@ -507,9 +549,6 @@ public final class LocalEngine {
             }
         }
         report.newFiles++;
-        if (listener != null) {
-            listener.onScrapeProgress("扫描 " + fileName);
-        }
     }
 
     private static String fileId(int sourceId, String relativePath) {
@@ -750,8 +789,20 @@ public final class LocalEngine {
     /** Scan, then scrape, as one action: what the mac app does on startup and on 同步. */
     public ScanReport scanAndScrape(ProgressListener listener) {
         ScanReport report = scanAll(listener);
-        if (!report.success || !settings.autoScrapeAfterScan() || !tmdb.isConfigured()) {
+        if (!report.success || !settings.autoScrapeAfterScan()) {
             return report;
+        }
+        if (!tmdb.isConfigured()) {
+            // 扫完就把「等 TMDB」这件事说出来，别让它变成一条看不懂的待刮削计数。
+            scrapeStatus = library.scrapeQueueCount() > 0 ? "等待 TMDB API 连通后刮削..." : "";
+            if (listener != null && !scrapeStatus.isEmpty()) {
+                listener.onScrapeProgress(scrapeStatus);
+            }
+            return report;
+        }
+        // 扫描摘要先说一声，随后才轮到刮削进度盖上去（与 mac 版同一顺序）。
+        if (listener != null) {
+            listener.onScrapeProgress(report.message);
         }
         if (library.scrapeQueueCount() > 0) {
             scrapePending(listener);
@@ -781,49 +832,93 @@ public final class LocalEngine {
         return library.scrapeQueueCount();
     }
 
+    public boolean tmdbConfigured() {
+        return tmdb.isConfigured();
+    }
+
     public void scrapePending(ProgressListener listener) {
-        if (scraping || !tmdb.isConfigured()) {
-            return;
-        }
-        scraping = true;
-        try {
-            List<Map<String, Object>> batches = library.nextScrapeBatches(200);
-            int total = batches.size();
-            int index = 0;
-            int failed = 0;
-            for (Map<String, Object> batch : batches) {
-                index++;
-                String mediaType = (String) batch.get("mediaType");
-                long entityId = (Long) batch.get("entityId");
-                String query = (String) batch.get("query");
-                String year = (String) batch.get("year");
-                String secondary = (String) batch.get("secondaryQuery");
-                int season = (Integer) batch.get("preferredSeason");
-                scrapeStatus = "正在刮削 " + (index + "/" + total) + "：" + query;
+        if (!tmdb.isConfigured()) {
+            if (library.scrapeQueueCount() > 0) {
+                // mac 版这时候说的是「等待 TMDB API 连通后刮削」，而不是干挂一个待刮削数字。
+                scrapeStatus = "等待 TMDB API 连通后刮削...";
                 if (listener != null) {
                     listener.onScrapeProgress(scrapeStatus);
                 }
-                activeScrapes.incrementAndGet();
-                try {
-                    TmdbClient.Result result = tmdb.multiSearch(query, year, mediaType, season, secondary);
-                    if (result != null && isYearPlausible(result, year, mediaType)) {
-                        library.applyScrapeResult(mediaType, entityId, result);
-                        applyTitleDetails(mediaType, entityId, result.id);
+            }
+            return;
+        }
+        // 两个线程同时开跑会各自取一批又互相删行，状态行的「待刮削 N」就会来回跳。
+        synchronized (scrapeLock) {
+            if (scraping) {
+                return;
+            }
+            scraping = true;
+        }
+        try {
+            // 一次取一批，取完接着取，直到队列真的见底：中途扫描还在往队列里补条目，
+            // 只要「取到不满一批」就退出，剩下那截就会一直挂在首页上不动。
+            int done = 0;
+            int failed = 0;
+            int skipped = 0;
+            int totalQueued = library.scrapeQueueCount();
+            for (int round = 0; round < 100; round++) {
+                List<Map<String, Object>> batches = library.nextScrapeBatches(SCRAPE_BATCH);
+                if (batches.isEmpty()) {
+                    break;
+                }
+                if (batches.size() > totalQueued) {
+                    totalQueued = batches.size();
+                }
+                int total = batches.size();
+                int index = 0;
+                for (Map<String, Object> batch : batches) {
+                    index++;
+                    String mediaType = (String) batch.get("mediaType");
+                    long entityId = (Long) batch.get("entityId");
+                    String query = (String) batch.get("query");
+                    String year = (String) batch.get("year");
+                    String secondary = (String) batch.get("secondaryQuery");
+                    int season = (Integer) batch.get("preferredSeason");
+                    if (library.isEntityLocked(mediaType, entityId)) {
+                        // 手动匹配过或自定义编辑过的条目不再自动覆盖（mac 版同一条规则）；
+                        // 队列行在取批次时已经删掉，跳过它不会让「待刮削」卡住。
+                        skipped++;
+                        continue;
                     }
-                } catch (Exception error) {
-                    failed++;
-                } finally {
-                    activeScrapes.decrementAndGet();
+                    scrapeStatus = "刮削元数据和海报 (" + (done + index) + "/"
+                            + Math.max(totalQueued, done + total) + ")：" + query;
+                    if (listener != null) {
+                        listener.onScrapeProgress(scrapeStatus);
+                    }
+                    activeScrapes.incrementAndGet();
+                    try {
+                        TmdbClient.Result result =
+                                tmdb.multiSearch(query, year, mediaType, season, secondary);
+                        if (result != null && isYearPlausible(result, year, mediaType)) {
+                            library.applyScrapeResult(mediaType, entityId, result);
+                            applyTitleDetails(mediaType, entityId, result.id);
+                        }
+                    } catch (Exception error) {
+                        failed++;
+                    } finally {
+                        activeScrapes.decrementAndGet();
+                    }
+                }
+                done += total;
+            }
+            if (done > 0) {
+                String tail = skipped > 0 ? "，跳过 " + skipped + " 个手动匹配的条目" : "";
+                scrapeStatus = failed == 0
+                        ? "刮削完成，共处理 " + done + " 个条目" + tail + "。"
+                        : "刮削完成，处理 " + done + " 个条目，" + failed + " 个没匹配上（可重新扫描重试）" + tail + "。";
+                if (listener != null) {
+                    listener.onScrapeProgress(scrapeStatus);
                 }
             }
-            scrapeStatus = failed == 0
-                    ? "刮削完成，共处理 " + total + " 个条目。"
-                    : "刮削完成，" + failed + " 个条目失败（可重新扫描重试）。";
-            if (listener != null) {
-                listener.onScrapeProgress(scrapeStatus);
-            }
         } finally {
-            scraping = false;
+            synchronized (scrapeLock) {
+                scraping = false;
+            }
         }
     }
 
@@ -851,6 +946,31 @@ public final class LocalEngine {
     }
 
     /** Genres / directors / casts for the detail page, fetched right after a match. */
+    /** 详情页「手动匹配」的候选清单：与自动刮削同一套打分，按分数从高到低整份交出去。 */
+    public List<TmdbClient.Result> searchCandidates(String query, String year, String mediaType)
+            throws Exception {
+        return tmdb.searchCandidates(query, year, mediaType, 0, "", 24);
+    }
+
+    /**
+     * 用户在候选清单里挑了一条：写进实体、补齐导演 / 主演，并锁住这条记录，
+     * 之后整库扫描不会再覆盖它。返回之后该用的实体 id（跨类型改绑时 id 会变）。
+     */
+    public long bindToTmdbResult(String mediaType, long entityId, TmdbClient.Result result) {
+        String genres = "";
+        String directors = "";
+        String casts = "";
+        if (result.id > 0) {
+            TmdbClient.Details details = tmdb.details(result.mediaType, result.id);
+            if (details != null) {
+                genres = joinByPipe(details.genres);
+                directors = joinByPipe(details.directors);
+                casts = joinByPipe(details.casts);
+            }
+        }
+        return library.applyManualMatch(mediaType, entityId, result, genres, directors, casts);
+    }
+
     private void applyTitleDetails(String mediaType, long entityId, int tmdbId) {
         if (tmdbId <= 0) {
             return;

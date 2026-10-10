@@ -307,6 +307,7 @@ struct PosterWallView: View {
     @State private var tmdbConnectionMessage = ""
     @State private var isShowingScanErrorAlert = false
     @State private var scanErrorMessage = ""
+    @State private var scanErrorAlertTitle = "扫描刮削失败"
     @State private var isHomeCacheModeActive = false
 
     // 🌟 首页分类（导演/主演文件夹）
@@ -1112,7 +1113,7 @@ struct PosterWallView: View {
             .sheet(isPresented: $isShowingRemoveSourceSheet) {
                 removeSourceSheet()
             }
-            .alert("扫描刮削失败", isPresented: $isShowingScanErrorAlert) {
+            .alert(Text(scanErrorAlertTitle), isPresented: $isShowingScanErrorAlert) {
                 Button("好", role: .cancel) { }
             } message: {
                 Text(scanErrorMessage)
@@ -1148,6 +1149,12 @@ struct PosterWallView: View {
             }
             if autoScanOnStartup && ProcessInfo.processInfo.environment["UITEST_MODE"] != "1" {
                 triggerScanAndScrape()
+            }
+            // 媒体库结构没升级完整时得当场说清楚，否则用户只会看到「扫完了，但什么都没有」。
+            if let databaseError = AppDatabase.shared.setupError {
+                scanErrorAlertTitle = "媒体库没能升级完成"
+                scanErrorMessage = databaseError
+                isShowingScanErrorAlert = true
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .libraryUpdated)) { notification in
@@ -3630,6 +3637,23 @@ struct PosterWallView: View {
         }
     }
 
+    // 扫描必须有回音：单个媒体源失败、或扫描成功但一个文件都没找到时，原先只在左上角
+    // 闪过一行状态文字就收尾，用户看到的效果是「点了按钮什么都没发生」。
+    private func reportScanOutcomes(sourceResults: [MediaSourceScanResult], scannedSources: [MediaSource]) {
+        let failures = sourceResults.filter { !$0.isSuccess }
+        if !failures.isEmpty {
+            scanErrorAlertTitle = failures.count == sourceResults.count ? "扫描刮削失败" : "部分媒体源扫描失败"
+            scanErrorMessage = MediaSourceScanDiagnosticsFormatter.diagnosticsReport(results: sourceResults)
+            isShowingScanErrorAlert = true
+            return
+        }
+        // 库里已经有内容时不再打扰：那种情况下 0 命中只是「没有新增」。
+        guard movies.isEmpty else { return }
+        scanErrorAlertTitle = "没有扫描到视频文件"
+        scanErrorMessage = MediaSourceScanDiagnosticsFormatter.emptyScanReport(sources: scannedSources)
+        isShowingScanErrorAlert = true
+    }
+
     // 统一入口：按首页显示顺序补抓缺失的分集剧照。
     // 剧照下载是后台长任务，这里不阻塞扫描流程；进度通过 ThumbnailManager.progressMessage 展示。
     private func enqueueEpisodeStillBackfill(runID: UUID, movieIDs: [Int64]) async {
@@ -3688,6 +3712,7 @@ struct PosterWallView: View {
                         finishScanRun(runID: runID, reloadData: true)
                         // 没有任何可扫描的启用媒体源时给出可见提示
                         if currentScanRunID == runID {
+                            scanErrorAlertTitle = "扫描刮削失败"
                             scanErrorMessage = "扫描刮削失败：没有已启用且可扫描的媒体源，请先在“添加媒体源”里挂载本地目录或 WebDAV/Plex/Emby/Jellyfin。"
                             isShowingScanErrorAlert = true
                         }
@@ -3768,6 +3793,7 @@ struct PosterWallView: View {
                 await MainActor.run {
                     guard self.currentScanRunID == runID else { return }
                     withAnimation { self.processingMessage = "更新首页..." }
+                    reportScanOutcomes(sourceResults: sourceResults, scannedSources: validSources)
                 }
                 let unidentifiedInsertedCount = await libraryManager.insertDeferredUnidentifiedMedia(from: sourceResults)
                 if unidentifiedInsertedCount > 0 {
@@ -3865,6 +3891,7 @@ struct PosterWallView: View {
                     finishScanRun(runID: runID, reloadData: true)
                     // 失败时弹窗显示错误，避免“点了没反应”却看不到原因
                     if currentScanRunID == runID {
+                        scanErrorAlertTitle = "扫描刮削失败"
                         scanErrorMessage = "扫描刮削失败：\(error.localizedDescription)"
                         isShowingScanErrorAlert = true
                     }

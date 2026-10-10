@@ -6,6 +6,24 @@
 
 早期从套件版拆出的 `OmniPlay-docker` 服务端已停止开发，本文件不再收录；目录保留备查，部署说明见该目录内的 README。
 
+## 软件截图
+
+1. mac版
+
+![](https://img3.pixhost.to/images/6317/781746795_5.jpg)
+![](https://img3.pixhost.to/images/6317/781746868_6.jpg)
+![](https://img3.pixhost.to/images/6317/781746928_7.jpg)
+![](https://img3.pixhost.to/images/6317/781746979_8.jpg)
+
+2. win版
+
+![](https://img3.pixhost.to/images/6317/781748132_1-2.jpg)
+
+![](https://img3.pixhost.to/images/6317/781748188_2-2.jpg)
+
+![](https://img3.pixhost.to/images/6317/781748225_3.jpg)
+
+![](https://img3.pixhost.to/images/6317/781748277_4.jpg)
 ## 版本一览
 
 | 目录 | 平台 | 技术栈 | 版本 | 说明 |

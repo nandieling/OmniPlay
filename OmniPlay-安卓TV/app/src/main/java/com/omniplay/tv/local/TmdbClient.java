@@ -247,10 +247,43 @@ public final class TmdbClient {
      */
     public Result multiSearch(String query, String year, String preferredMediaType, int preferredSeason,
                               String secondaryQuery) throws Exception {
-        if (query == null || query.trim().isEmpty()) {
-            return null;
+        Result best = null;
+        double bestScore = Double.NEGATIVE_INFINITY;
+        for (Result item : fetchSearchResults(query)) {
+            double score = score(item, query, year, preferredMediaType, preferredSeason, secondaryQuery);
+            if (score > bestScore) {
+                bestScore = score;
+                best = item;
+            }
         }
+        return best;
+    }
+
+    /**
+     * 手动匹配用的候选清单：与自动刮削同一套打分，只是不取最高分那一个，而是按分数从高到低
+     * 整份交出去，让用户自己在弹层里挑一条关联。
+     */
+    public List<Result> searchCandidates(String query, String year, String preferredMediaType,
+                                         int preferredSeason, String secondaryQuery, int limit)
+            throws Exception {
+        final String scoredQuery = query == null ? "" : query;
+        final String scoredYear = year;
+        final String scoredType = preferredMediaType;
+        final int scoredSeason = preferredSeason;
+        final String scoredSecondary = secondaryQuery;
+        List<Result> all = fetchSearchResults(query);
+        java.util.Collections.sort(all, (a, b) -> Double.compare(
+                score(b, scoredQuery, scoredYear, scoredType, scoredSeason, scoredSecondary),
+                score(a, scoredQuery, scoredYear, scoredType, scoredSeason, scoredSecondary)));
+        return limit > 0 && all.size() > limit ? new ArrayList<>(all.subList(0, limit)) : all;
+    }
+
+    /** TMDB {@code /search/multi} 的前两页；自动刮削与手动匹配共用这一份取数逻辑。 */
+    private List<Result> fetchSearchResults(String query) throws Exception {
         List<Result> all = new ArrayList<>();
+        if (query == null || query.trim().isEmpty()) {
+            return all;
+        }
         for (int page = 1; page <= 2; page++) {
             String encoded = URLEncoder.encode(query, "UTF-8");
             String url = apiBase() + "/search/multi?query=" + encoded
@@ -294,16 +327,7 @@ public final class TmdbClient {
             }
         }
 
-        Result best = null;
-        double bestScore = Double.NEGATIVE_INFINITY;
-        for (Result item : all) {
-            double score = score(item, query, year, preferredMediaType, preferredSeason, secondaryQuery);
-            if (score > bestScore) {
-                bestScore = score;
-                best = item;
-            }
-        }
-        return best;
+        return all;
     }
 
     private boolean isProxy() {

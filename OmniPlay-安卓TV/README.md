@@ -1,15 +1,15 @@
 # OmniPlay 安卓 TV 版
 
 安卓 TV / 手机客户端，技术栈为 Java + libmpv（NDK 编译 JNI 桥接层）。
-当前版本为独立版（versionName 1.17）：媒体库完全在本机工作，不依赖 OmniPlay Docker 服务端。
+当前版本为独立版（versionName 1.22）：媒体库完全在本机工作，不依赖 OmniPlay Docker 服务端。
 功能对齐 ARM mac 版（`OmniPlay开源-mac-ARM`），交互按遥控器 D-pad 逻辑重做，不照搬 macOS 布局。
 
 ## 功能范围
 
 - 启动器双入口：TV 界面（LEANBACK_LAUNCHER，遥控器 D-pad 焦点导航）与手机界面（触摸海报网格、横屏播放器），由 `LauncherActivity` 自动分发。
 - 独立媒体引擎 `LocalEngine`：本地文件夹、WebDAV、SMB 媒体源，本机 SQLite 库扫描，支持按季/集解析（中英文件名、SxxExx、第 N 集等）。
-- 登录页（TV 全屏，沉浸式）：媒体源类型按 WebDAV、SMB、本地目录排列（默认选中 WebDAV）；进入 App 后自动扫描局域网 `LanDiscovery`（子网枚举 + 每个「主机 × 端口」一条探测任务的 TCP 探测 + OPTIONS `DAV` 头 / PROPFIND 验证 + NetBIOS 主机名查询），边扫边列出 WebDAV / SMB 设备，行高足够显示第二行的地址或已挂载目录；点选设备或手动填写地址后弹出登录框（地址 / 用户名 / 密码），登录成功再弹出“选择媒体目录”浏览器（WebDAV 目录树 / SMB 共享与子目录 / 本地文件夹管理器），选定目录后保存媒体源并自动扫描进入首页。TMDB API Key 与代理网关在首页设置中配置，不在登录页。
-- 已保存的连接（`SavedConnections`）：WebDAV / SMB 只要登录成功一次，账号密码与该次挂载的目录就按「协议 + 主机 + 端口」记进本机偏好（最多 12 台服务器、每台 4 个目录，最新在前）。登录页顶部的“已保存的连接”直接点选即可重连并跳过登录框与目录选择；扫描到的设备若已有记录，同样一键连接，行内第二行显示上次挂载的目录。只有换服务器或换目录时才需要再走登录与选目录；升级前已有的媒体源在首次进入登录页时自动补录。
+- 首屏永远是海报墙（1.21）：`onCreate` 只 `showHome()`，一个媒体源都没有时墙上自带「添加媒体源」入口，不再先甩一整屏设置页（`showSetup` 退化为服务端模式与异常兜底用的错误页）。媒体源的添加、登录、挑目录全在首页「媒体源」抽屉里做：类型按 WebDAV、SMB、本地目录排列，进入 App 后自动扫描局域网 `LanDiscovery`（子网枚举 + 每个「主机 × 端口」一条探测任务的 TCP 探测 + OPTIONS `DAV` 头 / PROPFIND 验证 + NetBIOS 主机名查询），边扫边列出 WebDAV / SMB 设备，行高足够显示第二行的地址或已挂载目录；点选设备或手动填写地址后弹出登录框（地址 / 用户名 / 密码），登录成功再弹出“选择媒体目录”浏览器（WebDAV 目录树 / SMB 共享与子目录 / 本地文件夹管理器），选定目录后保存媒体源、抽屉不关、扫描刮削转后台，海报一张张上墙。TMDB API Key 与代理网关在首页设置中配置。
+- 已保存的连接（`SavedConnections`）：WebDAV / SMB 只要登录成功一次，账号密码与该次挂载的目录就按「协议 + 主机 + 端口」记进本机偏好（最多 12 台服务器、每台 4 个目录，最新在前）。登录框会回填保存过的账号密码，扫描到的设备行第二行显示上次挂载的目录，点进去登录框就是填好的状态。只有换服务器或换目录时才需要重新输入；升级前已有的媒体源在首次进入媒体源抽屉时自动补录。
 - 目录浏览器（WebDAV / SMB / 本地）以 `BrowseEntry`（名称 + 完整 URL + 是否目录）承载每一行，直接进入服务器返回的 URL，不再靠拼接目录名；WebDAV 自身条目按 URL（忽略结尾斜杠与百分号编码）过滤，SMB 走 jcifs 的容器 URL 并隐藏 `.` 开头与 `IPC$` / `ADMIN$` / `PRINT$` 等管理共享，路径行按编码还原显示中文目录名。
 - WebDAV / 局域网探测的传输层是自己写的 `Http`（裸 Socket 的 HTTP/1.1，见 `local/Http.java`）：Android 的 `HttpURLConnection` 只允许 OPTIONS/GET/HEAD/POST/PUT/DELETE/TRACE/PATCH，`setRequestMethod("PROPFIND")` 会直接抛 `ProtocolException: Expected one of [...]`，所以 WebDAV 不能走它；同时 NAS 的自签证书也一并绕过（信任所有证书 + SNI），支持 Content-Length / 分块响应与 1xx 跳过，请求行按百分号编码所以中文目录名可用。播放地址仍交给 mpv 自己抓取，`OfflineCacheManager` 的下载只用到 GET/HEAD，继续走系统实现。
 - 异常可见（`CrashLog`）：`runAsync` 与局域网扫描线程捕获 `Throwable`（不只是 `Exception`），未捕获异常由全局 `UncaughtExceptionHandler` 记进本机偏好，下次进入登录页会在顶部显示「上次异常退出：…」一行后清除；`SmbClient` 把 jcifs 抛出的任何错误（含 linkage error）翻译成带原因的 `IOException`，登录框直接显示原因而不是整个 App 静默退出；登录页还会用 `SmbClient.warmUp()` 预热一次 SMB 库，起不来就在状态行写「SMB 组件不可用：…」。
@@ -19,12 +19,12 @@
 - 覆盖层只有一份实现（`ui/Overlays`）：遮罩、面板、标题、副标题、状态行、底部按钮行、焦点栈、关闭还原都由它负责；设置、媒体源、登录、目录浏览器、手机输入、文本输入六个弹层都走 `overlays.open(...)`，所以它们的外观、层级、返回行为必然一致。
 - TMDB 自动刮削（`TmdbClient`，移植自 mac 版）：多关键词搜索评分、zh-CN 语言合并、限速；设置中填写自己的 API Key / v4 Read Access Token，无法直连 TMDB 时支持代理网关（带路径前缀的 Worker 反代地址，见根 README）。
 - 刮削语言可在设置中切换（简体中文 zh-CN / English en-US），TMDB 接口与图片语言一并跟随。
-- 首页顶部工具栏（D-pad 版）：搜索、排序（标题/添加时间/年份/评分）、升降序、媒体源、设置，一行五颗按钮（1.17 起去掉了「筛选」，类型与观看状态不再参与过滤）。工具栏下方是状态横幅，实时显示扫描与刮削进度与待刮削数量；「继续播放」是横向卡片行，与海报网格共用同一套焦点链。
-- 媒体源管理覆盖层（`openSourcesOverlay`）：逐个媒体源启用/停用、重命名、移除，另提供添加媒体源、重新扫描并刮削、清空媒体库索引；面板为单列焦点链，返回键关闭并恢复首页焦点。
+- 首页顶部工具栏（D-pad 版）：搜索、排序（标题/添加时间/年份/评分）、升降序、扫描刮削、媒体源、设置，一行六颗按钮（1.17 起去掉了「筛选」，类型与观看状态不再参与过滤；1.18 起「扫描刮削」从媒体源面板挪到这里，放在「媒体源」左边）。工具栏下方是状态横幅，只在扫描与刮削期间出现，措辞与 mac 版一致，收尾停 8 秒自动收起；「继续播放」是横向卡片行，与海报网格共用同一套焦点链。
+- 媒体源管理覆盖层（`openSourcesOverlay`）：逐个媒体源启用/停用、重命名、移除；面板内自带「局域网设备（自动扫描）」与 添加 WebDAV / 添加 SMB / 添加本地目录 三颗按钮，扫到的设备点进去是登录、登录后挑目录、挑完才挂载（照 mac 版的添加抽屉）；新挂载的源直接出现在面板里，抽屉不关、不切全屏，扫描刮削在后台跑，海报一张张出现在背后的墙上，工具条那颗按钮同步变成「扫描中」。
 - 类型 / 导演 / 主演：随刮削结果一次请求取回（`append_to_response=credits`），存进 `movie`/`tvShow` 的 `genres`/`directors`/`casts` 列，详情页展示。
 - 分集信息与分集剧照：详情页按季拉取 TMDB 分集详情（标题 / 简介 / 首播日期 / 剧照），剧照季映射沿用 mac 版回退规则（本季节 → 第 1 季 → 集数最多的季），仍无剧照时改查 `/images` 按投票加权择优；单集副标题支持手动覆盖，覆盖值优先于刮削结果。
-- 详情页「编辑」可修改影片 / 剧集标题（保存后锁定名称并重新排队刮削），单集可写自定义分集副标题。
-- 启动自动扫描 + 扫描后自动刮削（均可在设置中关闭），行为与 mac 版一致。
+- 详情页两颗资料按钮：「手动匹配」打开搜索弹层（关键词 / 年份 / 候选清单，点一行关联，1.22 起）、「自定义编辑」手填片名 / 上映日期 / 评分 / 类型 / 导演 / 主演并锁定（对应 mac 版的手动编辑资料）；两者都会锁定这条记录，之后的自动刮削不再覆盖它，与 mac 版 `isLocked` 同一条规则。单集仍可写自定义分集副标题。
+- 启动自动扫描 + 扫描后自动刮削（均可在设置中关闭），行为与 mac 版一致；刮削在后台推进，首页每两秒补一轮海报，回到首页时也会重读一次媒体库，卡片不会停在刮削前那版。
 - 服务端接入模式（`OmniPlayApi`）：输入 OmniPlay Docker 地址 + 账号密码登录，海报墙走 `/api/library/items`，播放直连 `/api/playback/files/{id}/stream`（HTTP Range + 会话 Cookie），与 ARM mac / TV 端播放进度同步。
 - libmpv 直接播放原片文件，带续播；外挂字幕通过 OmniPlay 服务端发现（sidecar），内嵌字幕由 mpv 自动选择。
 - 播放按键：中键/回车切换暂停，左右快退/快进 10 秒，返回键退出播放；手机播放器提供触摸暂停与 ±10 秒按钮。
@@ -153,6 +153,66 @@ WebDAV 地址里显示成 `%E4%B8%AD%E6%96%87` 这种一串符号的目录名，
 
 「选择媒体目录」浏览器的操作行（选择此目录 / 返回上级 / 取消）从焦点顺序末尾提到第一行：影片目录动辄几十个子目录，原先要按几十次 DOWN 才够得着确认键；现在打开就在「选择此目录」上，往下进目录，往回一下回到按钮，进入子目录后焦点也重新落回它（SMB 共享根目录时它是禁用的，退回第一个目录行）。
 
+## 选中态、媒体源抽屉与刮削队列（1.18）
+
+焦点不再画框：`Theme.STROKE_FOCUS` 删掉，所有控件的边框粗细在静止态与聚焦态完全一样，聚焦改成「把控件自己的底色压深一档」（`Theme.darker(color, Theme.FOCUS_DARKEN)`）加原有的轻微放大与一层阴影，播放器里的半透明底板用 1.6 倍力度。海报是图片、压底色看不出来，所以海报框里预画了一张暗色遮罩，聚焦时 `bringToFront()` 显出来、失焦藏掉。类型选择、主题色卡、播放器菜单、详情页版本行上的对号全部撤掉，选中由配色表示（版本行改用「（当前）」文字）。
+
+媒体源管理改成 mac 版那个添加抽屉：源卡片、「局域网设备（自动扫描）」（打开面板就自己扫，点设备直接登录或复用已存账号）、「添加 WebDAV 媒体源」/「添加 SMB 媒体源」两颗按钮。添加不再跳全屏设置页，弹的是居中卡片（显示名称 / 地址 / 用户名 / 密码 + 取消 / 手机输入 / 登录并选择目录），抽屉留在下面；选定目录挂载后只重绘抽屉与背后的海报墙，并在抽屉的状态行上跑扫描刮削。「重新扫描并刮削」变成首页工具条上的「扫描刮削」，与启动自动扫描共用 `startScanAndScrape()`：进度同时写抽屉状态行与首页顶部横幅，刮出一张海报就上墙一张，`scanRunning` 挡住并发。局域网扫描不再绑死在设置页上，宿主由 `lanScanTarget` 记录，`lanTargetAlive()` 判存活，动态插入的设备行按宿主重排方向键顺序。
+
+「待刮削 274 / 275 来回跳、海报一张不出来」是两个问题叠在一起。`WebDavClient.relativePath()` 以前只在 `href` 原文以 `rootUrl` 开头时截相对路径，挂载点带中文时服务器回的是编码过的 `href`、前缀永不匹配，相对路径退化成最后一段编码过的文件名——刮削查询词、剧集分组名、播放地址三处一起坏；现在两边都先 `UrlLabels.displayPath()` 解码再比，入库一律存解码后的相对路径。刮削队列本身：入队改为按 `(mediaType, entityId)` 去重、取批只删取走的那几个 id（以前是 `DELETE FROM scrapeQueue` 整表清空，一批之外的条目直接丢）、计数改用同一套去重口径，`scrapePending()` 加锁单飞并循环取完所有批次（每批 200 条）。老库里的旧 fileId 会在下一次扫描被当缺失文件清掉后重新登记，属于自愈。
+
+未刮削条目的名字照 mac 版重新提取（`LocalMediaNameParser`）：先按发布元信息截断（遇到 `1080p`/`x265`/`web-dl`/`s02e01`/`disc2` 这类词就砍掉后面全部），发布年同样按截断处理；中文片名取最长一组连续中文词并切掉「特典 / 花絮」之后的内容，外文片名按 mac 的噪声词表过滤；`displayTitle()` 依次尝试 中文片名 → 父目录中文名 → 外文片名 → 清洗后的整串，每层都过「这名字还能看吗」的体检（`movie`、`BDMV`、纯数字判不合格，《2012》放行）。电影用整条相对路径，剧集只用剧集目录名推导，保证同一部剧每一集算出同一个条目。海报下那行观看状态只剩图标：`○` 未看、`◐` 未看完、`✓` 已看，文字移到长按提示里。
+
+细节与验证记录见 [2026-10-09-android-tv-focus-fill-source-sheet-scrape-queue.md](2026-10-09-android-tv-focus-fill-source-sheet-scrape-queue.md)。
+
+## 源卡片行高、冷启动与刮削状态（1.19）
+
+抽屉里的源卡片整块抬高：卡片加了 `Widgets.HEIGHT_ROW`（96dp）最小高度、内边距 10dp → 14dp，三颗按钮从硬写的 46dp 提到 `Widgets.HEIGHT_BUTTON`（56dp），「重新扫描」跟到 48dp。以前卡片高度全凭内容撑，WebDAV 源名只有一行时整块压成薄薄一条、按钮贴边上、「移除」经常点空；列表行、局域网设备行、已保存连接行也用同一个 `HEIGHT_ROW` 常量（78dp → 96dp）。WebDAV 源的默认名再补一次解码（`LocalEngine.defaultSourceName()` 也过 `UrlLabels.displayPath()`），首页卡片另加 `displaySourceName()` 兜一层，升级前就存进库里的 `%E7%94%B5%E5%BD%B1` 也能正常显示。
+
+冷启动不再绕道设置页：`checkSession()` 删掉，有媒体源直接 `showHome()`，崩溃摘要改成一条 Toast——独立版没有服务端要问，那次 `authStatus` 往返只是多给网络抖动一次把首屏换掉的机会。左上角横幅换成 mac 版那套措辞与开关：`正在扫描媒体源...` → `扫描中 (2/3)：NAS-WebDAV` → `刮削元数据和海报 (12/248)：沙丘` → `扫描完成：新增 12，移除 3，共发现 248 个文件。`，收尾那条停 8 秒收起，空闲时整行不占位，常驻的「待刮削 N 个条目」取消；TMDB 没配好而队列非空时改说「检测到有待刮削的影视，但 TMDB 暂时无法连接…」。
+
+「卡在待刮削 255、一半卡片名字没更新」是 `insertVideoFile` 的 `INSERT OR IGNORE` 与每轮重复 upsert 撞出来的：文件行还指着第一次入库那个实体，新算出来的实体没有文件、被 `pruneOrphanEntities()` 当空壳裁掉，队列里那批指向已删实体的行也再没人清。新增 `LocalMediaLibrary.bindEntityForFile()`——文件已有实体就复用，只在 `scraped = 0` 时改名；`pruneOrphanEntities()` 连带删掉这些队列行。`scrapePending()` 的排空循环从「不满一批就停」改成最多 100 轮，边扫边刮时扫描中途入队的那批不再被丢下。扫描入队还会跳过已刮到元数据的实体（详情页手动重新匹配走 `force = true`），整库不再每次冷启动重刮一遍。
+
+卡顿这一版砍掉四处：逐条扫描进度改成按源报（255 个文件曾等于 255 次 `main.post` + 255 次横幅重写）、进度回调统一 250ms 节流、整墙重建防抖 2 秒、卡片渲染签名（标题 / 年份 / 观看进度 / 评分没变就跳过 `setText` 与重取海报）。模拟器（`-gpu host`）72 次方向键：135 帧、14 帧超期（10.37%）、`Slow UI thread` 0、没有一帧超过 20ms，PSS 60MB。剩下的地板还是那张不复用的 `GridLayout` 海报墙。
+
+细节与验证记录见 [2026-10-09-android-tv-source-rows-cold-start-status-perf.md](2026-10-09-android-tv-source-rows-cold-start-status-perf.md)。
+
+## 局域网设备行与扫描中移除媒体源（1.20）
+
+局域网那一行点的是「去登录」。`connectDiscoveredDevice()` 以前有个捷径：`SavedConnections` 里存过上次挂载的目录就直接 `mountMediaSource()`，连登录框都不弹，用户想换共享目录根本没有入口。现在统一 `openLoginDialog()`（地址与账号回填）→「登录并选择目录」→ 目录浏览器 → 选定才挂载，与 mac 版 `openDiscoveredDeviceFromManageSheet()` 同一条路径。
+
+行的格式照 mac 的 `discoveredDeviceTitle()`：探到设备名就用设备名，否则 `WebDAV 192.168.0.150`；端口不再掺进标题（同一台机器开 http / https 两个服务时，mac 上是标题相同、地址不同），第二行固定是探到的那条地址（WebDAV 解码后）。左边补了图标位：新增 `ui/KindIcons`，Canvas 画地球与机箱，22dp、取主题强调色，经 `Widgets.listRow(title, detail, leading)` 挂成 compound drawable，行的高度和焦点样式都没动。
+
+移除媒体源后海报还挂在墙上，剩下的那半是时机问题：`scanAll()` 开头就把源列表快照进本轮，扫描进行中移除源，那一轮仍会把它的文件 `registerFile()` 回来，`removeMissingFiles()` 又把它们当「本轮扫到的」保留。现在 `LocalEngine` 维护 `liveSourceIds` 快照（`sources()` 与 `persistSources()` 时刷新），`registerFile()` 进门先问源还在不在；`scanAll()` 收尾再调 `LocalMediaLibrary.purgeUnknownSources(liveSourceIds)`，按 `videoFile.id` 里的源 id 清掉「源已经不在了」的文件行、离线缓存与进度覆盖，再裁空实体，数量并进「扫描完成：移除 N」。`purgeSource()` 与它共用 `deleteFileRows()`。
+
+细节与验证记录见 [2026-10-09-android-tv-lan-row-login-first-scan-purge.md](2026-10-09-android-tv-lan-row-login-first-scan-purge.md)。
+
+## 海报墙首屏、扫描按钮反馈与播放地址编码（1.21）
+
+三个现象，两处代码。
+
+**打开软件先看到全屏媒体源页，挂完源又卡在「正在扫描媒体源」。** 首屏那个分支是 `onCreate` 里 `api.hasServerUrl()` 的判断，而独立版这句话等价于「媒体源列表非空」——库里一个源都没有时就被判成「还没配好」，整屏设置页盖在海报墙前面。挂载路径上另有一处 `showLoading("正在扫描媒体源")`：几百个文件的 WebDAV 能在那一屏停几分钟，一张海报都看不到。现在 `onCreate` 无条件 `showHome()`（崩溃摘要仍是右上角一条 Toast），空库时由 `emptySourceCallToAction()` 在墙上给一颗「添加媒体源」直接开抽屉；`mountMediaSource()` 挂完就 `showHome()` + `startScanAndScrape(null)`，与 mac 版一样立刻回墙、后台扫刮、海报逐张上墙，失败只 Toast 不挡路。抽屉里补了第三颗「添加本地目录」（与另两颗同高），因为全屏设置页退场后那是唯一入口；已保存连接的补录也随抽屉渲染一起跑。
+
+**点右上角「扫描刮削」没反应。** 两个原因叠在一起：一是 `scanRunning` 为真时那句 `return` 静默无声；二是上一轮的收尾文案与这一轮的开场文案一模一样（都是 `正在扫描媒体源...`），横幅的「同一句话不重复显示」机制 `homeStatusHiddenMessage` 把它压住了，看起来就是按了没反应。现在点下去要么 Toast「扫描刮削正在进行中，海报会陆续出现在首页。」并把横幅重新显示，要么立刻把横幅写成 `正在扫描媒体源...`、按钮换成「扫描中」，两轮回调各自复位按钮；`startStartupSync()` 也改调同一个 `startScanAndScrape(null)`，不会再有两轮扫描抢同一批文件。
+
+**点海报抛 `No static method encode(Ljava/lang/String;Ljava/nio/charset/Charset;)`。** `URLEncoder.encode(String, Charset)` 是 Android 13（API 33）才加的重载：编译时用 android-35 的 `android.jar` 过得去，`minSdk` 26 的机器上运行时找不到方法直接 `NoSuchMethodError`。`WebDavClient.streamUrl()` 是唯一一处（全库扫过 `readAllBytes` / `transferTo` / `Path.of` / `Files.*` / `List.of` / `isBlank` / `URLDecoder.decode(..., Charset)` 这些同类陷阱，没有第二处），换成字符串重载 `URLEncoder.encode(value, "UTF-8")`。顺带把 userinfo 里的空格从 `+` 改成 `%20`——`+` 只在 query 里代表空格，路径与账号里不行。
+
+细节与验证记录见 [2026-10-10-android-tv-wall-first-boot-urlencoder-api.md](2026-10-10-android-tv-wall-first-boot-urlencoder-api.md)。
+
+## 刮削结果回海报墙 + 详情页手动匹配 / 自定义编辑（1.22）
+
+**详情页显示已刮削、海报墙还是老样子。** 首页渲染用的是内存里那份 `libraryItems`：刮削在后台跑，进度回调带动的补卡片有两条前提——人在首页、且距上次补卡超过两秒。用户点进详情页看结果时，这两条都不成立，那一轮的补卡结果被直接丢弃；而从详情页返回首页时 `showHome()` 只重绘、不再重读媒体库（为了避免多一次加载态），拿的还是刮削开始前那版名单。详情页每次现查数据库，于是就成了「详情页已经刮好，首页还是占位字母」。改法是把「回首页」当成一次真正的重新同步：`showHome()` 里补一个 `refreshLibraryInPlace()`，从数据库重读一遍再就地补卡片，条目没变的卡片仍由渲染签名跳过重绘。
+
+顺带修掉一个同族问题：`patchLibraryViews()` 以前只比新旧两次读取的**条目数量**，数量相同就当「还是那批条目」。清库重扫、或者手动匹配跨类型改绑（电影 ↔ 剧集会换表重建实体、条目 id 跟着变）时数量正好一样，于是每张卡都按旧 id 找不到新数据，整面墙原地不动。现在比的是 id 集合。
+
+**详情页「手动匹配」。** 照 mac 版 `MovieSearchModalView` 的遥控器版：显示源文件路径、关键词（预填当前片名）、年份，打开即搜一次；候选清单按 mac 那套打分排序（`TmdbClient.searchCandidates()`，与自动刮削同一份取数与打分逻辑，只是不取最高分那一个），每行显示片名 / 年份 / 类型 / 简介，点一行就关联。关联走 `LocalEngine.bindToTmdbResult()`：写进实体、按 `append_to_response=credits` 补齐导演主演（名单已有内容就不覆盖，可能是用户手填的）、并置 `isLocked`；类型不匹配时换一张表重建实体、文件行跟着搬走，详情页整页重开。
+
+**详情页「自定义编辑」。** 对应 mac 版手动编辑资料的「保存修改并锁定」：片名、上映日期、TMDB 评分、类型、导演、主演都能手填，名单用顿号或逗号分隔、入库统一转成竖线；六个字段都能用「手机输入」传。保存即锁定。
+
+锁定终于开始生效：`isLocked` 这一列以前只写不读，现在刮削队列取到已锁定的条目就直接跳过（队列行在取批次时已经删掉，不会卡在「待刮削」上），mac 版同样如此。手动重刮（`requeueScrape()`）会先解锁——用户主动要求重刮，要的就是新结果。
+
+细节与验证记录见 [2026-10-10-android-tv-wall-refresh-manual-match-edit.md](2026-10-10-android-tv-wall-refresh-manual-match-edit.md)。
+
 ## 模拟器与真机验证（1.12）
 
 Apple Silicon 上用官方 Android TV 镜像即可，arm64 镜像原生跑，不用转译：
@@ -278,7 +338,7 @@ GRADLE_USER_HOME="$PWD/.gradle" \
 发布到 Releases / 设备前的建议命名：
 
 ```sh
-cp app/build/outputs/apk/release/app-release.apk dist/OmniPlay-TV-v1.17-arm64.apk
+cp app/build/outputs/apk/release/app-release.apk dist/OmniPlay-TV-v1.22-arm64.apk
 ```
 
 ### 安装到设备
@@ -302,7 +362,7 @@ ANDROID_SDK_ROOT="$PWD/.android-sdk" "$ANDROID_SDK_ROOT/platform-tools/adb" inst
 - WebDAV 登录报 `Expected one of [OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE, PATCH]`：那是 Android `HttpURLConnection.setRequestMethod` 抛的 `ProtocolException`，说明该设备不支持非标准方法；1.10 起 WebDAV 走自带的 `Http` 客户端，不应再出现，如果仍然出现请确认安装的是 v1.10 或更新（设置页第一行有版本号，也可看 APK 文件名）。
 - 点 SMB 后 App 直接退出：v1.10 起不会再静默退出，登录框或登录页会给出原因（例如 `NoClassDefFoundError：jcifs.xxx` 或 `SmbAuthException：Login failure`）。若显示的是「上次异常退出：…」，那行文字就是崩溃原因，按它排查即可。
 - WebDAV 目录名显示成 `%E4%B8%AD%E6%96%87…`：1.16 起列表、登录框、已保存连接都会把路径部分解回中文名。若仍是编码串，说明那串不是百分号编码（服务器返回的就是字面量），把地址原文发回来即可判断。
-- 移除媒体源后首页还剩一堆卡片：1.17 起 `removeSource` 会连带清该源的文件、实体、剧集、刮削队列与缓存记录。若装机版本更旧，用媒体源面板的「清空媒体库索引」也能清干净。注意别在首次扫描进行中移除媒体源——那一轮扫描仍持有该源，可能把文件重新登记回去，等扫描结束再移除即可。
+- 移除媒体源后首页还剩一堆卡片：1.17 起 `removeSource` 会连带清该源的文件、实体、剧集、刮削队列与缓存记录；1.20 补上「移除发生在扫描进行中」这一种——那一轮扫描还会把文件登记回来，现在 `registerFile()` 会先看源在不在，扫描收尾再按活着的源清一遍（`purgeUnknownSources`）。若装机版本更旧，用媒体源面板的「清空媒体库索引」也能清干净。
 - 同一台服务器换过密码后连不上：登录框会回填保存过的账号密码，改完密码点“登录”即会覆盖旧记录，已挂载目录保留。
 
 ### 遥控器操作上遇到的问题先看这里
@@ -311,7 +371,15 @@ ANDROID_SDK_ROOT="$PWD/.android-sdk" "$ANDROID_SDK_ROOT/platform-tools/adb" inst
 - 方向键往下滑却回弹：1.14 起面板行序由 `FocusGrid.rowsFrom()` 按布局推导、滚动跟随用布局位移归一化，两者都不再依赖手工行序；如果还能复现，请记录「在哪个面板、焦点在哪个控件、按了几次 DOWN」，那说明该面板有控件没被 `rowsFrom` 收到（只有 `isFocusable=false` 或 `View.GONE` 的控件会被跳过）。
 - 原盘 / 蓝光目录扫出来一堆条目，或者反过来一个条目都没有：先看媒体源面板的扫描报告里有没有「蓝光非正片分卷跳过 N」。没有这一句说明 walker 没走进 `BDMV/STREAM`（多半是路径里又出现了被当成垃圾剪掉的目录名）；有这一句但数字不对，就是体积没读到（服务器不给 `getcontentlength`、SMB 拒绝 `entry.length()`），此时按分卷号最小的那条兜底。
 - 弹层往下走再往上走滑不回顶部：1.17 起滚动跟随只按布局坐标计算中线落点，首行归零、末行到底。若还能复现，请记录「在哪个面板、焦点在哪个控件、按了几次 UP」，那说明该面板有控件没被 `rowsFrom()` 收到。
-- 遥控器走动时画面明显掉帧：先说清「在哪个界面、往哪个方向、连续按还是单按」，并附上海报数量（首页计数文案里有）。1.17 已把每次焦点变化新建背景改成换引用，剩下的地板主要来自不复用的海报网格。
+- WebDAV 源挂载成功、TMDB 也验通了，首页却一直是「待刮削 N 个条目」且数字在两个值之间来回跳：1.18 起修好。此前挂载路径带中文时相对路径会被算成编码过的文件名，查询词是垃圾；队列又按行入队、整表清空，计数与出队口径不一致。先升级到 v1.18，再点一次「扫描刮削」，旧条目会当缺失文件清掉后重新登记。
+- 左上角一直挂着「待刮削 255 个条目」，且一部分卡片名字还是整串文件名：1.19 起修好。文件行绑着的实体被当空壳裁掉，队列行了跟着变孤儿，名字就停在第一次入库那轮。升级到 v1.19 后点一次「扫描刮削」即可自愈，不必清库。
+- 从桌面点开应用先看到一屏错误日志：1.19 起冷启动不再做会话检查，崩溃摘要只是右上角一条 Toast。
+- 打开软件先进一屏媒体源页，或者一直停在「正在扫描媒体源」：1.21 起修好。前者是空库被当成「还没配好」，后者是挂载时那层全屏 loading。升级到 v1.21 后首屏一定是海报墙，空库时墙上自带「添加媒体源」，扫描刮削全在后台跑。
+- 点「扫描刮削」像没反应：1.21 起要么按钮变「扫描中」、横幅重新出现，要么弹一句「扫描刮削正在进行中」。若两者都没有，说明那一轮扫描已经卡在 `scanRunning` 上，把当时左上角横幅的文字发回来。
+- 详情页写着已刮削、首页卡片却还是占位字母和旧片名：1.22 起修好。首页用的是内存里那份媒体库名单，刮削跑完后没人回头重读它；从详情页、播放器返回首页时现在都会重读一次并就地补卡片。装机版本更旧的话，手动点一次「扫描刮削」也能刷出来（那一轮结束会整墙重建）。
+- 点海报就闪退，日志写 `No static method encode(Ljava/lang/String;Ljava/nio/charset/Charset;)… in class java.net.URLEncoder`：1.21 起修好。`URLEncoder.encode(String, Charset)` 要 Android 13（API 33）才有，`minSdk` 26 装机跑的是 `WebDavClient.streamUrl()` 那条老路；v1.21 换成字符串重载。同类坑（`readAllBytes`、`transferTo`、`Path.of`、`URLDecoder.decode(..., Charset)`）全库已扫过一遍。
+- 未刮削的卡片名字是一整串 `The.Movie.2024.1080p.BluRay.x265-GRP`：1.18 起按 mac 版规则先按发布元信息截断再入库；已经入库的旧条目名字不变，用「清空媒体库索引」后重扫即可换成短名。
+- 遥控器走动时画面明显掉帧：先说清「在哪个界面、往哪个方向、连续按还是单按」，并附上海报数量（首页计数文案里有）。1.17 把每次焦点变化新建背景改成换引用，1.19 又砍掉逐条扫描进度、整墙重建与重复刮削三处（模拟器实测没有 20ms 以上的帧）；剩下的地板主要来自不复用的海报网格，`RecyclerView` 化是下一步。
 - BACK 关掉弹层后原按钮点不动：每个 `Overlay` 都带 `onClose` 回调清宿主字段，若再出现请确认那个弹层是否漏了 `onClose`，或宿主字段被别处提前赋值过。
 - 设置页改完一个开关后焦点跑掉：应停在被改的那一项上（按标签找回），若仍跳回顶部说明该行文字随状态变了，报上来补匹配规则。
 - 弹层套弹层（登录框里点“手机输入”，或设置里点“用手机输入 TMDB 配置”）关闭后应回到打开它的那个按钮；回到顶部或回到屏幕外都是回归。

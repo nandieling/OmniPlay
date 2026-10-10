@@ -1,6 +1,19 @@
 import Foundation
 import GRDB
 
+/// 数据库自身出问题（而不是扫描或网络出问题）时给用户的可读错误。
+enum AppDatabaseError: LocalizedError {
+    case schemaIncomplete([String])
+
+    var errorDescription: String? {
+        switch self {
+        case .schemaIncomplete(let missing):
+            return "媒体库结构不完整，缺少：" + missing.joined(separator: "、")
+                + "。请完全退出 OmniPlay 后重新打开，让程序补一次数据库结构。"
+        }
+    }
+}
+
 class AppDatabase {
     static let shared = AppDatabase()
     var dbQueue: DatabaseQueue!
@@ -8,6 +21,9 @@ class AppDatabase {
     var databaseURL: URL?
     /// 当前数据库所在的 iCloud 容器目录（使用本地路径时为 nil）
     var icloudContainerURL: URL?
+    /// 启动时发现的数据库问题（nil 表示结构完整）。界面靠它把「数据库没升级完」讲清楚，
+    /// 以前这里只在控制台打一行日志，用户看到的只是海报墙莫名其妙空着。
+    private(set) var setupError: String?
     
     private init() {}
     
@@ -151,6 +167,139 @@ class AppDatabase {
             }
         }
 
-        try migrator.migrate(dbQueue)
+        // v11: 不看迁移编号，只按实际结构补齐缺口（原因见 healSchemaGaps 上方的说明）。
+        migrator.registerMigration("v11") { db in
+            _ = try AppDatabase.healSchemaGaps(db)
+        }
+
+        var migrationError: Error?
+        do {
+            try migrator.migrate(dbQueue)
+        } catch {
+            migrationError = error
+            print("❌ 媒体库迁移失败：\(error)")
+        }
+
+        // 迁移半途失败也照样补一次：结构缺口正是扫描入库那句
+        // "FOREIGN KEY constraint failed" 的来源，别让它躲在控制台里。
+        _ = try? dbQueue.write { try AppDatabase.healSchemaGaps($0) }
+
+        let missing = (try? dbQueue.read { try AppDatabase.missingSchemaObjects($0) }) ?? []
+        var problems: [String] = []
+        if !missing.isEmpty {
+            problems.append("媒体库缺少：" + missing.joined(separator: "、"))
+        }
+        if let migrationError {
+            problems.append("媒体库升级未完成：\(migrationError.localizedDescription)")
+        }
+        setupError = problems.isEmpty ? nil : problems.joined(separator: "；")
+
+        // 结构不全就别装成正常启动：让调用方拿到一条读得懂的错误，
+        // 而不是等扫描结束时才吐一句看不懂的外键失败。
+        if !missing.isEmpty {
+            throw AppDatabaseError.schemaIncomplete(missing)
+        }
+    }
+}
+
+// MARK: - 结构自愈
+
+extension AppDatabase {
+    private struct ExpectedColumn: Sendable {
+        let table: String
+        let column: String
+        let ddl: String
+    }
+
+    private struct ExpectedTable: Sendable {
+        let name: String
+        let ddl: String
+    }
+
+    /// 迁移编号在不同版本之间被重排过：x64 版 1.7 及更早的阶梯是 v3=customSubtitle、
+    /// v4=isEnabled/disabledAt、v5=lastPlayedAt、v6=fileSize、v7=doubanMetadata、
+    /// v8=addressConfig；1.8 把同一批改动挪到了 v3…v7，并把 v8 换成了
+    /// movie.directors/casts + categoryFolder。GRDB 只认「这个编号是否已记录」，
+    /// 于是老 x64 库升级时新 v8 被当成已应用直接跳过：movie 少了 directors/casts、
+    /// categoryFolder 表不存在。扫描时占位影片写不进去，紧随其后的 videoFile 插入只会报
+    /// "SQLite error 19: FOREIGN KEY constraint failed"，整批入库回滚，海报墙一片空白。
+    /// 下面这份清单按代码真正依赖的结构列出的缺口，缺什么补什么，与编号无关。
+    nonisolated private static let expectedTables: [ExpectedTable] = [
+        ExpectedTable(name: "doubanMetadata", ddl: """
+            CREATE TABLE IF NOT EXISTS "doubanMetadata"("movieId" INTEGER PRIMARY KEY REFERENCES "movie"("id") ON DELETE CASCADE, \
+            "subjectId" TEXT NOT NULL, "subjectURL" TEXT NOT NULL, "title" TEXT NOT NULL, "originalTitle" TEXT, "year" TEXT, \
+            "rating" DOUBLE, "ratingCount" INTEGER, "summary" TEXT, "genres" TEXT, "countries" TEXT, "directors" TEXT, \
+            "casts" TEXT, "posterURL" TEXT, "fetchedAt" DOUBLE NOT NULL, "nextRefreshAt" DOUBLE NOT NULL, "lastError" TEXT)
+            """),
+        ExpectedTable(name: "categoryFolder", ddl: """
+            CREATE TABLE IF NOT EXISTS "categoryFolder"("id" TEXT PRIMARY KEY, "kind" TEXT NOT NULL, "name" TEXT NOT NULL, \
+            "posterPath" TEXT, "updatedAt" DOUBLE)
+            """),
+        ExpectedTable(name: "personProfile", ddl: """
+            CREATE TABLE IF NOT EXISTS "personProfile"("id" TEXT PRIMARY KEY, "name" TEXT NOT NULL, "kind" TEXT NOT NULL, \
+            "tmdbPersonId" INTEGER, "photoPath" TEXT, "filmographyJson" TEXT, "updatedAt" DOUBLE)
+            """),
+        ExpectedTable(name: "chineseNameCache", ddl: """
+            CREATE TABLE IF NOT EXISTS "chineseNameCache"("key" TEXT PRIMARY KEY, "value" TEXT, "updatedAt" DOUBLE NOT NULL)
+            """)
+    ]
+
+    nonisolated private static let expectedColumns: [ExpectedColumn] = [
+        ExpectedColumn(table: "videoFile", column: "duration", ddl: "DOUBLE NOT NULL DEFAULT 0.0"),
+        ExpectedColumn(table: "videoFile", column: "lastPlayedAt", ddl: "DOUBLE"),
+        ExpectedColumn(table: "videoFile", column: "fileSize", ddl: "INTEGER NOT NULL DEFAULT 0"),
+        ExpectedColumn(table: "mediaSource", column: "isEnabled", ddl: "BOOLEAN NOT NULL DEFAULT 1"),
+        ExpectedColumn(table: "mediaSource", column: "disabledAt", ddl: "DOUBLE"),
+        ExpectedColumn(table: "mediaSource", column: "addressConfig", ddl: "TEXT"),
+        ExpectedColumn(table: "movie", column: "directors", ddl: "TEXT"),
+        ExpectedColumn(table: "movie", column: "casts", ddl: "TEXT")
+    ]
+
+    nonisolated private static let coreTables = ["mediaSource", "movie", "tvShow", "videoFile"]
+
+    /// 缺表建表、缺列加列，返回补齐了哪些对象；空数组表示这个库本来就是完整的。
+    @discardableResult
+    nonisolated static func healSchemaGaps(_ db: Database) throws -> [String] {
+        var healed: [String] = []
+        for table in expectedTables {
+            if try db.tableExists(table.name) { continue }
+            try db.execute(sql: table.ddl)
+            healed.append("表 " + table.name)
+        }
+        for column in expectedColumns {
+            guard try db.tableExists(column.table) else { continue }
+            let existing = try db.columns(in: column.table).map { $0.name.lowercased() }
+            if existing.contains(column.column.lowercased()) { continue }
+            try db.execute(
+                sql: "ALTER TABLE \"\(column.table)\" ADD COLUMN \"\(column.column)\" \(column.ddl)")
+            healed.append("列 \(column.table).\(column.column)")
+        }
+        if !healed.isEmpty {
+            print("🧬 媒体库结构已自动补齐：\(healed.joined(separator: "、"))")
+        }
+        return healed
+    }
+
+    /// 自愈之后仍然缺的东西——这种库没法正常使用，必须明确告诉用户。
+    nonisolated static func missingSchemaObjects(_ db: Database) throws -> [String] {
+        var missing: [String] = []
+        for name in coreTables {
+            if try !db.tableExists(name) {
+                missing.append(name)
+            }
+        }
+        for table in expectedTables {
+            if try !db.tableExists(table.name) {
+                missing.append(table.name)
+            }
+        }
+        for column in expectedColumns {
+            guard try db.tableExists(column.table) else { continue }
+            let existing = try db.columns(in: column.table).map { $0.name.lowercased() }
+            if !existing.contains(column.column.lowercased()) {
+                missing.append("\(column.table).\(column.column)")
+            }
+        }
+        return missing
     }
 }

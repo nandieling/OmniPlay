@@ -180,20 +180,27 @@ public final class WebDavClient {
         return "";
     }
 
+    /**
+     * Relative path of a PROPFIND href, always percent-decoded and always keeping the folder
+     * structure.
+     * <p>
+     * 服务器只编码它自己回的路径：挂载点里带中文时，用户填的 {@code rootUrl} 是原文、href 是
+     * 编码过的，直接比原文会让前缀匹配失败，相对路径退化成最后一段编码过的文件名。跟着坏掉的就
+     * 有三部：刮削查询词变成一串百分号、剧集分组名取不到目录名、播放地址被二次编码成 404。
+     * 两边都先解一层再比，两条路径就都对上了。
+     */
     private String relativePath(String href) {
-        if (href.startsWith(rootUrl)) {
-            String relative = href.substring(rootUrl.length());
-            if (relative.startsWith("/")) {
+        String decodedHref = UrlLabels.displayPath(href);
+        String decodedRoot = UrlLabels.displayPath(rootUrl);
+        if (decodedHref.startsWith(decodedRoot)) {
+            String relative = decodedHref.substring(decodedRoot.length());
+            while (relative.startsWith("/")) {
                 relative = relative.substring(1);
             }
-            try {
-                return java.net.URLDecoder.decode(relative, "UTF-8");
-            } catch (IOException ignored) {
-                return relative;
-            }
+            return relative;
         }
-        int slash = href.lastIndexOf('/');
-        return slash >= 0 ? href.substring(slash + 1) : href;
+        int slash = decodedHref.lastIndexOf('/');
+        return slash >= 0 ? decodedHref.substring(slash + 1) : decodedHref;
     }
 
     /** Stream URL with embedded credentials (for mpv to fetch directly). */
@@ -202,8 +209,7 @@ public final class WebDavClient {
         String path = "";
         for (String segment : decoded.split("/")) {
             if (!segment.isEmpty()) {
-                path += "/" + URLEncoder.encode(segment, java.nio.charset.StandardCharsets.UTF_8)
-                        .replace("+", "%20");
+                path += "/" + urlEncode(segment).replace("+", "%20");
             }
         }
         if (credential.username.isEmpty() && credential.password.isEmpty()) {
@@ -211,11 +217,23 @@ public final class WebDavClient {
         }
         return rootUrl
                 .replaceFirst("^(https?://)", "$1"
-                        + URLEncoder.encode(credential.username, StandardCharsets.UTF_8)
+                        + urlEncode(credential.username).replace("+", "%20")
                         + ":"
-                        + URLEncoder.encode(credential.password, StandardCharsets.UTF_8)
+                        + urlEncode(credential.password).replace("+", "%20")
                         + "@")
                 + path;
+    }
+
+    /**
+     * {@code URLEncoder.encode(String, Charset)} 是 Android 13（API 33）才加的重载，
+     * 本应用 minSdk 26，在旧机器上一点海报就抛 {@code NoSuchMethodError}；只能用字符串重载。
+     */
+    private static String urlEncode(String value) {
+        try {
+            return URLEncoder.encode(value, "UTF-8");
+        } catch (java.io.UnsupportedEncodingException impossible) {
+            return value;
+        }
     }
 
     /**

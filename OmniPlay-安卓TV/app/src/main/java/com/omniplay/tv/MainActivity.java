@@ -64,6 +64,7 @@ import com.omniplay.tv.local.CrashLog;
 import com.omniplay.tv.local.SmbClient;
 import com.omniplay.tv.local.SmbStreamServer;
 import com.omniplay.tv.local.TvSettings;
+import com.omniplay.tv.local.TmdbClient;
 import com.omniplay.tv.local.UrlLabels;
 import com.omniplay.tv.local.WebDavClient;
 import com.omniplay.tv.player.MpvVideoView;
@@ -72,6 +73,7 @@ import com.omniplay.tv.subtitle.PgsSubtitleParser;
 import com.omniplay.tv.subtitle.PgsSubtitleView;
 import com.omniplay.tv.ui.ImageLoader;
 import com.omniplay.tv.ui.FocusGrid;
+import com.omniplay.tv.ui.KindIcons;
 import com.omniplay.tv.ui.Overlays;
 import com.omniplay.tv.ui.Theme;
 import com.omniplay.tv.ui.Widgets;
@@ -228,6 +230,13 @@ public final class MainActivity extends Activity {
     private long playerLoadStartedAtMs;
     private double playerSeekPreviewPosition = -1;
     private Runnable pendingSearchRender;
+    /** 整面海报墙的重建请求：刮削期间条目数一直变，合并成最多两秒一次。 */
+    private Runnable pendingWallRebuild;
+    /** 首页横幅当前显示的句子，以及已经被自动收起的那句。 */
+    private String homeStatusText = "";
+    private String homeStatusHiddenMessage = "";
+    /** 引擎进度回调的节流时间戳。 */
+    private volatile long lastProgressPaintAt;
     private int homeScrollY;
     // Persistent home chrome: rebuilt once, so sort / search toggles never tear the page down.
     private LinearLayout homeControls;
@@ -235,6 +244,7 @@ public final class MainActivity extends Activity {
     private Button homeSearchToggle;
     private Button homeSortToggle;
     private Button homeDirectionToggle;
+    private Button homeScanToggle;
     private Button homeSourcesToggle;
     private Button homeSettingsToggle;
     private EditText homeSearchInput;
@@ -274,7 +284,17 @@ public final class MainActivity extends Activity {
     private final Object lanLock = new Object();
     private boolean lanDiscovering;
     private final List<LanDiscovery.LanDevice> lanDevices = new ArrayList<>();
+    /** 海报下的观看状态：○ 未看、◐ 未看完、✓ 已看，只有图形没有文字。 */
+    private static final String WATCHED_GLYPH_NONE = "\u25CB";
+    private static final String WATCHED_GLYPH_PART = "\u25D0";
+    private static final String WATCHED_GLYPH_DONE = "\u2713";
     private int lanScanToken = 0;
+    /** 扫描结果往哪儿摆：首屏设置页，还是媒体源弹窗。 */
+    private static final int LAN_SETUP = 0;
+    private static final int LAN_SOURCES = 1;
+    private int lanScanTarget = LAN_SETUP;
+    /** 扫描 + 刮削同一时间只跑一轮，免得两拨进度互相盖掉。 */
+    private boolean scanRunning;
     private boolean isNetworkLoginOpen;
     private boolean isFolderBrowserOpen;
     private Overlays.Overlay loginOverlay;
@@ -287,6 +307,8 @@ public final class MainActivity extends Activity {
     private String browserRoot;
     private String browserCurrent;
     private String browserUser = "";
+    /** 这次挂载要用的显示名称：登录小窗里填的（或设备名）。 */
+    private String browserLabel = "";
     private String browserPass = "";
     private final List<BrowseEntry> browserItems = new ArrayList<>();
     private final List<Button> browserItemButtons = new ArrayList<>();
@@ -296,7 +318,7 @@ public final class MainActivity extends Activity {
     private LinearLayout browserListContainer;
     private TextView browserPathText, browserMessage;
     private Button browserBackButton, browserMountButton, browserCancelButton;
-    private EditText loginAddress, loginUser, loginPass;
+    private EditText loginName, loginAddress, loginUser, loginPass;
     private TextView loginStatus;
     private Button loginButton, loginCancelButton;
     // One task per host+port during the LAN scan, so the pool needs to be wide.
@@ -359,10 +381,12 @@ public final class MainActivity extends Activity {
         applyAppBackground();
         setContentView(root);
 
-        if (api.hasServerUrl()) {
-            checkSession();
-        } else {
-            showSetup(null);
+        // 独立版没有服务端要问，也没有第二个「首次运行页」：海报墙永远是首屏。
+        // 一个媒体源都没有时，墙上自带「添加媒体源」的入口（以前这里会甩一整屏设置页）。
+        showHome();
+        String crash = CrashLog.take(this);
+        if (!crash.isEmpty()) {
+            showToast("上次异常退出：" + crash.replace('\n', ' ').trim());
         }
     }
 
@@ -406,20 +430,6 @@ public final class MainActivity extends Activity {
             closePlayer();
         }
         super.onStop();
-    }
-
-    private void checkSession() {
-        showLoading("正在打开媒体库");
-        runAsync(
-                () -> api.authStatus(),
-                status -> {
-                    if (status.isAuthenticated) {
-                        showHome();
-                    } else {
-                        showSetup(status.requiresSetup ? "请先在网页端完成管理员初始化。" : null);
-                    }
-                },
-                error -> showSetup(error.getMessage()));
     }
 
     private void showSetup(String message) {
@@ -528,7 +538,7 @@ public final class MainActivity extends Activity {
                 new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         setupRescanLanBtn = compactButton("重新扫描局域网");
         setupRescanLanBtn.setOnClickListener(view -> startLanScan());
-        lanHeader.addView(setupRescanLanBtn, new LinearLayout.LayoutParams(sdp(150), sdp(42)));
+        lanHeader.addView(setupRescanLanBtn, new LinearLayout.LayoutParams(sdp(150), sdp(Widgets.HEIGHT_COMPACT)));
         lanStatus = text("正在扫描局域网...", 12, Typeface.NORMAL, COLOR_SUBTLE);
         page.addView(lanStatus, margin(matchWidth(), 0, sdp(4), 0, sdp(8)));
         lanListContainer = new LinearLayout(this);
@@ -656,11 +666,12 @@ public final class MainActivity extends Activity {
             animateFocusScale(focusedView, hasFocus);
             boolean selected = kind.equals(selectedKind[0]);
             button.setTextColor(hasFocus ? COLOR_FOCUS : (selected ? COLOR_TEXT : COLOR_MUTED));
+            int restFill = selected ? COLOR_FOCUS_SOFT : COLOR_SURFACE;
             focusedView.setBackground(rounded(
-                    hasFocus ? COLOR_FOCUS_SOFT : (selected ? COLOR_FOCUS_SOFT : COLOR_SURFACE),
+                    hasFocus ? Theme.darker(restFill, Theme.FOCUS_DARKEN) : restFill,
                     hasFocus || selected ? COLOR_FOCUS : COLOR_BORDER,
-                    hasFocus || selected ? dp(2) : dp(1), dp(10)));
-            focusedView.setElevation(0);
+                    dp(1), dp(10)));
+            focusedView.setElevation(hasFocus ? dp(6) : 0);
         });
         button.setOnClickListener(view -> {
             selectedKind[0] = kind;
@@ -697,13 +708,14 @@ public final class MainActivity extends Activity {
         return "本地目录：点击“选择本地目录”，在文件夹管理器中浏览并选择影片目录。";
     }
 
+    /** 选中的类型不加对号：整颗按钮染上主题色，比旁边几颗深一档就是「当前这一颗」。 */
     private void applyKindToggleStyle(Button button, String label, boolean selected) {
-        button.setText((selected ? "✓ " : "") + label);
+        button.setText(label);
         button.setTextColor(selected ? COLOR_TEXT : COLOR_MUTED);
         button.setBackground(rounded(
                 selected ? COLOR_FOCUS_SOFT : COLOR_SURFACE,
                 selected ? COLOR_FOCUS : COLOR_BORDER,
-                selected ? dp(2) : dp(1), dp(10)));
+                dp(1), dp(10)));
     }
 
 
@@ -773,6 +785,7 @@ public final class MainActivity extends Activity {
     }
 
     private void startLanScan() {
+        lanScanTarget = sourcesOverlay != null ? LAN_SOURCES : LAN_SETUP;
         synchronized (lanLock) {
             lanDiscovering = true;
             lanDevices.clear();
@@ -786,11 +799,12 @@ public final class MainActivity extends Activity {
         }
         LanDiscovery.cancel(lanScanToken);
         final int[] tokenRef = new int[1];
+        final int target = lanScanTarget;
         LanDiscovery.Listener listener = new LanDiscovery.Listener() {
             @Override
             public void onDevice(LanDiscovery.LanDevice device) {
                 main.post(() -> {
-                    if (screen != Screen.SETUP || lanScanToken != tokenRef[0]) {
+                    if (lanScanToken != tokenRef[0] || !lanTargetAlive(target)) {
                         return;
                     }
                     addLanDeviceButton(device);
@@ -800,16 +814,17 @@ public final class MainActivity extends Activity {
             @Override
             public void onDone(List<LanDiscovery.LanDevice> devices) {
                 main.post(() -> {
-                    if (screen != Screen.SETUP || lanScanToken != tokenRef[0]) {
+                    // 计数必须归零，否则宿主换掉之后下一次扫描再也发不起来。
+                    lanDiscovering = false;
+                    if (lanScanToken != tokenRef[0] || !lanTargetAlive(target)) {
                         return;
                     }
-                    lanDiscovering = false;
                     if (lanStatus != null) {
                         lanStatus.setText(devices.isEmpty()
                                 ? "未扫描到 WebDAV / SMB 设备，可手动填写地址后登录。"
                                 : "扫描完成，发现 " + devices.size() + " 个设备，点选后登录。");
                     }
-                    rebuildSetupDpadGrid();
+                    refreshLanFocusRows();
                 });
             }
         };
@@ -817,20 +832,65 @@ public final class MainActivity extends Activity {
         lanScanToken = tokenRef[0];
     }
 
+    /** 扫描结果要有地方放：要么设置页还在，要么媒体源弹窗还开着。 */
+    private boolean lanTargetAlive(int target) {
+        if (target == LAN_SOURCES) {
+            return sourcesOverlay != null && lanListContainer != null
+                    && lanListContainer.isAttachedToWindow();
+        }
+        return screen == Screen.SETUP;
+    }
+
+    /** 媒体源弹窗接管局域网列表：先接上已在飞的扫描结果，没有就现扫一次。 */
+    private void attachLanListContainer(LinearLayout container) {
+        lanListContainer = container;
+        boolean inFlight;
+        synchronized (lanLock) {
+            inFlight = lanDiscovering && lanTargetAlive(lanScanTarget);
+            if (inFlight) {
+                for (LanDiscovery.LanDevice device : lanDevices) {
+                    container.addView(lanDeviceButton(device), listItemParams());
+                }
+            }
+        }
+        if (inFlight) {
+            if (lanStatus != null) {
+                lanStatus.setText("正在扫描局域网中的 WebDAV / SMB 设备...");
+            }
+            return;
+        }
+        startLanScan();
+    }
+
+    /** 新扫到的设备追加到列表尾部，并重排遥控器方向键顺序。 */
     private void addLanDeviceButton(LanDiscovery.LanDevice device) {
         synchronized (lanLock) {
             lanDevices.add(device);
         }
-        SavedConnections.Entry saved = savedConnections == null
-                ? null : savedConnections.find(device.kind, device.url);
-        String deviceDetail = saved == null
-                ? (saved == null && "webdav".equals(device.kind)
-                        ? UrlLabels.displayPath(device.url) : device.url)
-                : (saved.primaryPath().isEmpty() ? saved.title() : saved.detail());
-        Button button = listRowButton(device.label(), deviceDetail);
-        button.setOnClickListener(view -> connectDiscoveredDevice(device));
+        if (lanListContainer == null) {
+            return;
+        }
+        Button button = lanDeviceButton(device);
         lanListContainer.addView(button, listItemParams());
         lanDeviceButtons.add(button);
+        refreshLanFocusRows();
+    }
+
+    private Button lanDeviceButton(LanDiscovery.LanDevice device) {
+        // 第二行永远是探到的那条地址（WebDAV 存的是编码过的 URL），整行照 mac 版
+        // 「图标 + 设备名 + 地址」的读法；保存过的账号只在点开登录框时回填，不占列表位置。
+        Button button = widgets.listRow(device.label(), UrlLabels.displayPath(device.url),
+                KindIcons.of(device.kind, sdp(22), COLOR_ACCENT, dp(1.5f)));
+        button.setOnClickListener(view -> connectDiscoveredDevice(device));
+        return button;
+    }
+
+    /** 局域网行是动态插进来的，插完要把当前面板的方向键顺序重新声明一次。 */
+    private void refreshLanFocusRows() {
+        if (lanScanTarget == LAN_SOURCES && sourcesOverlay != null) {
+            sourcesOverlay.redeclare(FocusGrid.rowsFrom(sourcesOverlay.body));
+            return;
+        }
         rebuildSetupDpadGrid();
     }
 
@@ -895,15 +955,13 @@ public final class MainActivity extends Activity {
         openLoginDialog(entry.kind, entry.hostKey, entry.username, entry.password, entry.label);
     }
 
-    /** LAN scan row: reuse stored credentials, and skip the picker when the folder is known. */
+    /**
+     * 局域网那一行点的是「去登录」，不是直接挂载：mac 版同样是先开登录表单（回填已存账号），
+     * 登录通过后再挑要挂载的目录。以前扫到的设备一按就挂上上次那个目录，用户根本没机会换目录。
+     */
     private void connectDiscoveredDevice(LanDiscovery.LanDevice device) {
         SavedConnections.Entry saved = savedConnections == null
                 ? null : savedConnections.find(device.kind, device.url);
-        if (saved != null && !saved.primaryPath().isEmpty()) {
-            mountMediaSource(device.kind, saved.primaryPath(),
-                    saved.username, saved.password, device.label());
-            return;
-        }
         openLoginDialog(device.kind, device.url,
                 saved == null ? "" : saved.username,
                 saved == null ? "" : saved.password,
@@ -935,7 +993,7 @@ public final class MainActivity extends Activity {
         options.subtitle = remembered == null
                 ? prefix + "输入账号密码后登录，登录成功后再选择要挂载的目录。"
                 : prefix + "已保存这台服务器的账号，直接点“登录”即可；需要换账号时再修改。";
-        options.widthDp = 560;
+        options.widthDp = 620;
         options.restoreFocus = getCurrentFocus();
         Overlays.Overlay overlay = overlays.open(options);
         overlay.onClose = () -> {
@@ -947,6 +1005,8 @@ public final class MainActivity extends Activity {
         loginOverlay = overlay;
         LinearLayout panel = loginOverlay.body;
 
+        loginName = input("显示名称（可选），例如「NAS 电影」", deviceTitle == null ? "" : deviceTitle);
+        panel.addView(loginName, margin(matchWidth(), 0, 0, 0, sdp(4)));
         loginAddress = input("smb".equals(kind)
                 ? "SMB 地址，例如 smb://192.168.0.10"
                 : "WebDAV 地址，例如 https://192.168.0.10:5006", address);
@@ -970,11 +1030,12 @@ public final class MainActivity extends Activity {
                 false));
         loginCancelButton = button("取消");
         loginCancelButton.setOnClickListener(view -> closeLoginDialog());
-        loginButton = button("登录");
+        loginButton = button("登录并选择目录");
         loginButton.setOnClickListener(view -> runLogin());
         overlays.footer(panel, loginCancelButton, loginPhoneInput, loginButton);
 
         loginOverlay.focus(Arrays.asList(
+                Collections.singletonList(loginName),
                 Collections.singletonList(loginAddress),
                 Collections.singletonList(loginUser),
                 Collections.singletonList(loginPass),
@@ -989,6 +1050,7 @@ public final class MainActivity extends Activity {
         loginOverlay = null;
         isNetworkLoginOpen = false;
         loginRunning = false;
+        loginName = null;
         loginAddress = null;
         loginUser = null;
         loginPass = null;
@@ -1011,6 +1073,11 @@ public final class MainActivity extends Activity {
         }
         final String username = loginUser.getText().toString().trim();
         final String password = loginPass.getText().toString();
+        String typedName = loginName == null ? "" : loginName.getText().toString().trim();
+        if (!typedName.isEmpty()) {
+            // 弹窗里写了名字就用它，媒体源管理里看到的就是这个名字。
+            loginDialogLabel = typedName;
+        }
         loginRunning = true;
         loginStatus.setText("正在登录...");
         runAsync(
@@ -1031,6 +1098,7 @@ public final class MainActivity extends Activity {
                         return;
                     }
                     String resolvedRoot = (String) resolved;
+                    browserLabel = loginDialogLabel;
                     if (savedConnections != null) {
                         // The credentials worked: remember them so the next time is one key press.
                         savedConnections.recordLogin(kind, resolvedRoot, loginDialogLabel, username, password);
@@ -1111,6 +1179,7 @@ public final class MainActivity extends Activity {
     // ---- folder browser (local / webdav / smb share picker) ----
 
     private void openLocalFolderPicker() {
+        browserLabel = "";
         File start = Environment.getExternalStorageDirectory();
         if (start == null || !start.isDirectory()) {
             File fallback = new File("/storage/emulated/0");
@@ -1213,6 +1282,7 @@ public final class MainActivity extends Activity {
         browserCurrent = null;
         browserUser = "";
         browserPass = "";
+        browserLabel = "";
         browserItems.clear();
         browserItemButtons.clear();
         browserListContainer = null;
@@ -1429,6 +1499,15 @@ public final class MainActivity extends Activity {
         return UrlLabels.displayPath(value);
     }
 
+    /** 媒体源显示名：早先挂载的源存的是编码过的目录段，展示前统一还原成文件夹名。 */
+    private static String displaySourceName(LocalEngine.Source source) {
+        String name = source.name == null ? "" : source.name.trim();
+        if (name.isEmpty()) {
+            name = source.path == null ? "" : source.path;
+        }
+        return "webdav".equals(source.kind) ? UrlLabels.displayPath(name) : name;
+    }
+
     /** 媒体源行上的路径：只有 WebDAV 存的是编码过的 URL，本地与 SMB 原样显示。 */
     private static String displaySourcePath(String kind, String path) {
         return "webdav".equals(kind) ? UrlLabels.displayPath(path) : path;
@@ -1453,7 +1532,7 @@ public final class MainActivity extends Activity {
         String path = browserCurrent;
         String username = browserUser;
         String password = browserPass;
-        String label = loginDialogLabel;
+        String label = browserLabel;
         closeFolderBrowser();
         mountMediaSource(kind, path, username, password, label);
     }
@@ -1461,24 +1540,24 @@ public final class MainActivity extends Activity {
     /** Save the source, remember it for next time, and start the scan. */
     private void mountMediaSource(String kind, String path, String username, String password, String label) {
         if (kind.equals("local") && !new File(path).isDirectory()) {
-            showSetup("本地目录不存在或不可读。");
+            showToast("本地目录不存在或不可读：" + path);
             return;
         }
         api.engine().saveSource(kind, "", path, username, password);
         if (savedConnections != null && !kind.equals("local")) {
             savedConnections.recordMount(kind, path, label, username, password);
         }
-        showLoading("正在扫描媒体源");
-        runAsync(
-                () -> api.engine().scanAll(null),
-                report -> {
-                    if (report.success) {
-                        showHome();
-                    } else {
-                        showSetup("媒体源已保存，但扫描失败：" + report.message + " 可稍后在设置中重新扫描。");
-                    }
-                },
-                error -> showSetup("扫描失败：" + error.getMessage()));
+        if (sourcesOverlay != null) {
+            // 弹窗里挂载：不跳页，新源立刻出现在列表里，扫描刮削就在弹窗里跑起来。
+            renderSourcesOverlay();
+            refreshHomeLibrary(false);
+            startScanAndScrape(sourcesOverlay == null ? null : sourcesOverlay.statusLine());
+            return;
+        }
+        // 全屏 loading 挡在海报墙前面：几百个文件的 WebDAV 能挂在那儿几分钟，一张海报都看不到。
+        // 照 mac 版：立刻回海报墙，扫描刮削在后台跑，海报一张张上墙，失败只提示不挡路。
+        showHome();
+        startScanAndScrape(null);
     }
 
     private void showHome() {
@@ -1507,6 +1586,9 @@ public final class MainActivity extends Activity {
         if (!returningFromDetail || !hasVisibleLibrary) {
             refreshHomeLibrary(!hasVisibleLibrary);
         }
+        // 刮削是在后台推进的：从详情页或播放器回到首页时，手上这份名单可能已经是刮削前那一版，
+        // 不重读的话卡片就一直停在占位字母上（详情页每次现查数据库，所以它看起来是「已刮削」）。
+        refreshLibraryInPlace();
         startStartupSync();
     }
 
@@ -1628,6 +1710,10 @@ public final class MainActivity extends Activity {
             homeDirectionToggle.setText(sortDescending ? "降序" : "升序");
             refreshHomeBody();
         });
+
+        homeScanToggle = widgets.toolbarButton(scanButtonLabel());
+        toolbar.addView(homeScanToggle, margin(new LinearLayout.LayoutParams(sdp(112), sdp(Widgets.HEIGHT_COMPACT)), sdp(9), 0, 0, 0));
+        homeScanToggle.setOnClickListener(view -> startScanAndScrape(null));
 
         homeSourcesToggle = widgets.toolbarButton("媒体源");
         toolbar.addView(homeSourcesToggle, margin(new LinearLayout.LayoutParams(sdp(104), sdp(Widgets.HEIGHT_COMPACT)), sdp(9), 0, 0, 0));
@@ -1801,7 +1887,9 @@ public final class MainActivity extends Activity {
             grid.addView(posterCard(item, false));
         }
         if (items.isEmpty()) {
-            homeBody.addView(emptyText(libraryItems.isEmpty() ? "媒体库为空" : "没有匹配结果"));
+            homeBody.addView(api.engine().sources().isEmpty()
+                    ? emptySourceCallToAction()
+                    : emptyText(libraryItems.isEmpty() ? "媒体库为空" : "没有匹配结果"));
         }
 
         if (homeScrollView != null) {
@@ -1859,7 +1947,7 @@ public final class MainActivity extends Activity {
         }
         if (homeSortToggle != null) {
             rows.add(Arrays.asList(homeSearchToggle, homeSortToggle, homeDirectionToggle,
-                    homeSourcesToggle, homeSettingsToggle));
+                    homeScanToggle, homeSourcesToggle, homeSettingsToggle));
         }
         return rows;
     }
@@ -1925,7 +2013,7 @@ public final class MainActivity extends Activity {
         isSettingsOpen = true;
         LinearLayout panel = settingsOverlay.body;
         TvSettings prefs = api.engine().settings();
-        String versionName = "1.17";
+        String versionName = "1.22";
         try {
             versionName = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
         } catch (Exception ignored) {
@@ -2106,7 +2194,7 @@ public final class MainActivity extends Activity {
     /** 主题卡片里的一颗胶囊：色板 + 名称，当前主题描边高亮。 */
     private Button themePill(Theme.Variant variant, TvSettings prefs) {
         boolean selected = variant.id.equals(prefs.themeId());
-        Button option = widgets.button(selected ? "\u2713 " + variant.name : variant.name, selected);
+        Button option = widgets.button(variant.name, selected);
         option.setTextSize(ssp(Widgets.TEXT_LABEL));
         option.setCompoundDrawables(themeSwatch(variant), null, null, null);
         option.setCompoundDrawablePadding(sdp(8));
@@ -2227,10 +2315,13 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Source manager ported from the mac app: enable / rename / remove per source plus
-     * scan, scrape and add. Every control sits one D-pad step away.
+     * 媒体源管理：抽屉形态与功能都照 mac 版的添加媒体源面板——已有源逐条停用 / 重命名 / 移除，
+     * 局域网设备打开即扫、点一下就能登录，两种网络媒体源各有自己的添加入口。
+     * 添加、挂载、扫描刮削全在弹窗里完成，不用退回首屏设置页。
      */
     private void renderSourcesOverlay() {
+        // 全屏设置页退场后这里是唯一的补录时机：升级前就挂好的源也要能一键回填账号密码。
+        rememberExistingSources();
         if (sourcesOverlay != null) {
             // Called again after enable / rename / remove: the list has to be redrawn in place.
             Overlays.Overlay closing = sourcesOverlay;
@@ -2240,7 +2331,7 @@ public final class MainActivity extends Activity {
         Overlays.Options options = new Overlays.Options();
         options.title = "媒体源管理";
         options.subtitle = "停用后该目录不再扫描入库；移除只清理索引与进度，不会改动共享文件。";
-        options.widthDp = 430;
+        options.widthDp = 470;
         options.sideSheet = true;
         options.restoreFocus = sourcesRestoreFocus;
         Overlays.Overlay overlay = overlays.open(options);
@@ -2253,26 +2344,27 @@ public final class MainActivity extends Activity {
         sourcesOverlay = overlay;
         isSourcesOpen = true;
         LinearLayout panel = sourcesOverlay.body;
-
-        List<LocalEngine.Source> sources = api.engine().sources();
-        List<List<View>> rows = new ArrayList<>();
         TextView status = sourcesOverlay.statusLine();
 
+        List<LocalEngine.Source> sources = api.engine().sources();
         if (sources.isEmpty()) {
-            panel.addView(emptyText("暂无媒体源。"), margin(matchWidth(), 0, 0, 0, dp(12)));
+            panel.addView(emptyText("还没有媒体源，用下面的按钮添加一个。"), margin(matchWidth(), 0, 0, 0, dp(12)));
         }
         boolean showPaths = api.engine().settings().showRealSourcePath();
+        View initialFocus = null;
         for (LocalEngine.Source source : sources) {
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.VERTICAL);
             row.setClipChildren(false);
             row.setClipToPadding(false);
             row.setBackground(rounded(COLOR_SURFACE_ALT, COLOR_BORDER, dp(1), dp(10)));
-            row.setPadding(dp(12), dp(10), dp(12), dp(10));
+            // 卡片整块至少一个列表行高：WebDAV 源名常常只有一行，光靠内容撑不出遥控器要的落点。
+            row.setMinimumHeight(sdp(Widgets.HEIGHT_ROW));
+            row.setPadding(dp(14), dp(14), dp(14), dp(14));
             panel.addView(row, margin(matchWidth(), 0, 0, 0, dp(10)));
 
             TextView title = text((source.enabled ? "" : "已停用 · ")
-                            + kindLabel(source.kind) + "：" + source.name,
+                            + kindLabel(source.kind) + "：" + displaySourceName(source),
                             14, Typeface.BOLD, source.enabled ? COLOR_TEXT : COLOR_SUBTLE);
             title.setMaxLines(1);
             title.setEllipsize(TextUtils.TruncateAt.END);
@@ -2288,14 +2380,14 @@ public final class MainActivity extends Activity {
             LinearLayout actions = new LinearLayout(this);
             actions.setClipChildren(false);
             actions.setClipToPadding(false);
-            row.addView(actions, matchWidth());
+            row.addView(actions, margin(matchWidth(), 0, dp(10), 0, 0));
             Button toggle = compactButton(source.enabled ? "停用" : "启用");
             Button rename = compactButton("重命名");
             Button remove = compactButton("移除");
             remove.setTextColor(COLOR_DANGER);
-            actions.addView(toggle, margin(new LinearLayout.LayoutParams(0, dp(46), 1f), 0, 0, dp(6), 0));
-            actions.addView(rename, margin(new LinearLayout.LayoutParams(0, dp(46), 1f), 0, 0, dp(6), 0));
-            actions.addView(remove, new LinearLayout.LayoutParams(0, dp(46), 1f));
+            actions.addView(toggle, margin(new LinearLayout.LayoutParams(0, sdp(Widgets.HEIGHT_BUTTON), 1f), 0, 0, dp(6), 0));
+            actions.addView(rename, margin(new LinearLayout.LayoutParams(0, sdp(Widgets.HEIGHT_BUTTON), 1f), 0, 0, dp(6), 0));
+            actions.addView(remove, new LinearLayout.LayoutParams(0, sdp(Widgets.HEIGHT_BUTTON), 1f));
 
             toggle.setOnClickListener(view -> {
                 api.engine().setSourceEnabled(source.id, !source.enabled);
@@ -2307,50 +2399,142 @@ public final class MainActivity extends Activity {
                 renderSourcesOverlay();
                 refreshHomeLibrary(false);
             });
-            rows.add(Arrays.asList(toggle, rename, remove));
+            if (initialFocus == null) {
+                initialFocus = toggle;
+            }
         }
 
-        Button add = compactButton("添加媒体源");
-        Button rescan = compactButton("重新扫描并刮削");
+        // 局域网设备：打开面板就自己扫，扫到的点一下就能登录。
+        LinearLayout lanHeader = new LinearLayout(this);
+        lanHeader.setGravity(Gravity.CENTER_VERTICAL);
+        lanHeader.setClipChildren(false);
+        lanHeader.setClipToPadding(false);
+        panel.addView(lanHeader, margin(matchWidth(), 0, 0, 0, dp(12)));
+        lanHeader.addView(text("局域网设备（自动扫描）", 14, Typeface.BOLD, COLOR_MUTED),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        Button rescanLan = compactButton("重新扫描");
+        rescanLan.setOnClickListener(view -> startLanScan());
+        lanHeader.addView(rescanLan, new LinearLayout.LayoutParams(dp(118), dp(42)));
+        lanStatus = widgets.caption("正在扫描局域网中的 WebDAV / SMB 设备...", COLOR_SUBTLE);
+        panel.addView(lanStatus, margin(matchWidth(), 0, dp(2), 0, dp(6)));
+        LinearLayout deviceList = new LinearLayout(this);
+        deviceList.setOrientation(LinearLayout.VERTICAL);
+        deviceList.setClipChildren(false);
+        deviceList.setClipToPadding(false);
+        panel.addView(deviceList, margin(matchWidth(), 0, 0, 0, dp(6)));
+
+        // 两种网络媒体源各一颗按钮：小窗里填账号，登录后挑目录，挂完立刻出现在上面的列表里。
+        Button addWebDav = compactButton("添加 WebDAV 媒体源");
+        Button addSmb = compactButton("添加 SMB 媒体源");
+        LinearLayout addRow = new LinearLayout(this);
+        addRow.setClipChildren(false);
+        addRow.setClipToPadding(false);
+        panel.addView(addRow, margin(matchWidth(), 0, 0, 0, 0));
+        addRow.addView(addWebDav, new LinearLayout.LayoutParams(0, dp(56), 1f));
+        addRow.addView(addSmb, margin(new LinearLayout.LayoutParams(0, dp(56), 1f), dp(8), 0, 0, 0));
+        addWebDav.setOnClickListener(view -> openLoginDialog("webdav", "", "", "", ""));
+        addSmb.setOnClickListener(view -> openLoginDialog("smb", "", "", "", ""));
+
         Button wipe = compactButton("清空媒体库索引");
         wipe.setTextColor(COLOR_DANGER);
-        panel.addView(add, margin(matchWidth(), 0, dp(4), 0, 0));
-        panel.addView(rescan, margin(matchWidth(), 0, dp(6), 0, 0));
+
+        // 本地目录也在这个抽屉里加：全屏设置页退场之后，这是唯一入口。
+        Button addLocal = compactButton("添加本地目录");
+        addLocal.setOnClickListener(view -> openLocalFolderPicker());
+        LinearLayout.LayoutParams addLocalParams = margin(matchWidth(), 0, dp(8), 0, 0);
+        // 与上面两颗添加按钮同高，别让整颗按钮被内容压成薄薄一条。
+        addLocalParams.height = dp(Widgets.HEIGHT_BUTTON);
+        panel.addView(addLocal, addLocalParams);
         panel.addView(wipe, margin(matchWidth(), 0, dp(6), 0, 0));
-        for (View action : Arrays.asList(add, rescan, wipe)) {
-            ((LinearLayout.LayoutParams) action.getLayoutParams()).height = dp(52);
+        ((LinearLayout.LayoutParams) wipe.getLayoutParams()).height = dp(52);
+
+        declarePanelRows(sourcesOverlay, panel, initialFocus == null ? addWebDav : initialFocus);
+        // 扫描会往面板里插按钮，必须等方向键顺序声明完再接管列表容器。
+        attachLanListContainer(deviceList);
+    }
+
+    /**
+     * 扫描全部媒体源并刮削：进度既写进给定状态行，也同步到首页顶部那行；
+     * 首页工具条、媒体源弹窗、挂载新源后的自动扫描都走这一个入口。
+     */
+    private void startScanAndScrape(TextView status) {
+        if (scanRunning) {
+            // 启动那一轮可能还在跑（几百个文件 + 刮削要几分钟），再点必须给个回音。
+            showToast("扫描刮削正在进行中，海报会陆续出现在首页。");
+            homeStatusHiddenMessage = "";
+            refreshHomeStatusText();
+            return;
         }
-        rows.add(Arrays.asList(add, rescan, wipe));
+        scanRunning = true;
+        setScanButtonRunning(true);
+        // 手动点了一次就得看到动静：这一轮的收尾文案常常和上一轮一模一样，
+        // 不清掉上次的「已收起」记录，横幅会一直藏着，看着就像按钮坏了。
+        homeStatusHiddenMessage = "";
+        showHomeStatusLine("正在扫描媒体源...");
+        if (status != null) {
+            status.setText("正在扫描媒体源...");
+        }
+        runAsync(() -> api.engine().scanAndScrape(throttledProgress(status)),
+                report -> {
+                    scanRunning = false;
+                    setScanButtonRunning(false);
+                    if (status != null && status.isAttachedToWindow()) {
+                        status.setText(report.message);
+                    }
+                    refreshHomeStatusText();
+                    hideHomeStatusSoon(api.engine().scrapeStatus());
+                    refreshHomeLibrary(false);
+                },
+                error -> {
+                    scanRunning = false;
+                    setScanButtonRunning(false);
+                    if (status != null && status.isAttachedToWindow()) {
+                        status.setText("扫描失败：" + error.getMessage());
+                    }
+                    showToast("扫描失败：" + error.getMessage());
+                    refreshHomeStatusText();
+                });
+    }
 
-        add.setOnClickListener(view -> {
-            closeSourcesOverlay();
-            showSetup(null);
-        });
-        rescan.setOnClickListener(view -> {
-            status.setText("正在扫描并刮削…");
-            runAsync(() -> api.engine().scanAndScrape(message -> {
-                        if (isSourcesOpen) {
-                            main.post(() -> status.setText(message));
-                        }
-                        // 刮削一张海报就上墙，不用等整轮跑完才看到封面。
-                        scheduleScrapePosterRefresh();
-                    }),
-                    report -> {
-                        if (!isSourcesOpen) {
-                            return;
-                        }
-                        status.setText(report.message + " 待刮削 " + api.engine().scrapeQueueCount() + "。");
-                        refreshHomeLibrary(false);
-                    },
-                    error -> status.setText("扫描失败：" + error.getMessage()));
-        });
-        wipe.setOnClickListener(view -> {
-            api.wipeLibrary();
-            renderSourcesOverlay();
-            refreshHomeLibrary(false);
-        });
+    /** 工具条那颗按钮的字：扫描进行中写「扫描中」，有没有在跑一眼看得出来。 */
+    private String scanButtonLabel() {
+        return scanRunning ? "扫描中" : "扫描刮削";
+    }
 
-        declarePanelRows(sourcesOverlay, panel, rows.isEmpty() ? add : rows.get(0).get(0));
+    private void setScanButtonRunning(boolean running) {
+        if (homeScanToggle != null) {
+            homeScanToggle.setText(running ? "扫描中" : "扫描刮削");
+        }
+    }
+
+    /** 往首页横幅上直接写一行（不等引擎的进度回调），写完照常参与去重与自动收起。 */
+    private void showHomeStatusLine(String text) {
+        if (homeStatusView == null) {
+            return;
+        }
+        homeStatusText = text;
+        homeStatusView.setText(text);
+        homeStatusView.setVisibility(View.VISIBLE);
+    }
+
+    /** 一个媒体源都没有时，墙上自带一个「添加媒体源」的入口，不再另开一屏设置页。 */
+    private View emptySourceCallToAction() {
+        LinearLayout block = new LinearLayout(this);
+        block.setOrientation(LinearLayout.VERTICAL);
+        block.setClipChildren(false);
+        block.setClipToPadding(false);
+        block.addView(emptyText("还没有媒体源。添加本地目录、WebDAV 或 SMB 后会自动扫描刮削。"),
+                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT));
+        Button open = button("添加媒体源");
+        open.setAllCaps(false);
+        open.setOnClickListener(view -> openSourcesOverlay());
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                sdp(220), sdp(Widgets.HEIGHT_BUTTON));
+        params.gravity = Gravity.CENTER_HORIZONTAL;
+        params.topMargin = sdp(14);
+        block.addView(open, params);
+        return block;
     }
 
     /** Inline rename field for one source row. */
@@ -2387,23 +2571,53 @@ public final class MainActivity extends Activity {
             return;
         }
         String message = api.engine().scrapeStatus();
-        int pending = api.engine().scrapeQueueCount();
-        StringBuilder builder = new StringBuilder();
-        if (message != null && !message.isEmpty()) {
-            builder.append(message);
+        String text = message == null ? "" : message.trim();
+        if (text.isEmpty() && api.engine().scrapeQueueCount() > 0
+                && !api.engine().tmdbConfigured()) {
+            // mac 版这时候说的是「TMDB 连不上」，不是干挂一个待刮削数字。
+            text = "检测到有待刮削的影视，但 TMDB 暂时无法连接。请在设置里检查 API Key 或反代地址。";
         }
-        if (pending > 0) {
-            if (builder.length() > 0) {
-                builder.append(" · ");
-            }
-            builder.append("待刮削 ").append(pending).append(" 个条目");
+        if (text.equals(homeStatusText)) {
+            return;
         }
-        if (builder.length() == 0) {
+        homeStatusText = text;
+        if (text.isEmpty() || text.equals(homeStatusHiddenMessage)) {
             homeStatusView.setVisibility(View.GONE);
             return;
         }
-        homeStatusView.setText(builder);
+        homeStatusView.setText(text);
         homeStatusView.setVisibility(View.VISIBLE);
+    }
+
+    /** 跑完一轮就把那句收尾的话收起来：mac 版的横幅平时不占位置。 */
+    private void hideHomeStatusSoon(String shown) {
+        main.postDelayed(() -> {
+            if (shown.equals(api.engine().scrapeStatus())) {
+                homeStatusHiddenMessage = shown;
+                refreshHomeStatusText();
+            }
+        }, 8000);
+    }
+
+    /**
+     * 引擎一次扫描能发几百条进度，每条都刷横幅、查库、重绘海报，遥控器就是在这儿卡住的。
+     * 先在后台线程按时间丢掉多余的，再往主线程投递。
+     */
+    private LocalEngine.ProgressListener throttledProgress(TextView status) {
+        return message -> {
+            long now = android.os.SystemClock.elapsedRealtime();
+            if (now - lastProgressPaintAt < 250) {
+                return;
+            }
+            lastProgressPaintAt = now;
+            main.post(() -> {
+                if (status != null && status.isAttachedToWindow()) {
+                    status.setText(message);
+                }
+                refreshHomeStatusText();
+                scheduleScrapePosterRefresh();
+            });
+        };
     }
 
     /** 启动时自动扫描并同步 + 刮削，与 mac 版一致；状态显示在首页顶部。 */
@@ -2417,23 +2631,14 @@ public final class MainActivity extends Activity {
             refreshHomeStatusText();
             return;
         }
-        runAsync(() -> api.engine().scanAndScrape(message -> main.post(() -> {
-                    refreshHomeStatusText();
-                    scheduleScrapePosterRefresh();
-                })),
-                report -> {
-                    refreshHomeStatusText();
-                    if (screen == Screen.HOME) {
-                        refreshHomeLibrary(false);
-                    }
-                },
-                error -> refreshHomeStatusText());
+        // 与手动那颗按钮共用一个入口：同一时间只跑一轮，横幅与按钮状态走同一套。
+        startScanAndScrape(null);
     }
 
     private void disconnectFromServer() {
         closeSourcesOverlay();
         closeSettingsOverlay();
-        showSetup(null);
+        showHome();
     }
 
     private void startUpdateInstall(Button updateButton, TextView updateStatus) {
@@ -2670,7 +2875,7 @@ public final class MainActivity extends Activity {
         watched.setClickable(true);
         watched.setBackgroundColor(Color.TRANSPARENT);
         watched.setOnClickListener(view -> toggleLibraryItemWatched(views.item));
-        applyWatchedIconFocus(watched, item.isWatched);
+        applyWatchedIconFocus(watched, COLOR_SUBTLE);
         yearRow.addView(watched, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, sdp(30)));
         views.watched = watched;
 
@@ -2683,23 +2888,37 @@ public final class MainActivity extends Activity {
     /** Refreshes a card that is already on screen with freshly scraped data. */
     private void bindPosterCard(PosterViews views, Models.LibraryItem item) {
         views.item = item;
+        String prettyTitle = displayTitle(item.title);
+        String year = releaseYearText(item.releaseDate);
+        String rating = ratingText(item.voteAverage);
+        String doubanRating = ratingText(item.doubanRating);
+        int watchedPercent = item.progressPercent();
+        // 刮削期间每两秒补一轮海报：内容没变的那张什么都不做。否则 48 张卡一起重设文字、
+        // 重挂角标，整面墙重新排版，遥控器正好走在那一刻，手感就是「一卡一卡的」。
+        String signature = item.posterAssetId + "\u0001" + prettyTitle + "\u0001" + year
+                + "\u0001" + item.isWatched + "\u0001" + watchedPercent
+                + "\u0001" + rating + "\u0001" + doubanRating;
+        if (signature.equals(views.renderedSignature)) {
+            return;
+        }
+        views.renderedSignature = signature;
         loadPoster(views.poster, item.posterAssetId, views.cardInnerWidth, views.posterHeight);
-        String prettyTitle = prettifyMediaTitle(item.title);
         boolean missingArt = item.posterAssetId == null || item.posterAssetId.isEmpty();
         views.artFallback.setVisibility(missingArt ? View.VISIBLE : View.GONE);
         views.artFallback.setText(missingArt ? artworkFallbackLetter(prettyTitle) : "");
         views.name.setText(prettyTitle);
-        String year = releaseYearText(item.releaseDate);
         views.year.setText(year == null ? "" : year);
-        views.watched.setText(item.isWatched ? "\u2713 已看" : "\u25cb 未看");
-        views.watched.setTextColor(item.isWatched ? COLOR_FOCUS : COLOR_SUBTLE);
-        applyWatchedIconFocus(views.watched, item.isWatched);
+        boolean partlyWatched = !item.isWatched && watchedPercent > 0 && watchedPercent < 95;
+        views.watched.setText(item.isWatched ? WATCHED_GLYPH_DONE
+                : partlyWatched ? WATCHED_GLYPH_PART : WATCHED_GLYPH_NONE);
+        views.watched.setTooltipText(item.isWatched ? "已看" : partlyWatched ? "未看完" : "未看");
+        int watchedColor = item.isWatched ? COLOR_FOCUS : partlyWatched ? COLOR_ACCENT : COLOR_SUBTLE;
+        views.watched.setTextColor(watchedColor);
+        applyWatchedIconFocus(views.watched, watchedColor);
         views.badges.removeAllViews();
-        String rating = ratingText(item.voteAverage);
         if (rating != null) {
             views.badges.addView(badge(rating, Theme.RATING));
         }
-        String doubanRating = ratingText(item.doubanRating);
         if (doubanRating != null) {
             views.badges.addView(badge(doubanRating, Theme.RATING_DOUBAN),
                     margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, sdp(30)), sdp(5), 0, 0, 0));
@@ -2726,6 +2945,8 @@ public final class MainActivity extends Activity {
         ImageView poster;
         LinearLayout badges;
         TextView name;
+        /** 这张卡上一次渲染的内容签名，用于跳过没变化的重绘。 */
+        String renderedSignature;
         TextView year;
         TextView watched;
         FrameLayout progress;
@@ -2778,12 +2999,33 @@ public final class MainActivity extends Activity {
      * 刮削进度回调很密，这里按秒限流刷新海报：条目没变就只补数据，条目增减了才重建，
      * 重建时把滚动位置和焦点都补回来。
      */
-    private void scheduleScrapePosterRefresh() {
-        long now = android.os.SystemClock.elapsedRealtime();
-        if (libraryPatchInFlight || now - lastLibraryPatchAt < 1200) {
+    /** 整面墙的重建合并成最多两秒一次：条目数一直在变，每出一张就重建一次太贵。 */
+    private void scheduleWallRebuild() {
+        if (pendingWallRebuild != null) {
             return;
         }
-        lastLibraryPatchAt = now;
+        pendingWallRebuild = () -> {
+            pendingWallRebuild = null;
+            if (screen == Screen.HOME) {
+                refreshHomeBody();
+            }
+        };
+        main.postDelayed(pendingWallRebuild, 2000);
+    }
+
+    private void scheduleScrapePosterRefresh() {
+        if (android.os.SystemClock.elapsedRealtime() - lastLibraryPatchAt < 2000) {
+            return;
+        }
+        refreshLibraryInPlace();
+    }
+
+    /** 重读媒体库并就地补卡片；条目增减了才重建整面墙。 */
+    private void refreshLibraryInPlace() {
+        if (libraryPatchInFlight) {
+            return;
+        }
+        lastLibraryPatchAt = android.os.SystemClock.elapsedRealtime();
         libraryPatchInFlight = true;
         runAsync(() -> api.getLibraryItems(), items -> {
             libraryPatchInFlight = false;
@@ -2799,10 +3041,11 @@ public final class MainActivity extends Activity {
         for (Models.LibraryItem item : items) {
             byId.put(item.id, item);
         }
-        if (byId.size() != distinctLibraryIds(libraryItems).size()) {
+        // 只比数量的话，「换了一批同数量条目」（手动匹配跨类型改绑、清库重扫）会被当成
+        // 能就地更新，结果一张卡都对不上号，墙上就永远留着旧名字。
+        if (!byId.keySet().equals(distinctLibraryIds(libraryItems))) {
             libraryItems = items;
-            refreshHomeBody();
-            android.util.Log.d("OmniPlayLibrary", "刮削中刷新：条目增减，重建海报墙");
+            scheduleWallRebuild();
             return;
         }
         for (Map.Entry<String, List<PosterViews>> entry : homePosterViews.entrySet()) {
@@ -2972,7 +3215,7 @@ public final class MainActivity extends Activity {
         info.setClipToPadding(false);
         hero.addView(info, margin(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f), sdp(34), 0, 0, 0));
 
-        TextView heading = text(prettifyMediaTitle(detail.title), ssp(38), Typeface.BOLD, COLOR_TEXT);
+        TextView heading = text(displayTitle(detail.title), ssp(38), Typeface.BOLD, COLOR_TEXT);
         heading.setLineSpacing(sdp(2), 1f);
         info.addView(heading);
 
@@ -3047,9 +3290,20 @@ public final class MainActivity extends Activity {
             actions.addView(watchStatus, margin(new LinearLayout.LayoutParams(sdp(150), sdp(52)), sdp(12), 0, 0, 0));
             watchStatus.setOnClickListener(view -> toggleVideoWatched(mainFile));
 
-            Button edit = button("\u7f16\u8f91");
-            actions.addView(edit, margin(new LinearLayout.LayoutParams(sdp(112), sdp(52)), sdp(12), 0, 0, 0));
-            edit.setOnClickListener(view -> openDetailEditor(detail, mainFile));
+            // 匹配与资料改在第二行：多一颗按钮就不进第一行了，遥控器左右走位也更短。
+            LinearLayout metadataActions = new LinearLayout(this);
+            metadataActions.setGravity(Gravity.CENTER_VERTICAL);
+            metadataActions.setClipChildren(false);
+            metadataActions.setClipToPadding(false);
+            info.addView(metadataActions, margin(matchWidth(), 0, sdp(12), 0, 0));
+
+            Button manualMatch = button("手动匹配");
+            metadataActions.addView(manualMatch, new LinearLayout.LayoutParams(sdp(150), sdp(52)));
+            manualMatch.setOnClickListener(view -> openManualMatchOverlay(detail, mainFile));
+
+            Button edit = button("自定义编辑");
+            metadataActions.addView(edit, margin(new LinearLayout.LayoutParams(sdp(150), sdp(52)), sdp(12), 0, 0, 0));
+            edit.setOnClickListener(view -> openDetailCustomEditOverlay(detail));
 
             // \u5df2\u64ad\u65f6\u957f / \u603b\u65f6\u957f\uff1amac \u7248\u628a\u5b83\u653e\u5728\u6309\u94ae\u4e0b\u65b9\uff0c\u8fd9\u91cc\u540c\u4e00\u4f4d\u7f6e\u3002
             LinearLayout timelineColumn = new LinearLayout(this);
@@ -3093,8 +3347,9 @@ public final class MainActivity extends Activity {
         for (int index = 0; index < files.size(); index++) {
             Models.VideoFile file = files.get(index);
             boolean selected = mainFile != null && mainFile.id.equals(file.id);
-            Button version = button((selected ? "\u2713 " : "") + "版本 " + (index + 1) + " \u00b7 "
-                    + (file.fileName == null || file.fileName.isEmpty() ? file.relativePath : file.fileName));
+            Button version = button("版本 " + (index + 1) + " \u00b7 "
+                    + (file.fileName == null || file.fileName.isEmpty() ? file.relativePath : file.fileName)
+                    + (selected ? "（当前）" : ""));
             version.setAllCaps(false);
             version.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
             version.setSingleLine(true);
@@ -3451,29 +3706,314 @@ public final class MainActivity extends Activity {
                 Arrays.asList(save, phone, cancel)), field);
     }
 
-    /** 编辑：改片名（并锁定，避免下次扫描被覆盖）或按新名字重新刮削。 */
-    private void openDetailEditor(Models.LibraryDetail detail, Models.VideoFile mainFile) {
-        openTextInputOverlay("片名（保存后锁定，可填新名字再重新刮削）", detail.title, value -> {
-            String trimmed = value == null ? "" : value.trim();
-            if (trimmed.isEmpty()) {
+    // ------------------------------------------- 详情页：手动匹配 / 自定义编辑
+
+    private Overlays.Overlay manualMatchOverlay;
+    private EditText manualMatchQuery;
+    private EditText manualMatchYear;
+    private TextView manualMatchStatus;
+    private LinearLayout manualMatchResults;
+    private boolean manualMatchRunning;
+
+    private Overlays.Overlay customEditOverlay;
+    private EditText customEditTitle;
+    private EditText customEditDate;
+    private EditText customEditVote;
+    private EditText customEditGenres;
+    private EditText customEditDirectors;
+    private EditText customEditCasts;
+    private TextView customEditStatus;
+
+    /**
+     * 详情页「手动匹配」：mac 版那个手动匹配弹层的遥控器版——源文件路径 + 关键词 + 年份 +
+     * 候选清单，点一行就关联。弹层一打开就按当前片名搜一次，遥控器上少一步打字。
+     */
+    private void openManualMatchOverlay(Models.LibraryDetail detail, Models.VideoFile mainFile) {
+        if (!api.engine().tmdbConfigured()) {
+            showToast("先在设置里填写 TMDB API Key 或反代地址，才能手动搜索。");
+            return;
+        }
+        if (manualMatchOverlay != null) {
+            return;
+        }
+        Overlays.Options options = new Overlays.Options();
+        options.title = "手动匹配";
+        options.subtitle = "点中正确的那条即可关联；关联后这条记录会被锁定，自动刮削不再覆盖它。";
+        options.widthDp = 620;
+        options.restoreFocus = getCurrentFocus();
+        Overlays.Overlay overlay = overlays.open(options);
+        overlay.onClose = () -> {
+            if (manualMatchOverlay == overlay) {
+                manualMatchOverlay = null;
+            }
+            manualMatchQuery = null;
+            manualMatchYear = null;
+            manualMatchStatus = null;
+            manualMatchResults = null;
+            manualMatchRunning = false;
+        };
+        manualMatchOverlay = overlay;
+        LinearLayout panel = overlay.body;
+
+        String source = mainFile == null ? "" : mainFile.relativePath == null || mainFile.relativePath.isEmpty()
+                ? (mainFile.fileName == null ? "" : mainFile.fileName) : mainFile.relativePath;
+        if (!source.isEmpty()) {
+            panel.addView(widgets.caption("源文件：" + source, COLOR_SUBTLE),
+                    margin(matchWidth(), 0, 0, 0, sdp(6)));
+        }
+        manualMatchQuery = input("影视名称关键词", detail.title == null ? "" : detail.title);
+        panel.addView(manualMatchQuery, margin(matchWidth(), 0, 0, 0, sdp(4)));
+        manualMatchYear = input("年份（可选）", fourDigitYear(detail.releaseDate));
+        panel.addView(manualMatchYear, matchWidth());
+        manualMatchStatus = overlay.statusLine();
+        manualMatchResults = new LinearLayout(this);
+        manualMatchResults.setOrientation(LinearLayout.VERTICAL);
+        manualMatchResults.setClipChildren(false);
+        manualMatchResults.setClipToPadding(false);
+        panel.addView(manualMatchResults, margin(matchWidth(), 0, 0, 0, 0));
+
+        Button close = button("关闭");
+        close.setOnClickListener(view -> overlay.close());
+        Button phone = button("手机输入");
+        phone.setOnClickListener(view -> openPhoneInputOverlay("手动匹配",
+                "只填需要改的项，留空的项不会被改动。",
+                Arrays.asList(
+                        boundField("query", "影视名称关键词", () -> manualMatchQuery, false),
+                        boundField("year", "年份（可选）", () -> manualMatchYear, false)),
+                true));
+        Button search = button("搜索");
+        search.setOnClickListener(view -> runManualMatchSearch(detail));
+        overlays.footer(panel, close, phone, search);
+
+        declarePanelRows(overlay, panel, manualMatchQuery);
+        runManualMatchSearch(detail);
+    }
+
+    /** 手动匹配的搜索：候选清单按匹配分排序，与自动刮削同一套打分。 */
+    private void runManualMatchSearch(Models.LibraryDetail detail) {
+        if (manualMatchOverlay == null || manualMatchRunning || manualMatchQuery == null) {
+            return;
+        }
+        String query = manualMatchQuery.getText().toString().trim();
+        if (query.isEmpty()) {
+            manualMatchStatus.setText("请先填写影视名称关键词。");
+            return;
+        }
+        String year = manualMatchYear.getText().toString().trim();
+        String mediaType = detail.itemKind;
+        manualMatchRunning = true;
+        manualMatchStatus.setText("正在向 TMDB 请求数据...");
+        runAsync(() -> api.engine().searchCandidates(query, year, mediaType),
+                results -> {
+                    manualMatchRunning = false;
+                    if (manualMatchOverlay == null || manualMatchResults == null) {
+                        return;
+                    }
+                    manualMatchResults.removeAllViews();
+                    if (results.isEmpty()) {
+                        manualMatchStatus.setText("未找到与「" + query + "」相关的影视。");
+                    } else {
+                        manualMatchStatus.setText("找到 " + results.size() + " 条结果，点一行关联到这条影视。");
+                        for (TmdbClient.Result result : results) {
+                            manualMatchResults.addView(manualMatchRow(detail, result), listItemParams());
+                        }
+                    }
+                    manualMatchOverlay.redeclare(FocusGrid.rowsFrom(manualMatchOverlay.body));
+                },
+                error -> {
+                    manualMatchRunning = false;
+                    if (manualMatchStatus != null) {
+                        manualMatchStatus.setText("搜索失败：" + error.getMessage());
+                    }
+                });
+    }
+
+    private Button manualMatchRow(Models.LibraryDetail detail, TmdbClient.Result result) {
+        String year = fourDigitYear(result.releaseDate);
+        String kind = "tv".equals(result.mediaType) ? "剧集" : "电影";
+        String blurb = result.overview == null ? "" : result.overview.trim().replace('\n', ' ');
+        if (blurb.length() > 46) {
+            blurb = blurb.substring(0, 46) + "...";
+        }
+        Button row = listRowButton(result.title,
+                (year.isEmpty() ? kind : year + " · " + kind) + (blurb.isEmpty() ? "" : " · " + blurb));
+        row.setOnClickListener(view -> bindManualMatch(detail, result));
+        return row;
+    }
+
+    /** 关联：写进实体、补齐导演 / 主演、锁定，然后详情页与首页都按新数据重画。 */
+    private void bindManualMatch(Models.LibraryDetail detail, TmdbClient.Result result) {
+        if (manualMatchOverlay == null || manualMatchStatus == null) {
+            return;
+        }
+        manualMatchStatus.setText("正在关联《" + result.title + "》...");
+        String mediaType = detail.itemKind;
+        long entityId = entityIdOf(detail.id);
+        runAsync(() -> api.engine().bindToTmdbResult(mediaType, entityId, result),
+                targetId -> {
+                    Overlays.Overlay closing = manualMatchOverlay;
+                    manualMatchOverlay = null;
+                    if (closing != null) {
+                        closing.close();
+                    }
+                    detailCache.clear();
+                    showToast("已关联《" + result.title + "》");
+                    // 跨类型改绑（电影 ↔ 剧集）会换一张表重建实体，条目 id 跟着变，只能整页重开。
+                    showDetail(result.mediaType + ":" + targetId);
+                    refreshHomeLibrary(false);
+                },
+                error -> {
+                    if (manualMatchStatus != null) {
+                        manualMatchStatus.setText("关联失败：" + error.getMessage());
+                    }
+                });
+    }
+
+    /**
+     * 详情页「自定义编辑」：片名 / 上映日期 / 评分 / 类型 / 导演 / 主演都能手填，保存即锁定，
+     * 对应 mac 版手动编辑资料里的「保存修改并锁定」。
+     */
+    private void openDetailCustomEditOverlay(Models.LibraryDetail detail) {
+        if (customEditOverlay != null) {
+            return;
+        }
+        Overlays.Options options = new Overlays.Options();
+        options.title = "自定义编辑";
+        options.subtitle = "手填的资料会锁定这条记录，之后的自动刮削不再覆盖它；名单用顿号或逗号分隔。";
+        options.widthDp = 560;
+        options.restoreFocus = getCurrentFocus();
+        Overlays.Overlay overlay = overlays.open(options);
+        overlay.onClose = () -> {
+            if (customEditOverlay == overlay) {
+                customEditOverlay = null;
+            }
+            customEditTitle = null;
+            customEditDate = null;
+            customEditVote = null;
+            customEditGenres = null;
+            customEditDirectors = null;
+            customEditCasts = null;
+            customEditStatus = null;
+        };
+        customEditOverlay = overlay;
+        LinearLayout panel = overlay.body;
+        customEditStatus = overlay.statusLine();
+
+        customEditTitle = input("影视名称", detail.title == null ? "" : detail.title);
+        panel.addView(customEditTitle, margin(matchWidth(), 0, 0, 0, sdp(4)));
+        customEditDate = input("上映日期，例如 2001-05-09", detail.releaseDate == null ? "" : detail.releaseDate);
+        panel.addView(customEditDate, margin(matchWidth(), 0, 0, 0, sdp(4)));
+        customEditVote = input("TMDB 评分（0.0 - 10.0，留空不改）",
+                detail.voteAverage == null || detail.voteAverage <= 0 ? "" : String.valueOf(detail.voteAverage));
+        customEditVote.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        panel.addView(customEditVote, margin(matchWidth(), 0, 0, 0, sdp(4)));
+        customEditGenres = input("类型", joinByComma(detail.genres));
+        panel.addView(customEditGenres, margin(matchWidth(), 0, 0, 0, sdp(4)));
+        customEditDirectors = input("导演", joinByComma(detail.directors));
+        panel.addView(customEditDirectors, margin(matchWidth(), 0, 0, 0, sdp(4)));
+        customEditCasts = input("主演", joinByComma(detail.casts));
+        panel.addView(customEditCasts, matchWidth());
+
+        Button cancel = button("取消");
+        cancel.setOnClickListener(view -> overlay.close());
+        Button phone = button("手机输入");
+        phone.setOnClickListener(view -> openPhoneInputOverlay("自定义编辑",
+                "名单用顿号或逗号分隔；留空的项不会被改动。",
+                Arrays.asList(
+                        boundField("title", "影视名称", () -> customEditTitle, false),
+                        boundField("date", "上映日期", () -> customEditDate, false),
+                        boundField("vote", "TMDB 评分", () -> customEditVote, false),
+                        boundField("genres", "类型", () -> customEditGenres, false),
+                        boundField("directors", "导演", () -> customEditDirectors, false),
+                        boundField("casts", "主演", () -> customEditCasts, false)),
+                true));
+        Button save = button("保存修改并锁定");
+        save.setOnClickListener(view -> saveCustomEdit(detail));
+        overlays.footer(panel, cancel, phone, save);
+        declarePanelRows(overlay, panel, customEditTitle);
+    }
+
+    private void saveCustomEdit(Models.LibraryDetail detail) {
+        if (customEditOverlay == null) {
+            return;
+        }
+        String typedVote = currentValue(customEditVote).trim();
+        double parsedVote = 0;
+        if (!typedVote.isEmpty()) {
+            try {
+                parsedVote = Math.max(0, Math.min(10, Double.parseDouble(typedVote)));
+            } catch (NumberFormatException invalid) {
+                if (customEditStatus != null) {
+                    customEditStatus.setText("评分要填 0.0 到 10.0 之间的数字。");
+                }
                 return;
             }
-            runAsync(() -> {
-                api.engine().library().renameEntity(detail.itemKind, entityIdOf(detail.id), trimmed);
-                String mediaType = detail.itemKind;
-                int season = mainFile == null || mainFile.seasonNumber == null ? 0 : mainFile.seasonNumber;
-                api.engine().library().requeueScrape(mediaType, entityIdOf(detail.id), trimmed, "", "", season);
-                api.engine().scrapePending(null);
-                return Boolean.TRUE;
-            }, ignored -> {
-                detailCache.remove(detail.id);
-                if (screen == Screen.DETAIL) {
-                    refreshDetail(detail.id, false);
-                } else {
-                    refreshHomeLibrary(false);
-                }
-            }, error -> refreshHomeLibrary(false));
-        });
+        }
+        final double vote = parsedVote;
+        String title = currentValue(customEditTitle).trim();
+        String date = currentValue(customEditDate).trim();
+        String genres = toPipeList(currentValue(customEditGenres));
+        String directors = toPipeList(currentValue(customEditDirectors));
+        String casts = toPipeList(currentValue(customEditCasts));
+        Overlays.Overlay closing = customEditOverlay;
+        customEditOverlay = null;
+        closing.close();
+        runAsync(() -> {
+            api.engine().library().applyCustomEdit(detail.itemKind, entityIdOf(detail.id),
+                    title, date, vote, genres, directors, casts);
+            return Boolean.TRUE;
+        }, ignored -> {
+            detailCache.clear();
+            refreshDetail(detail.id, false);
+            refreshHomeLibrary(false);
+            showToast("资料已保存并锁定");
+        }, error -> showToast("保存失败：" + error.getMessage()));
+    }
+
+    /** 日期或年份字符串里取那四位年份，取不到就留空。 */
+    private static String fourDigitYear(String value) {
+        String text = value == null ? "" : value.trim();
+        if (text.length() < 4) {
+            return "";
+        }
+        String head = text.substring(0, 4);
+        for (int index = 0; index < 4; index++) {
+            if (!Character.isDigit(head.charAt(index))) {
+                return "";
+            }
+        }
+        return head;
+    }
+
+    private static String joinByComma(List<String> values) {
+        StringBuilder builder = new StringBuilder();
+        for (String value : values) {
+            if (builder.length() > 0) {
+                builder.append('\u3001');
+            }
+            builder.append(value);
+        }
+        return builder.toString();
+    }
+
+    /** 用户在弹层里用顿号 / 逗号 / 分号分隔名单，入库前统一换成库里那套竖线分隔。 */
+    private static String toPipeList(String value) {
+        String text = value == null ? "" : value.trim();
+        if (text.isEmpty()) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (String part : text.split("[|,，、;；\n]")) {
+            String piece = part.trim();
+            if (piece.isEmpty()) {
+                continue;
+            }
+            if (builder.length() > 0) {
+                builder.append('|');
+            }
+            builder.append(piece);
+        }
+        return builder.toString();
     }
 
     private static long entityIdOf(String itemId) {
@@ -7214,6 +7754,14 @@ public final class MainActivity extends Activity {
      * 未刮削条目的展示名：「The.Last.of.Us.2023.1080p」这类无空格的场景命名改成可读标题；
      * 已带空格的正式片名原样保留。
      */
+    /**
+     * 卡片与详情页上的片名：先把 WebDAV 带来的百分号编码解回来，再按 mac 版规则整理成看得懂的片名。
+     * 老版本入库的条目存的就是编码串，这一步顺便把它们救回来。
+     */
+    static String displayTitle(String raw) {
+        return prettifyMediaTitle(UrlLabels.displayPath(raw));
+    }
+
     static String prettifyMediaTitle(String raw) {
         if (raw == null) {
             return "";
@@ -7654,12 +8202,13 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void applyWatchedIconFocus(TextView icon, boolean watched) {
+    /** 观看状态那颗图标：静止时用自己的颜色，拿到焦点只抬高并染主题色。 */
+    private void applyWatchedIconFocus(TextView icon, int restColor) {
         icon.setBackgroundColor(Color.TRANSPARENT);
-        icon.setTextColor(watched ? COLOR_FOCUS : COLOR_SUBTLE);
+        icon.setTextColor(restColor);
         icon.setOnFocusChangeListener((focusedView, hasFocus) -> {
             animateFocusScale(focusedView, hasFocus);
-            icon.setTextColor(hasFocus || watched ? COLOR_FOCUS : COLOR_SUBTLE);
+            icon.setTextColor(hasFocus ? COLOR_FOCUS : restColor);
         });
     }
 
@@ -7882,7 +8431,8 @@ public final class MainActivity extends Activity {
         }
 
         String displayLabel() {
-            return selected ? "✓ " + label : "  " + label;
+            // 选中的那一行本身就被染成主题色，不需要再加对号。
+            return label;
         }
     }
 

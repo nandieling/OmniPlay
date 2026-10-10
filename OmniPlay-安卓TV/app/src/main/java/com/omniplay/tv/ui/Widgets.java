@@ -45,7 +45,8 @@ public final class Widgets {
     /** Standard control heights. */
     public static final int HEIGHT_BUTTON = 56;
     public static final int HEIGHT_COMPACT = 48;
-    public static final int HEIGHT_ROW = 78;
+    /** 列表行（局域网设备、已保存连接、设置项）的高度：两行文字要站得下，遥控器也好落。 */
+    public static final int HEIGHT_ROW = 96;
     public static final int HEIGHT_INPUT = 58;
 
     private final Theme theme;
@@ -240,6 +241,19 @@ public final class Widgets {
         LinearLayout.LayoutParams params = margins(column(), 0, 0, 0, theme.sdp(8));
         params.height = theme.sdp(HEIGHT_ROW);
         return params;
+    }
+
+    /**
+     * 带左侧图标的列表行（局域网设备）。mac 版那行是「图标 + 设备名 + 地址」，
+     * 图标占位 22dp，标题与副标题都不动，只是往右挪一格。
+     */
+    public Button listRow(String title, String detail, android.graphics.drawable.Drawable leading) {
+        Button button = listRow(title, detail);
+        if (leading != null) {
+            button.setCompoundDrawablesRelativeWithIntrinsicBounds(leading, null, null, null);
+            button.setCompoundDrawablePadding(theme.sdp(14));
+        }
+        return button;
     }
 
     public LinearLayout.LayoutParams buttonParams(int widthDp, int heightDp) {
@@ -514,9 +528,12 @@ public final class Widgets {
             Button slice = slices.get(index);
             boolean focused = slice.isFocused();
             boolean selected = index == selectedIndex;
+            // 选中 = 自己的底色压深一档 + 抬起，边框粗细不变，跟 Theme 里的焦点语言一致。
+            int baseFill = selected ? Theme.GLASS_STRONG : Theme.GLASS;
             slice.setTextColor(focused ? Theme.FOCUS : (selected ? Theme.TEXT : Theme.MUTED));
             slice.setBackground(focused
-                    ? theme.panel(Theme.GLASS_STRONG, Theme.FOCUS, theme.STROKE_FOCUS, theme.sdp(8))
+                    ? theme.panel(Theme.darker(baseFill, Theme.FOCUS_DARKEN), Theme.BORDER,
+                            Theme.STROKE, theme.sdp(8))
                     : selected
                     ? theme.panel(Theme.GLASS_STRONG, Theme.BORDER, Theme.STROKE, theme.sdp(8))
                     : theme.panel(Color.TRANSPARENT, Color.TRANSPARENT, 0, theme.sdp(8)));

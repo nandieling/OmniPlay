@@ -1150,6 +1150,10 @@ public partial class PosterWallViewModel : ObservableObject
     [ObservableProperty]
     private string statusMessage = string.Empty;
 
+    private CancellationTokenSource? statusMessageClearToken;
+
+    internal static TimeSpan StatusMessageAutoClearDelay { get; set; } = TimeSpan.FromSeconds(12);
+
     [ObservableProperty]
     private LibraryScanSummary? lastScanSummary;
 
@@ -1461,10 +1465,36 @@ public partial class PosterWallViewModel : ObservableObject
 
     public bool HasStatusMessage => ShouldShowHomeStatusMessage(HomeStatusMessage);
 
-    public string HomeStatusMessage =>
+    public string HomeStatusMessage => SummarizeHomeStatus(
         string.IsNullOrWhiteSpace(StatusMessage) && IsLibraryScanInProgress
             ? "正在扫描媒体源..."
-            : StatusMessage;
+            : StatusMessage);
+
+    /// <summary>
+    /// 首页状态栏只显示一句简短提示：丢掉扫描诊断尾巴和更早的旧提示。
+    /// </summary>
+    private static string SummarizeHomeStatus(string? statusMessage)
+    {
+        if (string.IsNullOrWhiteSpace(statusMessage))
+        {
+            return string.Empty;
+        }
+
+        string text = statusMessage.Trim();
+        int diagnosticIndex = text.IndexOf("另有 ", StringComparison.Ordinal);
+        if (diagnosticIndex > 0)
+        {
+            text = text[..diagnosticIndex].TrimEnd(' ', '。', '：');
+        }
+
+        int sentenceEnd = text.IndexOfAny(new[] { '。', '；', ';' });
+        if (sentenceEnd > 0)
+        {
+            text = text[..sentenceEnd];
+        }
+
+        return text.Length <= 56 ? text : text[..56] + "…";
+    }
 
     public bool HasLastScanSummary => LastScanSummary is not null;
 
@@ -1593,9 +1623,7 @@ public partial class PosterWallViewModel : ObservableObject
                 scanPrefix = $"{scanPrefix} 另有 {LastScanSummary.Diagnostics.Count} 条扫描诊断。";
             }
 
-            StatusMessage = string.IsNullOrWhiteSpace(StatusMessage)
-                ? scanPrefix
-                : $"{scanPrefix} {StatusMessage}";
+            StatusMessage = scanPrefix;
             ShowToast("扫描完成：新增 " + LastScanSummary.NewMovieCount + " 部电影、" + LastScanSummary.NewTvShowCount + " 部剧集", ToastKind.Success);
             _ = BackfillPersonChineseNamesAsync();
         }
@@ -2153,7 +2181,7 @@ public partial class PosterWallViewModel : ObservableObject
             StatusMessage = "正在后台扫描媒体源...";
             LastScanSummary = await RunLibraryScanAndArtworkAsync(isExplicitRequest: false, forceThumbnails: true, cancellationToken);
             string scanPrefix = $"后台扫描完成：新增 {LastScanSummary.NewMovieCount} 部电影、{LastScanSummary.NewTvShowCount} 部剧集，移除 {LastScanSummary.RemovedVideoFileCount} 个视频文件。";
-            StatusMessage = (string.IsNullOrWhiteSpace(StatusMessage) ? scanPrefix : (scanPrefix + " " + StatusMessage));
+            StatusMessage = scanPrefix;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -9827,12 +9855,47 @@ public partial class PosterWallViewModel : ObservableObject
         OnPropertyChanged("HasStatusMessage");
         OnPropertyChanged("HomeStatusMessage");
         NotifyLibraryViewFlags();
+        ScheduleStatusMessageAutoClear();
     }
 
     partial void OnStatusMessageChanged(string value)
     {
         OnPropertyChanged("HasStatusMessage");
         OnPropertyChanged("HomeStatusMessage");
+        ScheduleStatusMessageAutoClear();
+    }
+
+    /// <summary>
+    /// 首页状态栏在「一段时间内没有新进度」后自动收起；扫描或刮削仍在进行时保持显示。
+    /// </summary>
+    private void ScheduleStatusMessageAutoClear()
+    {
+        statusMessageClearToken?.Cancel();
+        CancellationTokenSource token = new();
+        statusMessageClearToken = token;
+        if (string.IsNullOrWhiteSpace(StatusMessage) || IsLibraryScanInProgress)
+        {
+            return;
+        }
+
+        _ = ClearStatusMessageAfterDelayAsync(StatusMessage, token.Token);
+    }
+
+    private async Task ClearStatusMessageAfterDelayAsync(string snapshot, CancellationToken token)
+    {
+        try
+        {
+            await Task.Delay(StatusMessageAutoClearDelay, token);
+        }
+        catch (TaskCanceledException)
+        {
+            return;
+        }
+
+        if (!IsLibraryScanInProgress && string.Equals(StatusMessage, snapshot, StringComparison.Ordinal))
+        {
+            StatusMessage = string.Empty;
+        }
     }
 
     partial void OnLastScanSummaryChanged(LibraryScanSummary? value)

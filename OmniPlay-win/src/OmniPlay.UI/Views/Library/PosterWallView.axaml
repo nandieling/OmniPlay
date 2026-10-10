@@ -10,8 +10,8 @@
     <converters:ImagePathToBitmapConverter x:Key="ImagePathToBitmapConverter" />
     <!-- 文件夹详情页年表的一行：年份标签 + 《片名》评分（库内作品加粗高亮） -->
     <DataTemplate x:Key="FolderBioRowTemplate">
-      <Grid ColumnDefinitions="38,*" Margin="0,1">
-        <TextBlock FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Text="{Binding YearLabel}" />
+      <Grid ColumnDefinitions="34,*" Margin="0,1">
+        <TextBlock FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Text="{Binding YearLabel}" TextAlignment="Right" />
         <Panel Grid.Column="1">
           <TextBlock FontSize="12" FontWeight="Bold" Foreground="{DynamicResource AccentBrush}" Text="{Binding Text}" TextWrapping="Wrap" LineHeight="17" IsVisible="{Binding IsLocal}" />
           <TextBlock FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Text="{Binding Text}" TextWrapping="Wrap" LineHeight="17" IsVisible="{Binding IsRemoteOnly}" />
@@ -290,9 +290,15 @@
     <Border Grid.Row="0" Classes="homeSurface" IsVisible="{Binding !IsDetailOpen}">
       <ScrollViewer HorizontalScrollBarVisibility="Disabled">
         <StackPanel x:Name="HomeContentStack" Margin="52,52,52,40" Spacing="6">
-          <Grid ColumnDefinitions="*,Auto,Auto" VerticalAlignment="Center">
-            <StackPanel HorizontalAlignment="Left" VerticalAlignment="Center" IsHitTestVisible="False" IsVisible="{Binding HasStatusMessage}" Margin="0,0,16,0" MaxWidth="760">
-              <TextBlock FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondaryBrush}" Text="{Binding HomeStatusMessage}" TextWrapping="Wrap" />
+          <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+            <!-- 所有提示信息统一显示在左上角，并且只占一行 -->
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center" IsHitTestVisible="False" Margin="0,0,16,0" Spacing="12">
+              <TextBlock FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondaryBrush}" Text="{Binding HomeStatusMessage}" TextTrimming="CharacterEllipsis" MaxWidth="520" VerticalAlignment="Center" IsVisible="{Binding HasStatusMessage}" />
+              <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding ShowOfflineCacheTopBar}">
+                <ProgressBar Classes="libraryProgress" Width="120" VerticalAlignment="Center" Value="{Binding OfflineCacheTopBarProgress}" />
+                <TextBlock FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondaryBrush}" Text="{Binding OfflineCacheTopBarTitle}" TextTrimming="CharacterEllipsis" MaxWidth="220" VerticalAlignment="Center" />
+                <TextBlock FontSize="11" Foreground="{DynamicResource TextFaintBrush}" Text="{Binding OfflineCacheTopBarDetail}" TextTrimming="CharacterEllipsis" MaxWidth="200" VerticalAlignment="Center" />
+              </StackPanel>
             </StackPanel>
             <Border Grid.Column="1" Classes="toolbarGroup">
               <StackPanel Orientation="Horizontal" Spacing="10">
@@ -310,13 +316,6 @@
                 </Button>
               </StackPanel>
             </Border>
-            <StackPanel Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal" Spacing="10" Margin="16,0,0,0" IsHitTestVisible="False" IsVisible="{Binding ShowOfflineCacheTopBar}">
-              <ProgressBar Classes="libraryProgress" Width="140" Value="{Binding OfflineCacheTopBarProgress}" />
-              <StackPanel Spacing="1" MaxWidth="300">
-                <TextBlock FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondaryBrush}" Text="{Binding OfflineCacheTopBarTitle}" TextTrimming="CharacterEllipsis" />
-                <TextBlock FontSize="11" Foreground="{DynamicResource TextFaintBrush}" Text="{Binding OfflineCacheTopBarDetail}" TextTrimming="CharacterEllipsis" />
-              </StackPanel>
-            </StackPanel>
           </Grid>
 
           <Popup IsLightDismissEnabled="True" IsOpen="{Binding IsSearchPopupOpen, Mode=TwoWay}" Placement="Bottom" PlacementTarget="{Binding #SearchButton}">
@@ -706,7 +705,8 @@
                 <ItemsControl.ItemTemplate>
                   <DataTemplate>
                     <Grid Width="{Binding $parent[UserControl].LibraryPosterItemWidth}">
-                      <StackPanel Width="{Binding $parent[UserControl].LibraryPosterCardWidth}" Spacing="0">
+                      <!-- 靠左贴齐单元格，卡片间距与海报墙一致 -->
+                      <StackPanel Width="{Binding $parent[UserControl].LibraryPosterCardWidth}" HorizontalAlignment="Left" Spacing="0">
                         <Grid Classes="posterInteractive" Width="{Binding $parent[UserControl].LibraryPosterCardWidth}" Height="{Binding $parent[UserControl].LibraryPosterCardHeight}" ClipToBounds="True">
                           <Button Classes="cardButton" Command="{Binding $parent[UserControl].DataContext.OpenDetailCommand}" CommandParameter="{Binding}" IsEnabled="{Binding !$parent[UserControl].DataContext.IsHomeOfflineCacheModeActive}">
                             <Grid Width="{Binding $parent[UserControl].LibraryPosterCardWidth}" Height="{Binding $parent[UserControl].LibraryPosterCardHeight}">
@@ -776,39 +776,10 @@
           <Border Classes="sectionDivider" Margin="0,8,0,6" IsVisible="{Binding ShowContinueWatching}" />
 
           <StackPanel Spacing="20">
-            <Grid ColumnDefinitions="Auto,Auto,*" VerticalAlignment="Center" Margin="0,4,0,0">
-<Grid Grid.Column="0" VerticalAlignment="Center">
-                <StackPanel Orientation="Horizontal" Spacing="10" IsVisible="{Binding !IsHomeFolderOpen}">
-                  <TextBlock FontSize="32" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" Text="{DynamicResource L077}" />
-                </StackPanel>
-                <StackPanel Orientation="Horizontal" Spacing="20" IsVisible="{Binding IsHomeFolderOpen}">
-                  <StackPanel Spacing="10">
-                    <Button Classes="flatIcon" Command="{Binding CloseHomeFolderCommand}" ToolTip.Tip="{DynamicResource L162}" HorizontalAlignment="Left">
-                      <Path Classes="iconStroke" Width="20" Height="20" Data="M19 12H5m0 0l7 7m-7-7l7-7" />
-                    </Button>
-                    <Grid Width="{Binding $parent[UserControl].LibraryPosterCardWidth}" Height="{Binding $parent[UserControl].LibraryPosterCardHeight}" ToolTip.Tip="{Binding OpenFolderCoverTip}" IsVisible="{Binding OpenFolderCoverPath, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
-                      <Border Classes="posterShell" CornerRadius="8" />
-                      <Rectangle RadiusX="8" RadiusY="8">
-                        <Rectangle.Fill><ImageBrush Source="{Binding OpenFolderCoverPath, Converter={StaticResource ImagePathToBitmapConverter}}" Stretch="UniformToFill" /></Rectangle.Fill>
-                      </Rectangle>
-                    </Grid>
-                  </StackPanel>
-                  <StackPanel MaxWidth="1040" VerticalAlignment="Top" HorizontalAlignment="Left" MinWidth="0">
-                    <TextBlock FontSize="32" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" Text="{Binding OpenFolderDisplayName}" TextTrimming="CharacterEllipsis" />
-                    <TextBlock FontSize="13" Margin="0,10,0,0" Foreground="{DynamicResource TextSecondaryBrush}" IsVisible="{Binding OpenFolderBioHeader, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" Text="{Binding OpenFolderBioHeader}" TextWrapping="Wrap" LineHeight="19" />
-                    <Grid ColumnDefinitions="*,*,*,*,*,*" Margin="0,8,0,0" IsVisible="{Binding HasOpenFolderBioRows}">
-                      <ItemsControl ItemsSource="{Binding OpenFolderBioColumns[0]}" Margin="0,0,12,0" ItemTemplate="{StaticResource FolderBioRowTemplate}" />
-                      <ItemsControl Grid.Column="1" ItemsSource="{Binding OpenFolderBioColumns[1]}" Margin="0,0,12,0" ItemTemplate="{StaticResource FolderBioRowTemplate}" />
-                      <ItemsControl Grid.Column="2" ItemsSource="{Binding OpenFolderBioColumns[2]}" Margin="0,0,12,0" ItemTemplate="{StaticResource FolderBioRowTemplate}" />
-                      <ItemsControl Grid.Column="3" ItemsSource="{Binding OpenFolderBioColumns[3]}" Margin="0,0,12,0" ItemTemplate="{StaticResource FolderBioRowTemplate}" />
-                      <ItemsControl Grid.Column="4" ItemsSource="{Binding OpenFolderBioColumns[4]}" Margin="0,0,12,0" ItemTemplate="{StaticResource FolderBioRowTemplate}" />
-                      <ItemsControl Grid.Column="5" ItemsSource="{Binding OpenFolderBioColumns[5]}" ItemTemplate="{StaticResource FolderBioRowTemplate}" />
-                    </Grid>
-                    <TextBlock FontSize="13" Margin="0,6,0,0" Foreground="{DynamicResource TextSecondaryBrush}" IsVisible="{Binding IsOpenFolderFilmographyLoading}" Text="（正在获取完整作品列表…）" />
-                  </StackPanel>
-                </StackPanel>
-              </Grid>
-              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" Margin="18,0,0,0" VerticalAlignment="Top" IsVisible="{Binding !IsHomeFolderOpen}">
+            <!-- 首页标题与工具栏：未进入分类详情时显示 -->
+            <Grid ColumnDefinitions="Auto,Auto,*" VerticalAlignment="Top" Margin="0,4,0,0" IsVisible="{Binding !IsHomeFolderOpen}">
+              <TextBlock Grid.Column="0" FontSize="32" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" Text="{DynamicResource L077}" />
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" Margin="18,0,0,0" VerticalAlignment="Top">
                 <Button x:Name="SearchButton" Classes="flatIcon" Command="{Binding ToggleSearchPopupCommand}" ToolTip.Tip="{DynamicResource L093}">
                   <Path Classes="iconStroke" Width="18" Height="18" Data="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                 </Button>
@@ -817,19 +788,47 @@
                 </Button>
                 <Button Classes="flatIcon" Command="{Binding ToggleSortDirectionCommand}" ToolTip.Tip="{Binding SortDirectionToolTip}">
                   <Panel Width="18" Height="18">
-                  <Path Classes="iconStroke" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="{Binding IsSortAscending}" Data="M12 19V5m0 0l-6 6m6-6l6 6" />
-                  <Path Classes="iconStroke" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="{Binding IsSortDescending}" Data="M12 5v14m0 0l-6-6m6 6l6-6" />
+                    <Path Classes="iconStroke" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="{Binding IsSortAscending}" Data="M12 19V5m0 0l-6 6m6-6l6 6" />
+                    <Path Classes="iconStroke" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="{Binding IsSortDescending}" Data="M12 5v14m0 0l-6-6m6 6l6 6" />
                   </Panel>
-                  </Button>
-                  <Button x:Name="CategoryButton" Classes="flatIcon" Command="{Binding ToggleHomeCategoryMenuCommand}" ToolTip.Tip="{DynamicResource L037}">
-                  <Path Classes="iconStroke" Width="18" Height="18" Data="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
-                  </Button>
+                </Button>
+                <Button x:Name="CategoryButton" Classes="flatIcon" Command="{Binding ToggleHomeCategoryMenuCommand}" ToolTip.Tip="{DynamicResource L037}">
+                  <Path Classes="iconStroke" Width="18" Height="18" Data="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012-2z" />
+                </Button>
+              </StackPanel>
+            </Grid>
+
+            <!-- 分类文件夹详情头部：返回键在人物图正上方居中，六列年表铺满剩余宽度 -->
+            <Grid ColumnDefinitions="Auto,*" Margin="0,4,0,0" IsVisible="{Binding IsHomeFolderOpen}">
+              <StackPanel Grid.Column="0" Spacing="16" Margin="0,0,24,0" VerticalAlignment="Top">
+                <Button Classes="flatIcon" Command="{Binding CloseHomeFolderCommand}" ToolTip.Tip="{DynamicResource L162}" HorizontalAlignment="Center">
+                  <Path Classes="iconStroke" Width="20" Height="20" Data="M19 12H5m0 0l7 7m-7-7l7-7" />
+                </Button>
+                <Grid Width="{Binding $parent[UserControl].LibraryPosterCardWidth}" Height="{Binding $parent[UserControl].LibraryPosterCardHeight}" ToolTip.Tip="{Binding OpenFolderCoverTip}" IsVisible="{Binding OpenFolderCoverPath, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                  <Border Classes="posterShell" CornerRadius="8" />
+                  <Rectangle RadiusX="8" RadiusY="8">
+                    <Rectangle.Fill><ImageBrush Source="{Binding OpenFolderCoverPath, Converter={StaticResource ImagePathToBitmapConverter}}" Stretch="UniformToFill" /></Rectangle.Fill>
+                  </Rectangle>
+                </Grid>
+              </StackPanel>
+              <StackPanel Grid.Column="1" VerticalAlignment="Top">
+                <TextBlock FontSize="32" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" Text="{Binding OpenFolderDisplayName}" TextTrimming="CharacterEllipsis" />
+                <TextBlock FontSize="13" Margin="0,10,0,0" Foreground="{DynamicResource TextSecondaryBrush}" IsVisible="{Binding OpenFolderBioHeader, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" Text="{Binding OpenFolderBioHeader}" TextWrapping="Wrap" LineHeight="19" />
+                <Grid ColumnDefinitions="*,*,*,*,*,*" Margin="0,8,0,0" IsVisible="{Binding HasOpenFolderBioRows}">
+                  <ItemsControl ItemsSource="{Binding OpenFolderBioColumns[0]}" Margin="0,0,18,0" ItemTemplate="{StaticResource FolderBioRowTemplate}" />
+                  <ItemsControl Grid.Column="1" ItemsSource="{Binding OpenFolderBioColumns[1]}" Margin="0,0,18,0" ItemTemplate="{StaticResource FolderBioRowTemplate}" />
+                  <ItemsControl Grid.Column="2" ItemsSource="{Binding OpenFolderBioColumns[2]}" Margin="0,0,18,0" ItemTemplate="{StaticResource FolderBioRowTemplate}" />
+                  <ItemsControl Grid.Column="3" ItemsSource="{Binding OpenFolderBioColumns[3]}" Margin="0,0,18,0" ItemTemplate="{StaticResource FolderBioRowTemplate}" />
+                  <ItemsControl Grid.Column="4" ItemsSource="{Binding OpenFolderBioColumns[4]}" Margin="0,0,18,0" ItemTemplate="{StaticResource FolderBioRowTemplate}" />
+                  <ItemsControl Grid.Column="5" ItemsSource="{Binding OpenFolderBioColumns[5]}" ItemTemplate="{StaticResource FolderBioRowTemplate}" />
+                </Grid>
+                <TextBlock FontSize="13" Margin="0,6,0,0" Foreground="{DynamicResource TextSecondaryBrush}" IsVisible="{Binding IsOpenFolderFilmographyLoading}" Text="（正在获取完整作品列表…）" />
               </StackPanel>
             </Grid>
 
               <Border Classes="sectionDivider" Margin="0,10,0,0" IsVisible="{Binding IsHomeFolderOpen}" />
 
-              <ItemsControl x:Name="LibraryItemsControl" ItemsSource="{Binding LibraryItems}">
+              <ItemsControl x:Name="LibraryItemsControl" Margin="{Binding $parent[UserControl].LibraryWallMargin}" ItemsSource="{Binding LibraryItems}">
                 <ItemsControl.ItemsPanel>
                   <ItemsPanelTemplate><WrapPanel Orientation="Horizontal" ItemWidth="{Binding $parent[UserControl].LibraryPosterItemWidth}" ItemHeight="{Binding $parent[UserControl].LibraryPosterItemHeight}" /></ItemsPanelTemplate>
                 </ItemsControl.ItemsPanel>
@@ -895,10 +894,13 @@
                           </StackPanel>
                           <!-- 分类文件夹：名称与数量同行，没有观影状态按钮（对齐 mac 版） -->
                           <Button Classes="cardButton" HorizontalContentAlignment="Center" IsVisible="{Binding IsFolder}" Command="{Binding $parent[UserControl].DataContext.OpenDetailCommand}" CommandParameter="{Binding}">
-                            <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,10,0,0" Height="20" HorizontalAlignment="Center">
-                              <TextBlock FontSize="{Binding $parent[UserControl].LibraryPosterTitleFontSize}" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Text="{Binding Title}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxWidth="{Binding $parent[UserControl].LibraryPosterSubtitleWidth}" VerticalAlignment="Center" />
-                              <TextBlock FontSize="13" FontWeight="Medium" Foreground="{DynamicResource TextSecondaryBrush}" Text="{Binding FolderCountText}" TextWrapping="NoWrap" VerticalAlignment="Center" />
-                            </StackPanel>
+                            <!-- 外层 Grid 固定为海报宽度，居中不再依赖按钮内容对齐 -->
+                            <Grid Width="{Binding $parent[UserControl].LibraryPosterCardWidth}">
+                              <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,10,0,0" Height="20" HorizontalAlignment="Center">
+                                <TextBlock FontSize="{Binding $parent[UserControl].LibraryPosterTitleFontSize}" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Text="{Binding Title}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxWidth="{Binding $parent[UserControl].LibraryPosterSubtitleWidth}" VerticalAlignment="Center" />
+                                <TextBlock FontSize="13" FontWeight="Medium" Foreground="{DynamicResource TextSecondaryBrush}" Text="{Binding FolderCountText}" TextWrapping="NoWrap" VerticalAlignment="Center" />
+                              </StackPanel>
+                            </Grid>
                           </Button>
                         </StackPanel>
                       </StackPanel>
@@ -907,7 +909,7 @@
                 </ItemsControl.ItemTemplate>
               </ItemsControl>
 
-              <ItemsControl x:Name="LibrarySkeletonPanel" IsVisible="{Binding ShowLibrarySkeleton}" ItemsSource="{Binding SkeletonItems}" Loaded="LibrarySkeletonPanel_OnLoaded">
+              <ItemsControl x:Name="LibrarySkeletonPanel" Margin="{Binding $parent[UserControl].LibraryWallMargin}" IsVisible="{Binding ShowLibrarySkeleton}" ItemsSource="{Binding SkeletonItems}" Loaded="LibrarySkeletonPanel_OnLoaded">
                 <ItemsControl.ItemsPanel>
                   <ItemsPanelTemplate><WrapPanel Orientation="Horizontal" ItemWidth="{Binding $parent[UserControl].LibraryPosterItemWidth}" ItemHeight="{Binding $parent[UserControl].LibraryPosterItemHeight}" /></ItemsPanelTemplate>
                 </ItemsControl.ItemsPanel>
@@ -1819,8 +1821,8 @@
     </Border>
 
     <!-- 全局 Toast 通知 -->
-    <ItemsControl Grid.Row="0" IsHitTestVisible="False" VerticalAlignment="Top" HorizontalAlignment="Right" Margin="0,16,28,0" ItemsSource="{Binding Toasts}">
-      <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Vertical" HorizontalAlignment="Right" Spacing="10" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+    <ItemsControl Grid.Row="0" IsHitTestVisible="False" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="52,96,0,0" IsVisible="{Binding !IsDetailOpen}" ItemsSource="{Binding Toasts}">
+      <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Vertical" HorizontalAlignment="Left" Spacing="10" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
       <ItemsControl.ItemTemplate>
         <DataTemplate>
           <Border Classes="toastCard">

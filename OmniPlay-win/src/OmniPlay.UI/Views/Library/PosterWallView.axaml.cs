@@ -74,6 +74,9 @@ public partial class PosterWallView : UserControl
     public static readonly StyledProperty<double> LibraryPosterTitleFontSizeProperty =
         AvaloniaProperty.Register<PosterWallView, double>(nameof(LibraryPosterTitleFontSize), 16);
 
+    public static readonly StyledProperty<Thickness> LibraryWallMarginProperty =
+        AvaloniaProperty.Register<PosterWallView, Thickness>(nameof(LibraryWallMargin), new Thickness(0));
+
     public static readonly StyledProperty<double> EpisodeThumbnailCardWidthProperty =
         AvaloniaProperty.Register<PosterWallView, double>(nameof(EpisodeThumbnailCardWidth), 320);
 
@@ -210,6 +213,16 @@ public partial class PosterWallView : UserControl
         private set => SetValue(LibraryPosterTitleFontSizeProperty, value);
     }
 
+    /// <summary>
+    /// 海报墙自身的左边距。WrapPanel 会把条目在 ItemWidth 槽位居中，
+    /// 首列海报因此相对标题缩进了半个间距，这里用等量负边距补回。
+    /// </summary>
+    public Thickness LibraryWallMargin
+    {
+        get => GetValue(LibraryWallMarginProperty);
+        private set => SetValue(LibraryWallMarginProperty, value);
+    }
+
     public double EpisodeThumbnailCardWidth
     {
         get => GetValue(EpisodeThumbnailCardWidthProperty);
@@ -303,6 +316,7 @@ public partial class PosterWallView : UserControl
         LibraryPosterItemHeight = itemHeight;
         LibraryPosterSubtitleWidth = Math.Max(120, cardWidth - 38);
         LibraryPosterTitleFontSize = cardWidth < 196 ? 15 : 16;
+        LibraryWallMargin = new Thickness(-Math.Round((itemWidth - cardWidth) / 2), 0, 0, 0);
 
         if (Math.Abs(libraryItemsWrapPanel.ItemWidth - itemWidth) > 0.5)
         {

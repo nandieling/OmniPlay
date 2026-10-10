@@ -2279,6 +2279,80 @@ public sealed class PosterWallViewModelTests
         Assert.Equal(1, metadataEnricher.MovieMetadataCallCount);
     }
 
+    [Fact]
+    public void HomeStatusMessage_KeepsSingleShortLine()
+    {
+        var viewModel = CreateViewModel(
+            new FakeVideoFileRepository(),
+            new FakePlaybackLauncher(),
+            new SettingsViewModel(new FakeSettingsService(), new FakeTmdbConnectionTester()),
+            new PlayerViewModel(new FakeMediaPlayer()));
+
+        viewModel.StatusMessage = "扫描完成：新增 1 部电影、0 部剧集，移除 0 个视频文件。 另有 1 条扫描诊断：目录无权限";
+        Assert.Equal("扫描完成：新增 1 部电影、0 部剧集，移除 0 个视频文件", viewModel.HomeStatusMessage);
+
+        viewModel.StatusMessage = "已添加本地媒体源：影视库。正在扫描并刮削...";
+        Assert.Equal("已添加本地媒体源：影视库", viewModel.HomeStatusMessage);
+        Assert.True(viewModel.HomeStatusMessage.Length <= 56);
+    }
+
+    [Fact]
+    public async Task HomeStatusMessage_AutoClearsAfterScanIdle()
+    {
+        TimeSpan previousDelay = PosterWallViewModel.StatusMessageAutoClearDelay;
+        PosterWallViewModel.StatusMessageAutoClearDelay = TimeSpan.FromMilliseconds(40);
+        try
+        {
+            var viewModel = CreateViewModel(
+                new FakeVideoFileRepository(),
+                new FakePlaybackLauncher(),
+                new SettingsViewModel(new FakeSettingsService(), new FakeTmdbConnectionTester()),
+                new PlayerViewModel(new FakeMediaPlayer()));
+            viewModel.StatusMessage = "扫描完成：新增 1 部电影。";
+            Assert.True(viewModel.HasStatusMessage);
+
+            await Task.Delay(400);
+
+            Assert.Equal(string.Empty, viewModel.StatusMessage);
+            Assert.False(viewModel.HasStatusMessage);
+        }
+        finally
+        {
+            PosterWallViewModel.StatusMessageAutoClearDelay = previousDelay;
+        }
+    }
+
+    [Fact]
+    public async Task HomeStatusMessage_KeptWhileScanRunningAndClearedAfterItEnds()
+    {
+        TimeSpan previousDelay = PosterWallViewModel.StatusMessageAutoClearDelay;
+        PosterWallViewModel.StatusMessageAutoClearDelay = TimeSpan.FromMilliseconds(40);
+        try
+        {
+            var viewModel = CreateViewModel(
+                new FakeVideoFileRepository(),
+                new FakePlaybackLauncher(),
+                new SettingsViewModel(new FakeSettingsService(), new FakeTmdbConnectionTester()),
+                new PlayerViewModel(new FakeMediaPlayer()));
+            viewModel.IsLibraryScanInProgress = true;
+            viewModel.StatusMessage = "正在扫描媒体源…";
+
+            await Task.Delay(300);
+
+            Assert.Equal("正在扫描媒体源…", viewModel.StatusMessage);
+
+            viewModel.IsLibraryScanInProgress = false;
+
+            await Task.Delay(400);
+
+            Assert.Equal(string.Empty, viewModel.StatusMessage);
+        }
+        finally
+        {
+            PosterWallViewModel.StatusMessageAutoClearDelay = previousDelay;
+        }
+    }
+
     private static PosterWallViewModel CreateViewModel(
         FakeVideoFileRepository videoRepository,
         FakePlaybackLauncher playbackLauncher,

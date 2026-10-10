@@ -480,6 +480,223 @@ struct WebDAVMockIntegrationTests {
         #expect(report.contains("端点=https://nas.local/dav"))
     }
 
+    @Test("WebDAV scanner keeps ingesting when the server canonicalises the mounted path")
+    func webDAVScannerReanchorsAfterServerRedirectsCollection() async throws {
+        let dbURL = makeTempDBURL()
+        defer { cleanupDBFiles(at: dbURL) }
+        try AppDatabase.shared.setup(databaseURL: dbURL)
+        let dbQueue = AppDatabase.shared.dbQueue!
+
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: "INSERT INTO mediaSource (id, name, protocolType, baseUrl, authConfig) VALUES (?, ?, ?, ?, ?)",
+                arguments: [910, "Canonicalised", MediaSourceProtocol.webdav.rawValue, "http://webdav.mock/dav/Movies/", nil]
+            )
+        }
+
+        WebDAVMockURLProtocol.reset()
+        WebDAVScannerRuntimeOverrides.protocolClasses = [WebDAVMockURLProtocol.self]
+        defer {
+            WebDAVScannerRuntimeOverrides.protocolClasses = nil
+            WebDAVMockURLProtocol.reset()
+        }
+
+        // 服务器把 /dav/Movies 规范化成 /webdav/Movies/，href 全部落在新路径下。
+        WebDAVMockURLProtocol.setSequence(path: "/dav/Movies", responses: [.multistatusAt("""
+<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response><d:href>/webdav/Movies/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+  <d:response><d:href>/webdav/Movies/Inception.2010.mkv</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>4242</d:getcontentlength></d:prop></d:propstat></d:response>
+  <d:response><d:href>/webdav/Movies/Show/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+</d:multistatus>
+""", effectiveURL: URL(string: "http://webdav.mock/webdav/Movies/")!)])
+
+        WebDAVMockURLProtocol.setSequence(path: "/webdav/Movies/Show", responses: [.multistatus("""
+<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response><d:href>/webdav/Movies/Show/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+  <d:response><d:href>/webdav/Movies/Show/S01E01.mp4</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>1024</d:getcontentlength></d:prop></d:propstat></d:response>
+</d:multistatus>
+""")])
+
+        let source = try await dbQueue.read { db in try MediaSource.fetchOne(db, key: 910) }!
+        let result = await MediaLibraryManager().scanLocalSourceWithResult(source)
+
+        let inserted = try await dbQueue.read { db in
+            try VideoFile.filter(Column("sourceId") == 910).fetchAll(db)
+        }
+        #expect(result.isSuccess)
+        #expect(Set(inserted.map(\.relativePath)) == ["Inception.2010.mkv", "Show/S01E01.mp4"])
+    }
+
+    @Test("WebDAV scanner resolves relative PROPFIND hrefs against the listed directory")
+    func webDAVScannerResolvesRelativeHrefs() async throws {
+        let dbURL = makeTempDBURL()
+        defer { cleanupDBFiles(at: dbURL) }
+        try AppDatabase.shared.setup(databaseURL: dbURL)
+        let dbQueue = AppDatabase.shared.dbQueue!
+
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: "INSERT INTO mediaSource (id, name, protocolType, baseUrl, authConfig) VALUES (?, ?, ?, ?, ?)",
+                arguments: [911, "Relative Hrefs", MediaSourceProtocol.webdav.rawValue, "http://webdav.mock/dav/Movies", nil]
+            )
+        }
+
+        WebDAVMockURLProtocol.reset()
+        WebDAVScannerRuntimeOverrides.protocolClasses = [WebDAVMockURLProtocol.self]
+        defer {
+            WebDAVScannerRuntimeOverrides.protocolClasses = nil
+            WebDAVMockURLProtocol.reset()
+        }
+
+        WebDAVMockURLProtocol.setSequence(path: "/dav/Movies", responses: [.multistatusAt("""
+<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response><d:href>./</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+  <d:response><d:href>Big.Buck.Bunny.mp4</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>2048</d:getcontentlength></d:prop></d:propstat></d:response>
+</d:multistatus>
+""", effectiveURL: URL(string: "http://webdav.mock/dav/Movies/")!)])
+
+        let source = try await dbQueue.read { db in try MediaSource.fetchOne(db, key: 911) }!
+        let result = await MediaLibraryManager().scanLocalSourceWithResult(source)
+
+        let inserted = try await dbQueue.read { db in
+            try VideoFile.filter(Column("sourceId") == 911).fetchAll(db)
+        }
+        #expect(result.isSuccess)
+        #expect(inserted.map(\.relativePath) == ["Big.Buck.Bunny.mp4"])
+    }
+
+    @Test("WebDAV scanner reports a missing keychain credential instead of an anonymous 401")
+    func webDAVScannerFailsFastOnMissingKeychainCredential() async throws {
+        let dbURL = makeTempDBURL()
+        defer { cleanupDBFiles(at: dbURL) }
+        try AppDatabase.shared.setup(databaseURL: dbURL)
+        let dbQueue = AppDatabase.shared.dbQueue!
+
+        // 指向一条并不存在的钥匙串凭据（例如在别的机器上导入的库）。
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: "INSERT INTO mediaSource (id, name, protocolType, baseUrl, authConfig) VALUES (?, ?, ?, ?, ?)",
+                arguments: [912, "Lost Credential", MediaSourceProtocol.webdav.rawValue,
+                            "http://webdav.mock/dav/Movies", "keychain:webdav:\(UUID().uuidString)"]
+            )
+        }
+
+        WebDAVMockURLProtocol.reset()
+        WebDAVScannerRuntimeOverrides.protocolClasses = [WebDAVMockURLProtocol.self]
+        defer {
+            WebDAVScannerRuntimeOverrides.protocolClasses = nil
+            WebDAVMockURLProtocol.reset()
+        }
+
+        let source = try await dbQueue.read { db in try MediaSource.fetchOne(db, key: 912) }!
+        let result = await MediaLibraryManager().scanLocalSourceWithResult(source)
+
+        #expect(result.isSuccess == false)
+        #expect(result.errorCategory == .auth)
+        #expect(result.diagnostic?.message.contains("重新登录") == true)
+        #expect(WebDAVMockURLProtocol.callCount(path: "/dav/Movies") == 0)
+    }
+
+    @Test("A library built by the old x64 migration ladder heals itself and ingests again")
+    func legacyX64DatabaseGetsHealedAndIngestsScan() async throws {
+        let dbURL = makeTempDBURL()
+        defer { cleanupDBFiles(at: dbURL) }
+
+        // 复刻 x64 版 1.7 的成品库：grdb_migrations 记到 v8，但 movie 没有 directors/casts，
+        // categoryFolder 也还不存在。新版迁移阶梯只看编号，会把「v8」当成已经做过而跳过。
+        do {
+            let legacy = try DatabaseQueue(path: dbURL.path)
+            try await legacy.write { db in
+                try db.execute(sql: "CREATE TABLE grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)")
+                for identifier in ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"] {
+                    try db.execute(sql: "INSERT INTO grdb_migrations (identifier) VALUES (?)", arguments: [identifier])
+                }
+                try db.execute(sql: """
+                    CREATE TABLE mediaSource("id" INTEGER PRIMARY KEY AUTOINCREMENT, "name" TEXT NOT NULL, \
+                    "protocolType" TEXT NOT NULL, "baseUrl" TEXT NOT NULL, "authConfig" TEXT, \
+                    "isEnabled" BOOLEAN NOT NULL DEFAULT 1, "disabledAt" DOUBLE, "addressConfig" TEXT)
+                    """)
+                try db.execute(sql: """
+                    CREATE TABLE movie("id" INTEGER PRIMARY KEY, "title" TEXT NOT NULL, "releaseDate" TEXT, \
+                    "overview" TEXT, "posterPath" TEXT, "voteAverage" DOUBLE, "isLocked" BOOLEAN NOT NULL DEFAULT 0)
+                    """)
+                try db.execute(sql: """
+                    CREATE TABLE tvShow("id" INTEGER PRIMARY KEY, "title" TEXT NOT NULL, "posterPath" TEXT, \
+                    "voteAverage" DOUBLE, "isLocked" BOOLEAN NOT NULL DEFAULT 0)
+                    """)
+                try db.execute(sql: """
+                    CREATE TABLE videoFile("id" TEXT PRIMARY KEY, \
+                    "sourceId" INTEGER NOT NULL REFERENCES "mediaSource"("id") ON DELETE CASCADE, \
+                    "relativePath" TEXT NOT NULL, "fileName" TEXT NOT NULL, "mediaType" TEXT NOT NULL, \
+                    "movieId" INTEGER REFERENCES "movie"("id") ON DELETE SET NULL, \
+                    "episodeId" INTEGER REFERENCES "tvShow"("id") ON DELETE SET NULL, \
+                    "playProgress" DOUBLE NOT NULL DEFAULT 0.0, "duration" DOUBLE NOT NULL DEFAULT 0.0, \
+                    "customSubtitle" TEXT, "lastPlayedAt" DOUBLE, "fileSize" INTEGER NOT NULL DEFAULT 0)
+                    """)
+                try db.execute(sql: """
+                    CREATE TABLE doubanMetadata("movieId" INTEGER PRIMARY KEY REFERENCES "movie"("id") ON DELETE CASCADE, \
+                    "subjectId" TEXT NOT NULL, "subjectURL" TEXT NOT NULL, "title" TEXT NOT NULL, "fetchedAt" DOUBLE NOT NULL, \
+                    "nextRefreshAt" DOUBLE NOT NULL)
+                    """)
+                try db.execute(sql: """
+                    INSERT INTO mediaSource (id, name, protocolType, baseUrl, authConfig) \
+                    VALUES (930, 'Legacy x64', 'webdav', 'http://webdav.mock/dav/Legacy', NULL)
+                    """)
+                try db.execute(sql: "INSERT INTO movie (id, title) VALUES (-42, '旧库里的片子')")
+                try db.execute(sql: """
+                    INSERT INTO videoFile (id, sourceId, relativePath, fileName, mediaType, movieId, playProgress) \
+                    VALUES ('legacy-1', 930, 'Old.Movie.mkv', 'Old.Movie.mkv', 'movie', -42, 0.0)
+                    """)
+            }
+        }
+
+        try AppDatabase.shared.setup(databaseURL: dbURL)
+        let dbQueue = AppDatabase.shared.dbQueue!
+        #expect(AppDatabase.shared.setupError == nil)
+
+        try await dbQueue.read { db in
+            let movieColumns = try db.columns(in: "movie").map { $0.name.lowercased() }
+            #expect(movieColumns.contains("directors"))
+            #expect(movieColumns.contains("casts"))
+            #expect(try db.tableExists("categoryFolder"))
+            #expect(try db.tableExists("personProfile"))
+            #expect(try db.tableExists("chineseNameCache"))
+            #expect(try String.fetchOne(db, sql: "SELECT title FROM movie WHERE id = -42") == "旧库里的片子")
+            #expect(try Int64.fetchOne(db, sql: "SELECT COUNT(*) FROM videoFile WHERE id = 'legacy-1'") == 1)
+            let applied = try String.fetchSet(db, sql: "SELECT identifier FROM grdb_migrations")
+            #expect(applied.contains("v11"))
+        }
+
+        WebDAVMockURLProtocol.reset()
+        WebDAVScannerRuntimeOverrides.protocolClasses = [WebDAVMockURLProtocol.self]
+        defer {
+            WebDAVScannerRuntimeOverrides.protocolClasses = nil
+            WebDAVMockURLProtocol.reset()
+        }
+        WebDAVMockURLProtocol.stub(path: "/dav/Legacy", xmlBody: """
+<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response><d:href>/dav/Legacy/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+  <d:response><d:href>/dav/Legacy/Old.Movie.mkv</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>2048</d:getcontentlength></d:prop></d:propstat></d:response>
+  <d:response><d:href>/dav/Legacy/New.Movie.2024.mkv</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>4096</d:getcontentlength></d:prop></d:propstat></d:response>
+</d:multistatus>
+""")
+
+        let source = try await dbQueue.read { db in try MediaSource.fetchOne(db, key: 930) }!
+        let result = await MediaLibraryManager().scanLocalSourceWithResult(source)
+
+        // 修复前这一步会整批回滚：占位影片写不进去，videoFile 只会报外键约束失败。
+        #expect(result.isSuccess)
+        #expect(result.errorCategory == nil)
+        let paths = try await dbQueue.read { db in
+            try VideoFile.filter(Column("sourceId") == 930).fetchAll(db).map(\.relativePath)
+        }
+        #expect(Set(paths).isSuperset(of: ["New.Movie.2024.mkv", "Old.Movie.mkv"]))
+    }
+
     private func makeTempDBURL() -> URL {
         URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("omniplay-webdav-test-\(UUID().uuidString).sqlite")
@@ -499,6 +716,7 @@ private final class WebDAVMockURLProtocol: URLProtocol {
         let statusCode: Int
         let body: Data
         let errorCode: URLError.Code?
+        var effectiveURL: URL? = nil
     }
 
     private static let lock = NSLock()
@@ -528,6 +746,8 @@ private final class WebDAVMockURLProtocol: URLProtocol {
                 return StubResponse(statusCode: code, body: Data(), errorCode: nil)
             case .multistatus(let xml):
                 return StubResponse(statusCode: 207, body: Data(xml.utf8), errorCode: nil)
+            case .multistatusAt(let xml, let effectiveURL):
+                return StubResponse(statusCode: 207, body: Data(xml.utf8), errorCode: nil, effectiveURL: effectiveURL)
             case .urlError(let code):
                 return StubResponse(statusCode: -1, body: Data(), errorCode: code)
             }
@@ -584,7 +804,8 @@ private final class WebDAVMockURLProtocol: URLProtocol {
         }
 
         let headers = ["Content-Type": "application/xml; charset=utf-8"]
-        let response = HTTPURLResponse(url: url, statusCode: selected.statusCode, httpVersion: nil, headerFields: headers)!
+        let responseURL = selected.effectiveURL ?? url
+        let response = HTTPURLResponse(url: responseURL, statusCode: selected.statusCode, httpVersion: nil, headerFields: headers)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         if !selected.body.isEmpty {
             client?.urlProtocol(self, didLoad: selected.body)
@@ -606,6 +827,8 @@ private final class WebDAVMockURLProtocol: URLProtocol {
     enum Response {
         case status(Int)
         case multistatus(String)
+        /// 服务器在重定向或补斜杠之后，用另一个地址响应这次 PROPFIND。
+        case multistatusAt(String, effectiveURL: URL)
         case urlError(URLError.Code)
     }
 }
