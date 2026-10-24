@@ -1,5 +1,6 @@
 .gradle/
 .android-sdk/
+.jdk/
 keystore/
 .idea/
 .cxx/

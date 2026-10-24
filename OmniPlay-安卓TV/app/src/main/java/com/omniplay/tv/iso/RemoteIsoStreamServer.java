@@ -46,7 +46,8 @@ public final class RemoteIsoStreamServer {
         long isoSize = reader.contentLength();
         List<IsoFile> files = new IsoImageParser(reader, isoSize).bluRayStreamFiles();
         if (files.isEmpty()) {
-            throw new IOException("ISO 内未找到 BDMV/STREAM 视频流。");
+            throw new IOException("这个 ISO 里没有找到 BDMV/STREAM 视频流（目前只支持蓝光 ISO，"
+                    + "DVD 的 VIDEO_TS 暂不识别）。");
         }
 
         IsoFile selected = Collections.max(files, Comparator.comparingLong(file -> file.size));

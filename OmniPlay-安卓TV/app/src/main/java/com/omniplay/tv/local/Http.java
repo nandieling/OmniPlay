@@ -68,6 +68,67 @@ public final class Http {
     public static Response request(String url, String method,
                                    Map<String, String> headers, byte[] body,
                                    int timeoutMs) throws IOException {
+        return send(url, method, headers, body == null ? null : new ByteArrayBody(body), timeoutMs);
+    }
+
+    /** 把本机文件当作请求体发出去：字幕转档产物（尤其 PGS）能有几百 MB，不进内存。 */
+    public static Response putFile(String url, Map<String, String> headers,
+                                   java.io.File file, int timeoutMs) throws IOException {
+        return send(url, "PUT", headers, new FileBody(file), timeoutMs);
+    }
+
+    /** 请求体：内存字节或本机文件。 */
+    interface Body {
+        long length();
+
+        void writeTo(java.io.OutputStream output) throws IOException;
+    }
+
+    private static final class ByteArrayBody implements Body {
+        private final byte[] bytes;
+
+        ByteArrayBody(byte[] bytes) {
+            this.bytes = bytes;
+        }
+
+        @Override
+        public long length() {
+            return bytes.length;
+        }
+
+        @Override
+        public void writeTo(java.io.OutputStream output) throws IOException {
+            output.write(bytes);
+        }
+    }
+
+    private static final class FileBody implements Body {
+        private final java.io.File file;
+
+        FileBody(java.io.File file) {
+            this.file = file;
+        }
+
+        @Override
+        public long length() {
+            return file.length();
+        }
+
+        @Override
+        public void writeTo(java.io.OutputStream output) throws IOException {
+            try (java.io.InputStream input = new java.io.FileInputStream(file)) {
+                byte[] buffer = new byte[65536];
+                int read;
+                while ((read = input.read(buffer)) > 0) {
+                    output.write(buffer, 0, read);
+                }
+            }
+        }
+    }
+
+    private static Response send(String url, String method,
+                                 Map<String, String> headers, Body body,
+                                 int timeoutMs) throws IOException {
         Target target = Target.parse(url);
         Socket socket = target.tls ? secureFactory().createSocket() : new Socket();
         try {
@@ -114,7 +175,7 @@ public final class Http {
     }
 
     private static void writeRequest(OutputStream output, Target target, String method,
-                                     Map<String, String> headers, byte[] body) throws IOException {
+                                     Map<String, String> headers, Body body) throws IOException {
         StringBuilder request = new StringBuilder(256);
         request.append(method).append(' ').append(target.requestTarget).append(" HTTP/1.1\r\n");
         request.append("Host: ").append(target.authority).append("\r\n");
@@ -128,12 +189,12 @@ public final class Http {
             }
         }
         if (body != null) {
-            request.append("Content-Length: ").append(body.length).append("\r\n");
+            request.append("Content-Length: ").append(body.length()).append("\r\n");
         }
         request.append("\r\n");
         output.write(request.toString().getBytes(StandardCharsets.US_ASCII));
-        if (body != null && body.length > 0) {
-            output.write(body);
+        if (body != null && body.length() > 0) {
+            body.writeTo(output);
         }
         output.flush();
     }
@@ -171,7 +232,7 @@ public final class Http {
         return new Response(status, headers, body);
     }
 
-    public static final String USER_AGENT = "OmniPlay-Android/1.22";
+    public static final String USER_AGENT = "OmniPlay-Android/1.34";
 
     private static byte[] readBody(InputStream input, String transferEncoding, String contentLength)
             throws IOException {

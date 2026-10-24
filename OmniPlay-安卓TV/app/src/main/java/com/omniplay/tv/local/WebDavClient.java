@@ -71,8 +71,22 @@ public final class WebDavClient {
     private final Credential credential;
     private final java.util.Map<String, List<Entry>> directoryCache = new ConcurrentHashMap<>();
     // 光盘的 BDMV / STREAM / DISC1 也要占三层，深度太小会让整盘看不见；
-    // 本地目录走 12 层，这里对齐。
+    // 本地目录走 12 层，这里对齐。这条只当兜底：真正的「不重走」由 visited 集合保证。
     private int maxDepth = 12;
+    /** 一轮遍历最多列多少个目录：畸形响应把兄弟目录也回成子条目时，宁可少扫一片，也别把电视跑死。 */
+    private static final int MAX_DIRECTORIES = 20000;
+    /** 清单缓存只为遍历期间的自引用条目和目录选择器服务，涨过头就整份重来，别吃掉电视的内存。 */
+    private static final int MAX_CACHED_DIRECTORIES = 4096;
+    /** 待走的目录（广度优先，与 mac 版的 pendingDirectories 同一走法）。 */
+    private static final class PendingDirectory {
+        final String url;
+        final int depth;
+
+        PendingDirectory(String url, int depth) {
+            this.url = url;
+            this.depth = depth;
+        }
+    }
 
     public WebDavClient(String rootUrl, Credential credential) {
         this.rootUrl = normalizeRoot(rootUrl);
@@ -121,6 +135,9 @@ public final class WebDavClient {
         }
         List<Entry> entries = parseMultiStatus(new ByteArrayInputStream(response.body), url);
         synchronized (entries) {
+            if (directoryCache.size() > MAX_CACHED_DIRECTORIES) {
+                directoryCache.clear();
+            }
             directoryCache.put(url, entries);
         }
         return entries;
@@ -132,25 +149,69 @@ public final class WebDavClient {
      * 否则 BDMV 一旦剪掉，原盘电影就一个条目都进不来。
      */
     public void walk(VideoSink sink) throws IOException {
-        walkInternal(rootUrl, 0, sink);
+        java.util.Deque<PendingDirectory> pending = new java.util.ArrayDeque<>();
+        java.util.Set<String> visited = new java.util.HashSet<>();
+        pending.add(new PendingDirectory(rootUrl, 0));
+        int listed = 0;
+        while (!pending.isEmpty()) {
+            PendingDirectory directory = pending.pollFirst();
+            String key = directoryKey(directory.url);
+            // 同一个目录只列一次：服务器常把 /影视 规范化成 /影视/，也可能回一条别名路径，
+            // 两者算同一个目录；跳过已经走过的，才不会有「一个文件夹走出几万条记录」。
+            if (!visited.add(key)) {
+                continue;
+            }
+            if (++listed > MAX_DIRECTORIES) {
+                throw new IOException("这个媒体源的目录超过 " + MAX_DIRECTORIES
+                        + " 个，这一轮先停在这里。");
+            }
+            for (Entry entry : list(directory.url)) {
+                if (!entry.isCollection) {
+                    if (LocalMediaNameParser.isVideoFile(entry.name)) {
+                        sink.onVideo(entry.name, relativePath(entry.href), entry.sizeBytes);
+                    }
+                    continue;
+                }
+                if (isSkippableCollection(entry.name)) {
+                    continue;
+                }
+                // RFC 4918 要求 Depth:1 的响应里带上「被请求的目录自己」。上一版直接照着
+                // 递归，等于让每个目录原地自套十二层，文件数按指数量往上翻，扫描永远走不完，
+                // 刮削也一直排不上队。mac 版靠 visitedDirectories + 相对路径必须落在本目录
+                // 之下这两道判断挡掉它，这里同一套。
+                if (directoryKey(entry.href).equals(key)) {
+                    continue;
+                }
+                if (directory.depth + 1 > maxDepth) {
+                    continue;
+                }
+                pending.add(new PendingDirectory(entry.href, directory.depth + 1));
+            }
+        }
     }
 
-    private void walkInternal(String url, int depth, VideoSink sink) throws IOException {
-        if (depth > maxDepth) {
-            return;
+    /**
+     * 目录的身份：只看主机之后的那段路径，先解一层百分号转义、再去掉结尾斜杠。
+     * 编码写法不同、结尾斜杠有无不同，都算同一个目录（与 mac 版 normalizePath 同一口径）。
+     */
+    private static String directoryKey(String url) {
+        String decoded = UrlLabels.displayPath(url);
+        int schemeEnd = decoded.indexOf("://");
+        String rest = schemeEnd >= 0 ? decoded.substring(schemeEnd + 3) : decoded;
+        int slash = rest.indexOf('/');
+        String path = slash >= 0 ? rest.substring(slash) : "/";
+        int query = path.indexOf('?');
+        if (query >= 0) {
+            path = path.substring(0, query);
         }
-        for (Entry entry : list(url)) {
-            if (!entry.isCollection) {
-                if (LocalMediaNameParser.isVideoFile(entry.name)) {
-                    sink.onVideo(entry.name, relativePath(entry.href), entry.sizeBytes);
-                }
-                continue;
-            }
-            if (isSkippableCollection(entry.name)) {
-                continue;
-            }
-            walkInternal(entry.href, depth + 1, sink);
+        int fragment = path.indexOf('#');
+        if (fragment >= 0) {
+            path = path.substring(0, fragment);
         }
+        while (path.length() > 1 && path.endsWith("/")) {
+            path = path.substring(0, path.length() - 1);
+        }
+        return path;
     }
 
     /** 只有系统垃圾目录才剪掉；BDMV / STREAM / DISC1 都得走进去。 */

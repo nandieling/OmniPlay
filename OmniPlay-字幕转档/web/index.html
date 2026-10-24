@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OmniPlay 字幕转档</title>
+<style>
+  :root {
+    --bg: #f6f7f8; --panel: #ffffff; --line: #e0e3e6; --ink: #1b1f23;
+    --ink-2: #5b6570; --ink-3: #8a939d; --accent: #1f6f5c; --accent-ink: #ffffff;
+    --chip: #eef0f2; --shadow: 0 1px 2px rgba(16,22,26,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131619; --panel: #191d21; --line: #2a3036; --ink: #e8ebee;
+      --ink-2: #9aa4ad; --ink-3: #6d777f; --accent: #3ba88a; --accent-ink: #0c1113;
+      --chip: #222830; --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    font-variant-numeric: tabular-nums;
+  }
+  header {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 3;
+  }
+  h1 { font-size: 15px; margin: 0 6px 0 0; letter-spacing: 0; }
+  .grow { flex: 1 1 auto; }
+  .chip {
+    background: var(--chip); border-radius: 5px; padding: 3px 8px; font-size: 12px;
+    color: var(--ink-2); white-space: nowrap;
+  }
+  .chip.bad { color: #b3352c; }
+  .chip.good { color: var(--accent); }
+  button {
+    font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 11px; cursor: pointer; display: inline-flex;
+    align-items: center; gap: 6px; box-shadow: var(--shadow);
+  }
+  button:hover { border-color: var(--ink-3); }
+  button:disabled { opacity: .5; cursor: default; }
+  button { white-space: nowrap; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button svg { width: 14px; height: 14px; }
+  main { padding: 18px 20px 40px; max-width: 1180px; margin: 0 auto; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; }
+  .tile {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 11px 13px; display: block; text-align: left;
+  }
+  .tile b { display: block; font-size: 22px; font-weight: 600; letter-spacing: -.2px; }
+  .tile span { color: var(--ink-2); font-size: 12px; }
+  .tile[aria-pressed=true] { border-color: var(--accent); background: var(--chip); }
+  .tile[aria-pressed=true] span { color: var(--accent); }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 18px 0 10px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; box-shadow: none; padding: 5px 10px; font-size: 13px; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button[aria-pressed=true] { background: var(--accent); color: var(--accent-ink); }
+  input[type=search], input[type=text] {
+    font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 9px; min-width: 180px;
+  }
+  input::placeholder { color: var(--ink-3); }
+  table { width: 100%; border-collapse: collapse; background: var(--panel);
+          border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  thead th {
+    text-align: left; font-size: 12px; font-weight: 600; color: var(--ink-2);
+    padding: 8px 12px; border-bottom: 1px solid var(--line); white-space: nowrap;
+  }
+  tbody td { padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: rgba(127,140,150,.06); }
+  .path { word-break: break-all; max-width: 460px; }
+  .path small { display: block; color: var(--ink-3); font-size: 11px; }
+  .pill {
+    display: inline-block; padding: 2px 7px; border-radius: 5px; font-size: 12px;
+    background: var(--chip); color: var(--ink-2); white-space: nowrap;
+  }
+  .pill.done { background: rgba(31,111,92,.14); color: var(--accent); }
+  .pill.running { background: rgba(47,111,138,.16); color: #3f8fb0; }
+  .pill.pending { background: rgba(176,132,32,.16); color: #b08420; }
+  .pill.failed { background: rgba(179,53,44,.15); color: #b3352c; }
+  .pill.readonly { background: rgba(140,86,120,.16); color: #a06a8a; }
+  .muted { color: var(--ink-3); }
+  .disks { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+           gap: 10px; margin-top: 10px; }
+  .disk { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+          padding: 10px 13px; }
+  .disk b { font-size: 13px; font-weight: 600; display: block; word-break: break-all; }
+  .disk .note { color: var(--ink-2); font-size: 12px; margin-top: 2px; }
+  .disk.low { border-color: #b3352c; }
+  .disk.low .note { color: #b3352c; }
+  .meter { height: 6px; border-radius: 3px; background: var(--chip); margin-top: 8px;
+           overflow: hidden; }
+  .meter i { display: block; height: 100%; background: var(--accent); }
+  .meter i.low { background: #b3352c; }
+  .warn { margin-top: 10px; border: 1px solid #b3352c; color: #b3352c; border-radius: 8px;
+          padding: 8px 12px; font-size: 13px; }
+  select {
+    font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 7px;
+  }
+  .pager { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px;
+           color: var(--ink-2); font-size: 13px; }
+  .pager .grow { flex: 1 1 auto; }
+  .state {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 13px;
+    color: var(--ink-2); white-space: nowrap;
+  }
+  .state i { width: 8px; height: 8px; border-radius: 4px; background: var(--ink-3); }
+  .state.run i { background: var(--accent); }
+  .state.pause i { background: #b08420; }
+  .state.low i { background: #b3352c; }
+  input[type=number] {
+    font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 7px; width: 96px;
+  }
+  .sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
+  /* 一句设置成一块：窄屏整块换行，别从句子中间断开 */
+  .clause { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  /* 改过还没保存：把「保存策略」点亮，别让用户以为已经生效了 */
+  #policyBtn.dirty { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .empty { padding: 34px 12px; text-align: center; color: var(--ink-3); }
+  footer { color: var(--ink-3); font-size: 12px; margin-top: 12px; }
+  dialog {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink);
+    padding: 18px; width: min(420px, 90vw);
+  }
+  dialog::backdrop { background: rgba(10,14,16,.4); }
+  dialog h2 { font-size: 15px; margin: 0 0 6px; }
+  dialog p { margin: 0 0 12px; color: var(--ink-2); font-size: 13px; }
+  dialog input { width: 100%; }
+  dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+  .toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: 6px;
+    font-size: 13px; opacity: 0; transition: opacity .18s; pointer-events: none;
+  }
+  .toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>OmniPlay 字幕转档</h1>
+  <span class="chip" id="version">—</span>
+  <span class="chip" id="ffmpeg">—</span>
+  <span class="chip" id="roots">—</span>
+  <span class="grow"></span>
+  <button id="tokenBtn" title="设置了 SIDECAR_TOKEN 时才需要">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M17 8.5 20.5 5v-2H17v2h-2.5"/></svg>
+    访问令牌
+  </button>
+  <button id="scanBtn" class="primary" title="立刻走一遍媒体库，把没转的排进队列">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M3 12h18"/></svg>
+    扫描媒体库
+  </button>
+</header>
+
+<main>
+  <div class="tiles" id="tiles" role="group" title="点一格，下面的列表就只看这一类"></div>
+  <div class="disks" id="disks"></div>
+  <div class="warn" id="paused" hidden></div>
+
+  <div class="bar">
+    <span class="state" id="state"><i></i><b id="stateText">连接中</b></span>
+    <button id="runBtn" class="primary" title="开始或继续扫描与转档">开始转档</button>
+    <button id="pauseBtn" title="停下来：不再扫描也不再转档，队列留着">暂停</button>
+    <span class="sep"></span>
+    <span class="clause">只转
+      <select id="minHeight" title="低分辨率的片子兼容模式不卡，可以不去抽字幕">
+        <option value="0">全部分辨率</option>
+        <option value="1080">1080p 及以上</option>
+        <option value="2160">4K 及以上</option>
+      </select>
+    </span>
+    <span class="clause">；剩余空间低于
+      <input type="number" id="minFree" min="0" step="50" value="500"
+             title="媒体库所在盘剩到这个数以下就停手，0 表示不限制">
+      GB 时暂停
+    </span>
+    <button id="policyBtn">保存策略</button>
+    <span class="grow"></span>
+  </div>
+
+  <div class="bar">
+    <div class="seg" id="resSeg" title="只看某个分辨率以上的片子">
+      <button data-r="" aria-pressed="true">全部分辨率</button>
+      <button data-r="uhd">4K</button>
+      <button data-r="fhd">1080p</button>
+      <button data-r="sdp">720p 及以下</button>
+    </div>
+    <input type="search" id="q" placeholder="筛文件名">
+    <span class="grow"></span>
+    <input type="text" id="manual" placeholder="手动转一条：Movies/A.mkv">
+    <button id="manualBtn" title="让 NAS 现在就转这一条">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      转档
+    </button>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>文件</th><th>分辨率</th><th>字幕轨</th><th>状态</th><th>进度</th><th>产物</th><th>更新</th><th></th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="empty" id="empty" hidden>还没有任务。点「扫描媒体库」，或者从电视端点一次转档。</div>
+  <div class="pager" id="pager"></div>
+  <footer id="foot"></footer>
+</main>
+
+<dialog id="tokenDialog">
+  <h2>访问令牌</h2>
+  <p>NAS 起了 <code>SIDECAR_TOKEN</code> 时，把同一个令牌填在这里；没起就不用填。</p>
+  <input type="text" id="tokenInput" placeholder="留空表示不鉴权" autocomplete="off">
+  <div class="row">
+    <button id="tokenClose">取消</button>
+    <button id="tokenSave" class="primary">保存</button>
+  </div>
+</dialog>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const state = {
+  jobs: [], counts: {}, filter: "all", res: "", q: "", health: null, scanning: false,
+  page: 1, pages: 1, total: 0, perPage: 50,
+};
+const TOKEN_KEY = "omniplay.sidecar.token";
+
+const STATUS = {
+  done: ["已完成", "done"], pending: ["待转", "pending"], running: ["转档中", "running"],
+  failed: ["失败", "failed"], readonly: ["只读", "readonly"],
+  unsupported: ["转不了", ""], skipped: ["已有字幕", ""],
+};
+
+function esc(value) {
+  return String(value == null ? "" : value).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+async function api(path, options) {
+  const extra = Object.assign({}, (options || {}).headers);
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (token) extra.Authorization = "Bearer " + token;
+  const response = await fetch(path, Object.assign({}, options, { headers: extra }));
+  if (response.status === 401) { openToken("令牌不对或缺少令牌"); throw new Error("auth"); }
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || ("HTTP " + response.status));
+  return body;
+}
+
+function toast(text) {
+  const node = document.getElementById("toast");
+  node.textContent = text;
+  node.classList.add("on");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => node.classList.remove("on"), 2600);
+}
+
+function bytes(value) {
+  if (!value) return "—";
+  if (value < 1024) return value + " B";
+  if (value < 1048576) return (value / 1024).toFixed(0) + " KB";
+  return (value / 1048576).toFixed(1) + " MB";
+}
+
+function clock(seconds) {
+  if (!seconds || seconds < 0) return "—";
+  const total = Math.round(seconds);
+  return Math.floor(total / 60) + " 分 " + String(total % 60).padStart(2, "0") + " 秒";
+}
+
+function age(seconds) {
+  if (seconds == null) return "—";
+  if (seconds < 60) return Math.round(seconds) + " 秒前";
+  if (seconds < 3600) return Math.round(seconds / 60) + " 分钟前";
+  if (seconds < 86400) return (seconds / 3600).toFixed(1) + " 小时前";
+  return Math.round(seconds / 86400) + " 天前";
+}
+
+function heightLabel(job) {
+  const height = Number(job.height || 0);
+  if (!height) return '<span class="muted">—</span>';
+  return height + "p";
+}
+
+function renderState() {
+  const health = state.health;
+  if (!health) return;
+  const node = document.getElementById("state");
+  const text = document.getElementById("stateText");
+  const low = (health.disk || []).some((item) => item.low);
+  const pending = Number((health.counts || {}).pending || 0);
+  const running = health.state === "running";
+  node.className = "state " + (!running ? "pause" : (low ? "low" : "run"));
+  text.textContent = !running ? "已暂停" + (pending ? " · 队列里 " + pending + " 条在等" : "")
+    : health.scanning ? "正在扫描媒体库…"
+    : low ? "空间不够，先停着手" : "正在跑";
+  const run = document.getElementById("runBtn");
+  run.textContent = (health.counts || {}).done ? "继续转档" : "开始转档";
+  run.disabled = running;
+  document.getElementById("pauseBtn").disabled = !running;
+  const banner = document.getElementById("paused");
+  if (!running) {
+    banner.hidden = false;
+    banner.textContent = "现在是暂停状态：不会自己扫描，也不会转档。点「开始转档」就接着跑。";
+  } else if (low) {
+    banner.hidden = false;
+    banner.textContent = "媒体库所在盘的剩余空间到了阈值，转档先停着；腾出空间或调低阈值后自动继续。";
+  } else {
+    banner.hidden = true;
+  }
+}
+
+function policyFields() {
+  return [document.getElementById("minHeight"), document.getElementById("minFree")];
+}
+
+/**
+ * 把服务端的策略回填到表单。正在填的那个框要跳过：轮询 3 秒一次，
+ * 手刚敲下去就被打回已保存的值，看起来就像数字自己归零了。
+ */
+function syncPolicyInputs(policy) {
+  const values = { minHeight: policy.min_height || 0, minFree: policy.min_free_gb || 0 };
+  for (const node of policyFields()) {
+    if (node === document.activeElement || node.dataset.dirty === "1") continue;
+    node.value = String(values[node.id]);
+  }
+}
+
+function markDirty(event) {
+  event.target.dataset.dirty = "1";
+  document.getElementById("policyBtn").classList.add("dirty");
+  document.getElementById("policyBtn").textContent = "保存策略（未保存）";
+}
+for (const node of policyFields()) {
+  node.addEventListener("input", markDirty);
+  node.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); savePolicy(); }
+  });
+}
+
+async function setRun(action) {
+  // 先把手感做出来：按钮立刻变灰，页面下一轮刷新时按服务端的真实状态接管
+  document.getElementById("runBtn").disabled = action === "start";
+  document.getElementById("pauseBtn").disabled = action === "pause";
+  try {
+    await api("/api/run", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: action }),
+    });
+    toast(action === "pause" ? "已暂停。" : "开始跑了。");
+    await refresh();
+  } catch (error) {
+    if (error.message !== "auth") toast("失败了：" + error.message);
+  }
+}
+document.getElementById("runBtn").addEventListener("click", () => setRun("start"));
+document.getElementById("pauseBtn").addEventListener("click", () => setRun("pause"));
+
+function renderDisks() {
+  const health = state.health;
+  const box = document.getElementById("disks");
+  if (!health || !health.disk || !health.disk.length) { box.innerHTML = ""; return; }
+  box.innerHTML = health.disk.map((item) => {
+    const total = Number(item.total || 0), free = Number(item.free || 0);
+    const used = total ? Math.round((1 - free / total) * 100) : 0;
+    const note = !item.mounted ? "没挂载上"
+      : (item.low ? "只剩 " + gb(free) + "，低于阈值，已暂停往里写"
+                  : "剩 " + gb(free) + " / 共 " + gb(total)
+                    + (Number(item.min_free) ? "（阈值 " + gb(item.min_free) + "）" : ""));
+    return '<div class="disk' + (item.low ? " low" : "") + '"><b>' + esc(item.root)
+      + (item.writable ? "" : " · 只读") + '</b><div class="note">' + esc(note)
+      + '</div><div class="meter"><i class="' + (item.low ? "low" : "") + '" style="width:'
+      + used + '%"></i></div></div>';
+  }).join("");
+}
+
+function gb(value) {
+  const size = Number(value || 0);
+  if (!size) return "—";
+  if (size >= 1073741824) return (size / 1073741824).toFixed(1) + " GB";
+  return (size / 1048576).toFixed(0) + " MB";
+}
+
+function renderPager() {
+  const node = document.getElementById("pager");
+  if (state.total <= state.perPage && state.page === 1) {
+    node.innerHTML = '<span class="grow"></span><span>共 ' + state.total + ' 条</span>';
+    return;
+  }
+  node.innerHTML = '<button id="prevPage"' + (state.page <= 1 ? " disabled" : "")
+    + '>上一页</button><span>第 ' + state.page + " / " + state.pages
+    + ' 页 · 共 ' + state.total + ' 条</span><button id="nextPage"'
+    + (state.page >= state.pages ? " disabled" : "") + '>下一页</button>'
+    + '<span class="grow"></span><span>每页</span>'
+    + '<select id="perPage"><option value="50">50</option><option value="100">100</option>'
+    + '<option value="200">200</option></select>';
+  node.querySelector("#perPage").value = String(state.perPage);
+}
+
+function renderHeader() {
+  const health = state.health;
+  if (!health) return;
+  document.getElementById("version").textContent = "v" + health.version;
+  const ff = document.getElementById("ffmpeg");
+  ff.textContent = "ffmpeg" + (health.bluray ? " + libbluray" : "（无 libbluray）");
+  ff.className = "chip " + (health.bluray ? "good" : "");
+  const roots = document.getElementById("roots");
+  roots.textContent = health.roots.map((item) =>
+    item.root + (item.writable ? " 可写" : (item.mounted ? " 只读" : " 未挂载"))).join("　");
+  roots.className = "chip " + (health.roots.some((item) => item.writable) ? "good" : "bad");
+}
+
+// 顶部一格 = 列表一个筛选项，点哪格列表就只看那一类。
+// 格子只建一次，之后就地改数字，免得每 3 秒重建 DOM 把正在点的按钮换掉。
+let tilesBuilt = false;
+function renderTiles() {
+  const counts = state.counts || {};
+  const total = Object.keys(counts).reduce((sum, key) => sum + Number(counts[key] || 0), 0);
+  const tiles = [
+    ["all", "全部", total], ["running", "正在转"], ["pending", "排队中"],
+    ["done", "已转好"], ["failed", "失败"], ["readonly", "写不回去"],
+    ["unsupported", "转不了"], ["skipped", "跳过"],
+  ];
+  const host = document.getElementById("tiles");
+  if (!tilesBuilt) {
+    host.innerHTML = tiles.map(([key, label]) =>
+      '<button class="tile" data-f="' + key + '"><b>0</b><span>' + label + "</span></button>"
+    ).join("");
+    tilesBuilt = true;
+  }
+  for (const [key, label, value] of tiles) {
+    const tile = host.querySelector('[data-f="' + key + '"]');
+    if (!tile) continue;
+    tile.querySelector("b").textContent = String(value == null ? (counts[key] || 0) : value);
+    tile.setAttribute("aria-pressed", String(state.filter === key));
+  }
+}
+
+function renderRows() {
+  const rows = state.jobs;
+  document.getElementById("rows").innerHTML = rows.map((job) => {
+    let [label, tone] = STATUS[job.status] || [job.status, ""];
+    // 「跳过」有两种原因，行里写清楚是哪一种。
+    if (job.status === "skipped" && String(job.detail || "").indexOf("按策略不转") >= 0) {
+      label = "按策略不转";
+    }
+    const detail = job.detail ? '<small>' + esc(job.detail) + "</small>" : "";
+    const track = job.language
+      ? esc(job.language) + " · " + esc(job.format) + " · 轨 " + (Number(job.track_index) + 1)
+      : '<span class="muted">—</span>';
+    const progress = job.status === "running"
+      ? "已抽到 " + clock(job.covered) : (job.covered ? clock(job.covered) : '<span class="muted">—</span>');
+    const retry = ["failed", "unsupported", "skipped", "readonly", "done"].indexOf(job.status) >= 0
+      ? '<button data-retry="' + esc(job.path) + '" title="重新探一遍并再转一次">重试</button>' : "";
+    return "<tr><td class='path'>" + esc(job.path) + detail + "</td><td>" + heightLabel(job) + "</td><td>" + track + "</td>"
+      + "<td><span class='pill " + tone + "'>" + esc(label) + "</span></td>"
+      + "<td>" + progress + "</td><td>" + bytes(job.out_size) + "</td>"
+      + "<td class='muted'>" + age((Date.now() / 1000) - Number(job.updated_at || 0)) + "</td>"
+      + "<td>" + retry + "</td></tr>";
+  }).join("");
+  const empty = document.getElementById("empty");
+  empty.hidden = rows.length > 0;
+  empty.textContent = (state.filter !== "all" || state.res || state.q.trim())
+    ? "这一类下头暂时没有任务。" : "还没有任务。点「扫描媒体库」，或者从电视端点一次转档。";
+  renderPager();
+  renderDisks();
+  const running = state.counts.running || 0;
+  document.getElementById("foot").textContent =
+    "每 3 秒刷新一次。" + (running ? "正在转 " + running + " 条。" : "")
+    + (state.health && !state.health.roots.some((item) => item.writable)
+       ? " 媒体库都是只读挂载，转出来的字幕没地方写。" : "");
+}
+
+function jobsURL() {
+  const params = new URLSearchParams();
+  params.set("status", state.filter);
+  if (state.res) params.set("res", state.res);
+  if (state.q.trim()) params.set("q", state.q.trim());
+  params.set("page", String(state.page));
+  params.set("per_page", String(state.perPage));
+  return "/api/jobs?" + params.toString();
+}
+
+async function refresh() {
+  const [health, jobs] = await Promise.all([api("/api/health"), api(jobsURL())]);
+  state.health = health;
+  state.counts = jobs.counts;
+  state.jobs = jobs.jobs;
+  state.total = Number(jobs.total || 0);
+  state.pages = Number(jobs.pages || 1);
+  state.page = Math.min(state.page, state.pages);
+  if (health.policy) syncPolicyInputs(health.policy);
+  document.getElementById("scanBtn").disabled = state.scanning;
+  renderHeader();
+  renderTiles();
+  renderState();
+  renderRows();
+}
+
+function openToken(message) {
+  document.getElementById("tokenInput").value = localStorage.getItem(TOKEN_KEY) || "";
+  document.getElementById("tokenDialog").showModal();
+  if (message) toast(message);
+}
+
+function bindSegment(id, key) {
+  document.getElementById(id).addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (!button) return;
+    state[key] = button.dataset[key === "filter" ? "f" : "r"];
+    state.page = 1;
+    for (const node of document.querySelectorAll("#" + id + " button")) {
+      node.setAttribute("aria-pressed", String(node === button));
+    }
+    refresh().catch(() => {});
+  });
+}
+bindSegment("tiles", "filter");
+bindSegment("resSeg", "res");
+
+let searchTimer = 0;
+document.getElementById("q").addEventListener("input", (event) => {
+  state.q = event.target.value;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { state.page = 1; refresh().catch(() => {}); }, 350);
+});
+
+document.getElementById("pager").addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  if (button.id === "prevPage" && state.page > 1) state.page -= 1;
+  if (button.id === "nextPage" && state.page < state.pages) state.page += 1;
+  refresh().catch(() => {});
+});
+document.getElementById("pager").addEventListener("change", (event) => {
+  if (event.target.id !== "perPage") return;
+  state.perPage = Number(event.target.value) || 50;
+  state.page = 1;
+  refresh().catch(() => {});
+});
+
+async function savePolicy() {
+  const body = {
+    min_height: Number(document.getElementById("minHeight").value || 0),
+    min_free_gb: Math.max(0, Number(document.getElementById("minFree").value || 0)),
+  };
+  try {
+    const result = await api("/api/policy", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    for (const node of policyFields()) delete node.dataset.dirty;
+    const button = document.getElementById("policyBtn");
+    button.classList.remove("dirty");
+    button.textContent = "保存策略";
+    syncPolicyInputs(result.policy);
+    toast(result.cleared
+      ? "策略已保存，清掉 " + result.cleared + " 条旧记录，下次扫描按新策略走。"
+      : "策略已保存。");
+    await refresh();
+  } catch (error) {
+    if (error.message !== "auth") toast("保存失败：" + error.message);
+  }
+}
+document.getElementById("policyBtn").addEventListener("click", savePolicy);
+
+async function scan() {
+  if (state.scanning) return;
+  state.scanning = true;
+  document.getElementById("scanBtn").disabled = true;
+  try {
+    const result = await api("/api/scan", { method: "POST" });
+    toast(result.enqueued ? "扫描完成，新排了 " + result.enqueued + " 条"
+                          + (result.state === "running" ? "，这就开始转。" : "，在队列里等开始。")
+                          : "扫描完成，没有要转的。");
+    await refresh();
+  } catch (error) {
+    if (error.message !== "auth") toast("扫描失败：" + error.message);
+  } finally {
+    state.scanning = false;
+    document.getElementById("scanBtn").disabled = false;
+  }
+}
+
+async function enqueue(path) {
+  try {
+    const result = await api("/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files: [path] }),
+    });
+    toast(result.accepted.length ? "已排进去：" + result.accepted[0]
+                                 : "这条不用转（" + (result.rejected[0] || "路径不对") + "）");
+    await refresh();
+  } catch (error) {
+    if (error.message !== "auth") toast("失败了：" + error.message);
+  }
+}
+
+document.getElementById("scanBtn").addEventListener("click", scan);
+document.getElementById("manualBtn").addEventListener("click", () => {
+  const field = document.getElementById("manual");
+  const path = field.value.trim();
+  if (!path) return;
+  field.value = "";
+  enqueue(path);
+});
+document.getElementById("manual").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") document.getElementById("manualBtn").click();
+});
+document.getElementById("rows").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-retry]");
+  if (button) enqueue(button.dataset.retry);
+});
+document.getElementById("tokenBtn").addEventListener("click", () => openToken());
+document.getElementById("tokenClose").addEventListener("click",
+  () => document.getElementById("tokenDialog").close());
+document.getElementById("tokenSave").addEventListener("click", () => {
+  const value = document.getElementById("tokenInput").value.trim();
+  if (value) localStorage.setItem(TOKEN_KEY, value);
+  else localStorage.removeItem(TOKEN_KEY);
+  document.getElementById("tokenDialog").close();
+  refresh().catch(() => {});
+});
+
+refresh().catch((error) => {
+  if (error.message !== "auth") toast("读不到服务：" + error.message);
+});
+setInterval(() => refresh().catch(() => {}), 3000);
+</script>
+</body>
+</html>

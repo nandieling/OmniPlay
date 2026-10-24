@@ -48,13 +48,22 @@ final class DirectFilePlaybackManager: ObservableObject {
         let message: String
     }
 
-    @Published private(set) var pendingRequest: PlaybackRequest?
+    /// 最近一次成功入库并拉起播放的直开请求。
+    @Published private(set) var lastRequest: PlaybackRequest?
     @Published private(set) var lastOpenError: OpenPlaybackError?
     private var securityScopedURLs: Set<URL> = []
 
-    private let supportedExtensions: Set<String> = [
+    /// 可以直开的容器。ISO 也算在内：蓝光原盘就是直接放镜像文件。
+    static let supportedVideoExtensions: [String] = [
         "mp4", "mkv", "mov", "avi", "rmvb", "flv", "webm", "m2ts", "ts", "iso", "m4v", "wmv"
     ]
+
+    static let supportedExtensionSet = Set(supportedVideoExtensions)
+
+    /// 上面这些扩展名在系统里对应的 UTI，打开面板和「设为默认」都用它。
+    static var supportedContentTypes: [UTType] {
+        supportedVideoExtensions.compactMap { UTType(filenameExtension: $0) }
+    }
 
     private init() {}
 
@@ -88,7 +97,7 @@ final class DirectFilePlaybackManager: ObservableObject {
                 }
                 do {
                     let request = try await createPlaybackRequest(for: resolvedURL)
-                    pendingRequest = request
+                    open(request)
                     lastOpenError = nil
                     didCreateRequest = true
                     break
@@ -105,9 +114,40 @@ final class DirectFilePlaybackManager: ObservableObject {
         }
     }
 
-    func consumePendingRequest() -> PlaybackRequest? {
-        defer { pendingRequest = nil }
-        return pendingRequest
+    /// 入库完成后立刻拉起独立播放窗口，直开不该让用户再点一次。
+    private func open(_ request: PlaybackRequest) {
+        lastRequest = request
+        DirectPlaybackWindowManager.shared.open(request)
+    }
+
+    func clearOpenError() {
+        lastOpenError = nil
+    }
+
+    /// 拖进来的东西里没有文件（例如拖了个书签），给个提示而不是静默失败。
+    func reportDroppedNothing() {
+        setOpenError("拖进来的不是可播放的文件。")
+    }
+
+    /// 「打开视频文件…」面板：选完走的是和访达直开完全相同的一条路。
+    func presentOpenPanel() {
+        lastOpenError = nil
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.message = "选择要直接播放的视频文件"
+        panel.prompt = "播放"
+        var types: [UTType] = [.movie, .audiovisualContent]
+        types.append(contentsOf: Self.supportedContentTypes)
+        panel.allowedContentTypes = types
+        panel.begin { response in
+            guard response == .OK else { return }
+            let urls = panel.urls
+            Task { @MainActor in
+                DirectFilePlaybackManager.shared.handleOpen(urls: urls)
+            }
+        }
     }
 
     private func resolveFileURL(_ url: URL) -> URL? {
@@ -139,7 +179,7 @@ final class DirectFilePlaybackManager: ObservableObject {
         }
 
         let ext = url.pathExtension.lowercased()
-        return supportedExtensions.contains(ext)
+        return Self.supportedExtensionSet.contains(ext)
     }
 
     private func beginSecurityScopedAccessIfNeeded(for url: URL) -> Bool {
@@ -209,7 +249,8 @@ final class DirectFilePlaybackManager: ObservableObject {
             return (movie, newFileId)
         }
 
-        await MainActor.run { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
+        // 直开条目不进海报墙（mediaType = direct 会被过滤），这里广播一次
+        // libraryUpdated 只会让海报墙在 mpv 启动的同时重排刷新，白白抢资源。
         return PlaybackRequest(movie: movie, fileId: fileId)
     }
 
@@ -257,7 +298,37 @@ final class DirectFilePlaybackManager: ObservableObject {
     }
 }
 
+/// 播放进度的「立刻落盘」登记处。
+///
+/// ⌘Q 这条退出路径上没有下一轮 RunLoop：SwiftUI 的 onDisappear 不一定跑得到，
+/// 就算跑到了，把写库交给协程也来不及被调度，进度就丢了。播放界面出现时把同步落盘
+/// 的动作登记进来，AppDelegate 在 applicationWillTerminate 里当场调一次。
+@MainActor
+enum PlaybackProgressFlushCenter {
+    private static var handlers: [UUID: () -> Void] = [:]
+
+    static func register(_ token: UUID, handler: @escaping () -> Void) {
+        handlers[token] = handler
+    }
+
+    static func unregister(_ token: UUID) {
+        handlers[token] = nil
+    }
+
+    static func flushAll() {
+        // 先取走再执行：handler 自己也可能注销登记
+        let pending = Array(handlers.values)
+        handlers.removeAll()
+        for handler in pending { handler() }
+    }
+}
+
 final class OmniPlayAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillTerminate(_ notification: Notification) {
+        // 在这里同步写库；写完才轮到 iCloud 那份 willTerminate 通知推最新媒体库
+        PlaybackProgressFlushCenter.flushAll()
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         NSApp.activate(ignoringOtherApps: true)
         Task { @MainActor in
@@ -303,25 +374,44 @@ final class OmniPlayAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - 默认打开方式
+
 extension DirectFilePlaybackManager {
-    func setAsDefaultVideoPlayer() -> Bool {
-        guard let bundleID = Bundle.main.bundleIdentifier else { return false }
+    struct DefaultHandlerReport {
+        let succeeded: [String]
+        let failed: [String]
+    }
 
-        let extensions = ["mp4", "mkv", "mov", "avi", "rmvb", "flv", "webm", "m2ts", "ts", "iso", "m4v", "wmv"]
-        let types = extensions.compactMap { UTType(filenameExtension: $0) }
-
-        var success = false
-        for type in types {
-            let result = LSSetDefaultRoleHandlerForContentType(
-                type.identifier as CFString,
-                .all,
-                bundleID as CFString
-            )
-            if result == noErr {
-                success = true
+    /// 把本应用注册成这些视频类型的默认打开应用。逐个类型上报结果，部分失败也能看清是哪个。
+    @discardableResult
+    func setAsDefaultVideoPlayer() async -> DefaultHandlerReport {
+        let appURL = Bundle.main.bundleURL
+        var succeeded: [String] = []
+        var failed: [String] = []
+        for ext in Self.supportedVideoExtensions {
+            guard let type = UTType(filenameExtension: ext) else {
+                failed.append(ext)
+                continue
             }
+            let ok = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                NSWorkspace.shared.setDefaultApplication(at: appURL, toOpen: type) { error in
+                    continuation.resume(returning: error == nil)
+                }
+            }
+            if ok { succeeded.append(ext) } else { failed.append(ext) }
         }
+        return DefaultHandlerReport(succeeded: succeeded, failed: failed)
+    }
 
-        return success
+    /// 还没由本应用接管的扩展名；返回空数组就说明已经是默认打开方式了。
+    func extensionsNotOwnedYet() -> [String] {
+        let mine = Bundle.main.bundleURL.standardizedFileURL
+        return Self.supportedVideoExtensions.filter { ext in
+            guard let type = UTType(filenameExtension: ext),
+                  let handler = NSWorkspace.shared.urlForApplication(toOpen: type) else {
+                return true
+            }
+            return handler.standardizedFileURL != mine
+        }
     }
 }

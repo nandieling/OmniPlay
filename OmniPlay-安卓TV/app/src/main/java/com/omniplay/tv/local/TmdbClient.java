@@ -188,11 +188,58 @@ public final class TmdbClient {
         return proxy + "/3";
     }
 
+    private static final String CDN_IMAGE_PREFIX = "https://image.tmdb.org/t/p/";
+
+    /** 图片地址去掉 {@code /3} 之后的反代根。 */
+    private String imageProxyRoot() {
+        String base = apiBase();
+        return base.endsWith("/3") ? base.substring(0, base.length() - 2) : base;
+    }
+
+    /** 官方 CDN 地址换成反代的 {@code /t/p/} 地址；没配反代或不是 CDN 形式时返回 null。 */
+    private String proxyImageForm(String imageUrl) {
+        if (!isProxy() || imageUrl == null || !imageUrl.startsWith(CDN_IMAGE_PREFIX)) {
+            return null;
+        }
+        return imageProxyRoot() + "/t/p/" + imageUrl.substring(CDN_IMAGE_PREFIX.length());
+    }
+
+    /** 反代的 {@code /t/p/} 地址换回官方 CDN；不是这个形式时返回 null。 */
+    private String cdnImageForm(String imageUrl) {
+        if (!isProxy() || imageUrl == null) {
+            return null;
+        }
+        String prefix = imageProxyRoot() + "/t/p/";
+        return imageUrl.startsWith(prefix)
+                ? CDN_IMAGE_PREFIX + imageUrl.substring(prefix.length()) : null;
+    }
+
+    /**
+     * 海报主地址。配了反代就先走反代的 {@code /t/p/}：这台反代既然能通 API，图片多半也一起
+     * 转发了，比先撞一次官方 CDN 再回头快得多——海报墙一次排几十张图，那一趟 404 就是几十秒。
+     */
+    public String posterImageUrl(String imageUrl) {
+        String proxied = proxyImageForm(imageUrl);
+        return proxied == null ? imageUrl : proxied;
+    }
+
+    /**
+     * 海报备胎地址：主地址是反代就退回官方 CDN，主地址是 CDN 就试反代。
+     * 两个地址各试一次，成功的图按主地址入缓存（不改变没配反代时的行为）。
+     */
+    public String posterFallbackUrl(String imageUrl) {
+        String proxied = proxyImageForm(imageUrl);
+        return proxied != null ? proxied : cdnImageForm(imageUrl);
+    }
+
     public boolean checkConnection() {
         return checkConnectionDetailed().connected;
     }
 
     /** 检测结果连原因一起给：反代没补 /3、Key 填成 v4、网络不通，症状都一样，原因不同。 */
+    /** 连通性探测结果的保鲜期，与 mac 版 probeReuseInterval 对齐。 */
+    private static final long PROBE_REUSE_MS = 5 * 60 * 1000L;
+
     public static final class CheckResult {
         public final boolean connected;
         public final String message;
@@ -201,6 +248,22 @@ public final class TmdbClient {
             this.connected = connected;
             this.message = message;
         }
+    }
+
+    private volatile long lastProbeSuccessAt;
+
+    /** 刮削前的连通性检查：刚探测成功过就不重复探测，白等一个往返。mac 版同一条规则。 */
+    public CheckResult checkConnectionCached() {
+        long now = System.currentTimeMillis();
+        if (lastProbeSuccessAt > 0 && now - lastProbeSuccessAt < PROBE_REUSE_MS) {
+            return new CheckResult(true, isProxy()
+                    ? "TMDB 连接正常（刚刚已检测过）。" : "TMDB 连接正常。");
+        }
+        CheckResult result = checkConnectionDetailed();
+        if (result.connected) {
+            lastProbeSuccessAt = now;
+        }
+        return result;
     }
 
     public CheckResult checkConnectionDetailed() {
@@ -242,52 +305,127 @@ public final class TmdbClient {
     }
 
     /**
-     * Multi-search with the OmniPlay scoring: exact title, secondary query,
-     * media-type preference, season awareness and year tolerance.
+     * 标题相关度低于这条线的候选不当自动匹配用。TMDB 的搜索带模糊，不相干的作品只靠
+     * 热度也能排到第一个；自动刮前课不得把它贴上去——首页会多一张错误海报，而条目又被
+     * 标成已刮前，下轮不再纠。取 1200 是因为「查询词包含候选标题」这档加分就是 1200。
      */
-    public Result multiSearch(String query, String year, String preferredMediaType, int preferredSeason,
-                              String secondaryQuery) throws Exception {
-        Result best = null;
-        double bestScore = Double.NEGATIVE_INFINITY;
-        for (Result item : fetchSearchResults(query)) {
-            double score = score(item, query, year, preferredMediaType, preferredSeason, secondaryQuery);
-            if (score > bestScore) {
-                bestScore = score;
-                best = item;
-            }
+    private static final double RELATEDNESS_FLOOR = 1200.0;
+
+    /** 一条候选加上它的分；{@code relatedness} 只算标题对得上多少，不含年份、类型与热度。 */
+    public static final class SearchHit {
+        public final Result result;
+        public final double score;
+        public final double relatedness;
+
+        SearchHit(Result result, double score, double relatedness) {
+            this.result = result;
+            this.score = score;
+            this.relatedness = relatedness;
         }
-        return best;
     }
 
     /**
-     * 手动匹配用的候选清单：与自动刮削同一套打分，只是不取最高分那一个，而是按分数从高到低
-     * 整份交出去，让用户自己在弹层里挑一条关联。
+     * Multi-search with the OmniPlay scoring: exact title, secondary query,
+     * media-type preference, season awareness and year tolerance.
+     *
+     * <p>取分数最高的那条，但前提是它的标题得真跟查询词（或副查询词）对得上；对不上
+     * 就返回 {@code null}，由调用方换下一个关键词重试。</p>
+     */
+    public Result multiSearch(String query, String year, String preferredMediaType, int preferredSeason,
+                              String secondaryQuery) throws Exception {
+        for (SearchHit hit : scoredHits(query, year, preferredMediaType, preferredSeason,
+                secondaryQuery, 1, true)) {
+            return hit.result;
+        }
+        return null;
+    }
+
+    /**
+     * 手动匹配用的候选清单：与自动刮前同一套打分，只是按分数从高到低整份交出去。
+     * 人在场，所以不设相关度门槛——用户自己能看出哪条对。
      */
     public List<Result> searchCandidates(String query, String year, String preferredMediaType,
                                          int preferredSeason, String secondaryQuery, int limit)
             throws Exception {
-        final String scoredQuery = query == null ? "" : query;
-        final String scoredYear = year;
-        final String scoredType = preferredMediaType;
-        final int scoredSeason = preferredSeason;
-        final String scoredSecondary = secondaryQuery;
-        List<Result> all = fetchSearchResults(query);
-        java.util.Collections.sort(all, (a, b) -> Double.compare(
-                score(b, scoredQuery, scoredYear, scoredType, scoredSeason, scoredSecondary),
-                score(a, scoredQuery, scoredYear, scoredType, scoredSeason, scoredSecondary)));
-        return limit > 0 && all.size() > limit ? new ArrayList<>(all.subList(0, limit)) : all;
+        List<Result> out = new ArrayList<>();
+        for (SearchHit hit : scoredHits(query, year, preferredMediaType, preferredSeason,
+                secondaryQuery, limit, false)) {
+            out.add(hit.result);
+        }
+        return out;
     }
 
-    /** TMDB {@code /search/multi} 的前两页；自动刮削与手动匹配共用这一份取数逻辑。 */
-    private List<Result> fetchSearchResults(String query) throws Exception {
+    /**
+     * 按 mac 版的打分取候选：先拿界面语言的前两页，一条相关候选都没有再换 en-US 把同样两页
+     * 拿一遍（mac 每次两种语言都拿，这里把第二轮留给真需要的那些，省一半配额）。同一作品
+     * 只留主语言那个，避免中文界面被英文条目探路覆盖。
+     */
+    public List<SearchHit> scoredHits(String query, String year, String preferredMediaType,
+                                      int preferredSeason, String secondaryQuery, int limit,
+                                      boolean requireRelated) throws Exception {
+        List<SearchHit> hits = scorePass(query, year, preferredMediaType, preferredSeason,
+                secondaryQuery, language());
+        boolean anyRelated = false;
+        for (SearchHit hit : hits) {
+            if (hit.relatedness >= RELATEDNESS_FLOOR) {
+                anyRelated = true;
+                break;
+            }
+        }
+        String other = "en-US".equals(language()) ? language() : "en-US";
+        if (!other.equals(language()) && (!anyRelated || hits.size() < 3)) {
+            for (SearchHit hit : scorePass(query, year, preferredMediaType, preferredSeason,
+                    secondaryQuery, other)) {
+                boolean duplicate = false;
+                for (SearchHit kept : hits) {
+                    if (kept.result.mediaType.equals(hit.result.mediaType)
+                            && kept.result.id == hit.result.id) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate) {
+                    hits.add(hit);
+                }
+            }
+        }
+        java.util.Collections.sort(hits, (a, b) -> Double.compare(b.score, a.score));
+        if (requireRelated) {
+            List<SearchHit> related = new ArrayList<>();
+            for (SearchHit hit : hits) {
+                if (hit.relatedness >= RELATEDNESS_FLOOR) {
+                    related.add(hit);
+                }
+            }
+            hits = related;
+        }
+        return limit > 0 && hits.size() > limit
+                ? new ArrayList<>(hits.subList(0, limit)) : hits;
+    }
+
+    private List<SearchHit> scorePass(String query, String year, String preferredMediaType,
+                                      int preferredSeason, String secondaryQuery, String lang)
+            throws Exception {
+        List<SearchHit> hits = new ArrayList<>();
+        for (Result item : fetchSearchResults(query, lang)) {
+            double[] scored = scoreWithRelatedness(item, query, year, preferredMediaType,
+                    preferredSeason, secondaryQuery);
+            hits.add(new SearchHit(item, scored[0], scored[1]));
+        }
+        return hits;
+    }
+
+    /** TMDB {@code /search/multi} 的前两页；自动刮前与手动匹配共用这一份取数逻辑。 */
+    private List<Result> fetchSearchResults(String query, String lang) throws Exception {
         List<Result> all = new ArrayList<>();
         if (query == null || query.trim().isEmpty()) {
             return all;
         }
+        String language = lang == null || lang.isEmpty() ? language() : lang;
         for (int page = 1; page <= 2; page++) {
             String encoded = URLEncoder.encode(query, "UTF-8");
             String url = apiBase() + "/search/multi?query=" + encoded
-                    + "&language=" + language() + "&page=" + page
+                    + "&language=" + language + "&page=" + page
                     + apiKeyQuery();
             JSONObject root = get(url);
             if (root == null) {
@@ -334,8 +472,10 @@ public final class TmdbClient {
         return !proxyUrl().isEmpty();
     }
 
-    private double score(Result item, String query, String year, String preferredMediaType,
-                         int preferredSeason, String secondaryQuery) {
+    /** 返回 {@code [总分, 标题相关度]}；后者只包含主/副查询词的标题加分。 */
+    private double[] scoreWithRelatedness(Result item, String query, String year,
+                                          String preferredMediaType,
+                                          int preferredSeason, String secondaryQuery) {
         double score = item.popularity;
         String queryNorm = normalizeTitle(query);
         List<String> candidates = matchableTitles(item);
@@ -354,6 +494,7 @@ public final class TmdbClient {
             }
         }
         score += bestTitleBonus;
+        double relatedness = bestTitleBonus;
 
         if (secondaryQuery != null && !secondaryQuery.trim().isEmpty()) {
             String secondaryNorm = normalizeTitle(secondaryQuery.trim());
@@ -370,6 +511,7 @@ public final class TmdbClient {
                     }
                 }
                 score += bestSecondary;
+                relatedness = Math.max(relatedness, bestSecondary);
             }
         }
 
@@ -399,6 +541,12 @@ public final class TmdbClient {
             Integer seasonCount = tvSeasonCount(item.id);
             if (seasonCount != null) {
                 score += seasonCount >= preferredSeason ? 4500.0 : -800.0;
+            }
+            // 年份按那一季的首播年判：S05 的文件带 2025，剧集首播年却是 2022，照整部剧的
+            // 首播年算会把正确答案打成年份对不上（mac 版 seasonAirYearByTVId）。
+            Integer seasonYear = tvSeasonAirYear(item.id, preferredSeason);
+            if (seasonYear != null) {
+                itemYear = String.valueOf(seasonYear);
             }
         }
 
@@ -438,8 +586,66 @@ public final class TmdbClient {
             } catch (NumberFormatException ignored) {
             }
         }
-        return score;
+        return new double[]{score, relatedness};
     }
+
+    /** 查询词里的 AKA 拆开多个候选（mac 版 buildForeignQueryCandidates）。 */
+    public static List<String> foreignQueryCandidates(String title) {
+        List<String> out = new ArrayList<>();
+        String trimmed = title == null ? "" : title.trim();
+        if (trimmed.isEmpty()) {
+            return out;
+        }
+        out.add(trimmed);
+        String normalized = trimmed
+                // 全角 AKA 与带点的 A.K.A. 先统一写法，再按 AKA 拆开多个候选。
+                .replace("ＡＫＡ", "AKA")
+                .replaceAll("(?i)\\bA\\.?K\\.?A\\.?\\b", "AKA")
+                .replace("aka", "AKA");
+        if (normalized.contains("AKA")) {
+            for (String part : normalized.split("AKA")) {
+                String piece = part.trim();
+                if (piece.isEmpty()) {
+                    continue;
+                }
+                boolean seen = false;
+                for (String kept : out) {
+                    if (kept.equalsIgnoreCase(piece)) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen) {
+                    out.add(piece);
+                }
+            }
+        }
+        return out;
+    }
+
+    /** 某一季的首播年份，取 {@code /tv/{id}/season/{n}} 的 air_date。 */
+    private Integer tvSeasonAirYear(int tvId, int season) {
+        String key = tvId + "#" + season;
+        Integer cached = seasonYearCache.get(key);
+        if (cached != null) {
+            return cached == Integer.MIN_VALUE ? null : cached;
+        }
+        Integer year = null;
+        try {
+            JSONObject root = get(apiBase() + "/tv/" + tvId + "/season/" + season
+                    + "?language=en-US" + apiKeyQuery());
+            String airDate = root == null ? "" : root.optString("air_date", "");
+            if (airDate.length() >= 4) {
+                year = Integer.valueOf(airDate.substring(0, 4));
+            }
+        } catch (Exception ignored) {
+        }
+        seasonYearCache.put(key, year == null ? Integer.MIN_VALUE : year);
+        return year;
+    }
+
+    private final java.util.Map<String, Integer> seasonYearCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     private Integer tvSeasonCount(int tvId) {
         Integer cached = seasonCountCache.get(tvId);
@@ -740,7 +946,9 @@ public final class TmdbClient {
         if (input == null) {
             return "";
         }
-        return input.toLowerCase(Locale.ROOT).replaceAll("[\\s._\\-]+", " ").trim();
+        // mac 版同一句：先把空白与标点全部丢掉再比「是不是同一个名字」，否则
+        // 「Slow.Horses」与「Slow Horses」这类写法差会算不相等，年份也就扒不上加分。
+        return input.toLowerCase(Locale.ROOT).replaceAll("[^\\p{L}\\p{N}]", "");
     }
 
     private static int tokenCount(String input) {
@@ -771,6 +979,78 @@ public final class TmdbClient {
         }
     }
 
+    /**
+     * 中文译名查询结果：分得清「TMDB 确实没有中文条目」和「这次没请求成功」，
+     * 只有前者才写负缓存（与 mac 版 ChineseNameResult 同一取舍）。
+     */
+    public static final class ChineseTitleResult {
+        /** 查到的中文片名，空串表示 TMDB 没有中文条目。 */
+        public final String title;
+        /** 请求本身失败：不写缓存，下一轮重试。 */
+        public final boolean requestFailed;
+
+        ChineseTitleResult(String title, boolean requestFailed) {
+            this.title = title == null ? "" : title;
+            this.requestFailed = requestFailed;
+        }
+    }
+
+    /**
+     * 作品别名 → 中文片名（mac 版 TMDBService.fetchChineseTitle）。TMDB 在缺少中文条目时
+     * 会把原文名直接当 title 回传，刮削结果里就留下 Inception 这类外文名，得再问一次
+     * alternative_titles。
+     */
+    public ChineseTitleResult fetchChineseTitle(String mediaType, long tmdbId) {
+        String kind = "tv".equals(mediaType) ? "tv" : "movie";
+        int[] status = new int[1];
+        try {
+            // 这条 URL 原本没有查询串，api_key 只能打头（& 开头那版是给已有参数的 URL 用的）。
+            JSONObject root = getOrNull(apiBase() + "/" + kind + "/" + tmdbId
+                    + "/alternative_titles" + apiKeyQuery(true), status);
+            if (root == null) {
+                // 404 = 这部作品没有别名页，是个明确答案；其余状态只是这次没连上。
+                return new ChineseTitleResult("", status[0] != 404);
+            }
+            return new ChineseTitleResult(chineseAlternativeTitle(root), false);
+        } catch (IOException error) {
+            return new ChineseTitleResult("", true);
+        }
+    }
+
+    /** 别名清单里挑中文片名：电影在 titles、剧集在 results，先认地区译名再退到任意中文条目。 */
+    public static String chineseAlternativeTitle(JSONObject root) {
+        List<JSONObject> entries = new ArrayList<>();
+        appendEntries(entries, root.optJSONArray("titles"));
+        appendEntries(entries, root.optJSONArray("results"));
+        for (String region : new String[]{"CN", "SG", "TW", "HK"}) {
+            for (JSONObject entry : entries) {
+                if (region.equals(entry.optString("iso_3166_1").toUpperCase(Locale.ROOT))
+                        && LocalMediaNameParser.containsChinese(entry.optString("title").trim())) {
+                    return entry.optString("title").trim();
+                }
+            }
+        }
+        for (JSONObject entry : entries) {
+            String value = entry.optString("title").trim();
+            if (LocalMediaNameParser.containsChinese(value)) {
+                return value;
+            }
+        }
+        return "";
+    }
+
+    private static void appendEntries(List<JSONObject> into, JSONArray array) {
+        if (array == null) {
+            return;
+        }
+        for (int index = 0; index < array.length(); index++) {
+            JSONObject item = array.optJSONObject(index);
+            if (item != null) {
+                into.add(item);
+            }
+        }
+    }
+
     private JSONObject get(String url) throws IOException {
         int[] status = new int[1];
         JSONObject root = getOrNull(url, status);
@@ -790,7 +1070,7 @@ public final class TmdbClient {
                 connection.setConnectTimeout(12000);
                 connection.setReadTimeout(20000);
                 connection.setRequestProperty("Accept", "application/json");
-                connection.setRequestProperty("User-Agent", "OmniPlay-Android/1.16");
+                connection.setRequestProperty("User-Agent", "OmniPlay-Android/1.34");
                 if (usesBearerToken()) {
                     // v4 Read Access Token 只认请求头，查询里塞 api_key 会被当成无效钥匙。
                     connection.setRequestProperty("Authorization", "Bearer " + effectiveApiKey());

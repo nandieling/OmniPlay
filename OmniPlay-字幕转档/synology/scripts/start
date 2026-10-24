@@ -1,0 +1,34 @@
+#!/bin/sh
+# DSM 会在套件启动时调这里；DSM7 的 systemd 单元也指向这个脚本。
+DIR=$(dirname "$0")
+. "${DIR}/common.sh"
+ensure_conf
+
+PYTHON=$(find_python)
+if [ -z "${PYTHON}" ]; then
+    say "找不到 python3，套件起不来。装一个社区包 python312 以上，或在配置里写 SIDECAR_PYTHON。"
+    exit 1
+fi
+FFMPEG=$(find_tool ffmpeg ffmpeg)
+FFPROBE=$(find_tool ffprobe ffprobe)
+if [ -z "${FFMPEG}" ] || [ -z "${FFPROBE}" ]; then
+    say "警告：没找到 ffmpeg/ffprobe，服务能起，但每条任务都会记成失败。"
+    say "      装社区包 ffmpeg8，或在 ${CONF_FILE} 里写 SIDECAR_FFMPEG / SIDECAR_FFPROBE。"
+fi
+
+if [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
+    say "已经在跑了（PID $(cat "${PID_FILE}")）。"
+    exit 0
+fi
+
+ARGS="--roots ${SIDECAR_ROOTS} --db ${VAR_DIR}/state.db --langs ${SIDECAR_LANGS}"
+ARGS="${ARGS} --port ${SIDECAR_PORT} --interval ${SIDECAR_INTERVAL} --sleep ${SIDECAR_SLEEP}"
+ARGS="${ARGS} --nice ${SIDECAR_NICE} --max-out-mb ${SIDECAR_MAX_OUT_MB}"
+[ -n "${SIDECAR_TOKEN}" ] && ARGS="${ARGS} --token ${SIDECAR_TOKEN}"
+[ -n "${FFMPEG}" ] && ARGS="${ARGS} --ffmpeg ${FFMPEG}"
+[ -n "${FFPROBE}" ] && ARGS="${ARGS} --ffprobe ${FFPROBE}"
+
+nohup "${PYTHON}" "${DEST}/sidecar.py" ${ARGS} >> "${LOG_FILE}" 2>&1 &
+echo $! > "${PID_FILE}"
+say "已启动：PID $(cat "${PID_FILE}")，媒体库 ${SIDECAR_ROOTS}，端口 ${SIDECAR_PORT}"
+exit 0

@@ -72,7 +72,8 @@ class ThumbnailManager: ObservableObject {
     }
     
     func startBatchWebFetch(tasks: [(String, String, Int64?, Int, Int)], forceRetry: Bool = false) {
-        DispatchQueue.global(qos: .background).async {
+        // 这段里有同步的库读取：跑在 background 队列上会让主线程等连接时报优先级反转
+        DispatchQueue.global(qos: .userInitiated).async {
             guard let queue = AppDatabase.shared.dbQueue else { return }
             let typedTasks: [EpisodeThumbnailTask]
             do {
@@ -557,7 +558,7 @@ class ThumbnailManager: ObservableObject {
     }
     
     func enqueueEpisodeThumbnails(for movieId: Int64) {
-        DispatchQueue.global(qos: .background).async {
+        DispatchQueue.global(qos: .userInitiated).async {
             guard let queue = AppDatabase.shared.dbQueue else { return }
             do {
                 let tasks = try queue.read { db -> [EpisodeThumbnailTask] in
@@ -571,7 +572,7 @@ class ThumbnailManager: ObservableObject {
     }
     
     func enqueueMissingEpisodeThumbnailsAcrossLibrary(orderedMovieIDs: [Int64] = []) {
-        DispatchQueue.global(qos: .background).async {
+        DispatchQueue.global(qos: .userInitiated).async {
             guard let queue = AppDatabase.shared.dbQueue else { return }
             do {
                 let tasks = try queue.read { db -> [EpisodeThumbnailTask] in

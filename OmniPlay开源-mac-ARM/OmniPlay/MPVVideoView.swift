@@ -22,9 +22,11 @@ private final class MPVContainerView: NSView {
     private var isLiveResizing = false
     private var autoPausedForLiveResize = false
     private var resumeAfterLiveResizeWorkItem: DispatchWorkItem?
+    private var videoOutputReinitWork: DispatchWorkItem?
 
     deinit {
         resumeAfterLiveResizeWorkItem?.cancel()
+        videoOutputReinitWork?.cancel()
         removeWindowObservers()
     }
 
@@ -46,6 +48,8 @@ private final class MPVContainerView: NSView {
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         scheduleDrawableRefresh(delays: [0.0, 0.05], rebind: true)
+        // 换屏/换倍率同理：像素尺寸变了，mpv 不会自己追
+        scheduleVideoOutputReinit(reason: "backing-scale")
     }
 
     override func viewWillStartLiveResize() {
@@ -94,12 +98,26 @@ private final class MPVContainerView: NSView {
                 self.scheduleDrawableRefresh(delays: delays, rebind: shouldRebind || self.autoPausedForLiveResize)
             }
         }
+        // 全屏动画彻底落定后重建一次视频输出。上面那些 rebind 只重设 wid，而 mpv 的 gpu-next
+        // 在只有 CAMetalLayer 的嵌入路径上只在视频输出初始化时读图层尺寸，不重来就继续按旧尺寸出画：
+        // 退出全屏被裁成一角、从小窗进全屏只剩左上角，所以两个方向都要重建。
+        let reinitEvents: [(NSNotification.Name, String)] = [
+            (NSWindow.didEnterFullScreenNotification, "enter-fullscreen"),
+            (NSWindow.didExitFullScreenNotification, "exit-fullscreen")
+        ]
+        windowObservationTokens.append(contentsOf: reinitEvents.map { eventName, reason in
+            center.addObserver(forName: eventName, object: window, queue: .main) { [weak self] _ in
+                self?.scheduleVideoOutputReinit(reason: reason)
+            }
+        })
         let liveResizeTokens: [NSObjectProtocol] = [
             center.addObserver(forName: NSWindow.willStartLiveResizeNotification, object: window, queue: .main) { [weak self] _ in
                 self?.beginLiveResize()
             },
             center.addObserver(forName: NSWindow.didEndLiveResizeNotification, object: window, queue: .main) { [weak self] _ in
                 self?.endLiveResize()
+                // 拖拽过程中一直按旧尺寸出画，松手后花一次重建的代价换回正确画面
+                self?.scheduleVideoOutputReinit(reason: "end-live-resize")
             }
         ]
         windowObservationTokens.append(contentsOf: liveResizeTokens)
@@ -165,7 +183,8 @@ private final class MPVContainerView: NSView {
         isLiveResizing = true
         if !autoPausedForLiveResize, playerManager?.isPlaying == true {
             autoPausedForLiveResize = true
-            playerManager?.setPaused(true)
+            // 暂停与续播都交给播放器：它会在视频输出按新尺寸重建完成后自己续播
+            playerManager?.pauseForGeometryChange(reason: "live-resize")
         }
         scheduleDrawableRefresh(delays: [0.0, 0.016, 0.033], rebind: autoPausedForLiveResize)
     }
@@ -182,9 +201,13 @@ private final class MPVContainerView: NSView {
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, self.window != nil, self.autoPausedForLiveResize else { return }
             self.refreshDrawable(rebind: true)
-            self.playerManager?.setPaused(false)
             self.autoPausedForLiveResize = false
             self.resumeAfterLiveResizeWorkItem = nil
+            guard self.playerManager?.isRecoveringVideoGeometry != true else {
+                // 尺寸纠偏还在进行中，续播由播放器在输出尺寸对上新尺寸之后自己触发
+                return
+            }
+            self.playerManager?.setPaused(false)
         }
         resumeAfterLiveResizeWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
@@ -203,6 +226,20 @@ private final class MPVContainerView: NSView {
         } else {
             ensureMetalLayer(rebind: false)
         }
+    }
+
+    /// 等布局稳定后重建 mpv 的视频输出，让它重新读一次图层尺寸。
+    /// 一次全屏过渡会连着发来 enter/exit、live-resize、resize 好几个事件，全部合并成落定后的一次。
+    private func scheduleVideoOutputReinit(reason: String) {
+        videoOutputReinitWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.window != nil else { return }
+            self.layoutSubtreeIfNeeded()
+            self.refreshDrawableSize()
+            self.playerManager?.reinitVideoOutput(reason: reason)
+        }
+        videoOutputReinitWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
     }
 
     private func scheduleDrawableRefresh(delays: [TimeInterval], rebind: Bool) {

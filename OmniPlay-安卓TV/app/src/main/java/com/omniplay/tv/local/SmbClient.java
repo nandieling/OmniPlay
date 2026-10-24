@@ -25,8 +25,10 @@ public final class SmbClient {
     private final String username;
     private final String password;
     // 光盘的 BDMV / STREAM / DISC1 也要占三层，深度太小会让整盘看不见；
-    // 本地目录走 12 层，这里对齐。
+    // 本地目录走 12 层，这里对齐。这条只当兜底：真正的「不重走」由 visited 集合保证。
     private int maxDepth = 12;
+    /** 一轮遍历最多列多少个目录：共享里有环回链接时，宁可少扫一片，也别把电视跑死。 */
+    private static final int MAX_DIRECTORIES = 20000;
 
     public SmbClient(String root, String username, String password) {
         this.root = normalize(root);
@@ -182,37 +184,66 @@ public final class SmbClient {
      */
     public void walk(SmbVideoSink sink) throws IOException {
         try {
-            walk(new SmbFile(root, context()), "", 0, sink);
+            java.util.Deque<PendingShare> pending = new java.util.ArrayDeque<>();
+            java.util.Set<String> visited = new java.util.HashSet<>();
+            pending.add(new PendingShare(new SmbFile(root, context()), "", 0));
+            int listed = 0;
+            while (!pending.isEmpty()) {
+                PendingShare directory = pending.pollFirst();
+                // 同一个目录只列一次（SMB 路径不区分大小写，比对前先折一下）。没有这道判断，
+                // 共享里的环回链接会把同一个文件夹走出无数条记录来。
+                if (!visited.add(directory.relative.toLowerCase(Locale.ROOT))) {
+                    continue;
+                }
+                if (++listed > MAX_DIRECTORIES) {
+                    throw new IOException("这个媒体源的目录超过 " + MAX_DIRECTORIES
+                            + " 个，这一轮先停在这里。");
+                }
+                SmbFile[] entries = directory.dir.listFiles();
+                if (entries == null) {
+                    continue;
+                }
+                for (SmbFile entry : entries) {
+                    // jcifs 给目录名带上结尾的「/」，不先去掉的话 BDMV/ 匹配不上任何判断，
+                    // 整张光盘的分卷就会被当成普通视频文件全部入库。
+                    String name = trimTrailingSlash(entry.getName());
+                    if (name.isEmpty() || name.startsWith(".") || name.startsWith("_")) {
+                        continue;
+                    }
+                    String childRelative = directory.relative.isEmpty()
+                            ? name : directory.relative + "/" + name;
+                    if (entry.isDirectory()) {
+                        if (isSkippableCollection(name)
+                                || childRelative.equalsIgnoreCase(directory.relative)
+                                || directory.depth + 1 > maxDepth) {
+                            continue;
+                        }
+                        pending.add(new PendingShare(entry, childRelative, directory.depth + 1));
+                        continue;
+                    }
+                    if (LocalMediaNameParser.isVideoFile(name)) {
+                        sink.onVideo(name, childRelative, lengthOf(entry));
+                    }
+                }
+            }
+        } catch (LocalEngine.ScanAborted stopped) {
+            // 遍历是宿主发起的，这一种不是 SMB 的错，原样抛回去。
+            throw stopped;
         } catch (Throwable error) {
             throw translation(error);
         }
     }
 
-    private void walk(SmbFile dir, String relative, int depth, SmbVideoSink sink) throws IOException {
-        if (depth > maxDepth) {
-            return;
-        }
-        SmbFile[] entries = dir.listFiles();
-        if (entries == null) {
-            return;
-        }
-        for (SmbFile entry : entries) {
-            // jcifs 给目录名带上结尾的「/」，不先去掉的话 BDMV/ 匹配不上任何判断，
-            // 整张光盘的分卷就会被当成普通视频文件全部入库。
-            String name = trimTrailingSlash(entry.getName());
-            if (name.isEmpty() || name.startsWith(".") || name.startsWith("_")) {
-                continue;
-            }
-            String childRelative = relative.isEmpty() ? name : relative + "/" + name;
-            if (entry.isDirectory()) {
-                if (!isSkippableCollection(name)) {
-                    walk(entry, childRelative, depth + 1, sink);
-                }
-                continue;
-            }
-            if (LocalMediaNameParser.isVideoFile(name)) {
-                sink.onVideo(name, childRelative, lengthOf(entry));
-            }
+    /** 待走的共享目录（广度优先，与 WebDAV 遍历、mac 版同一走法）。 */
+    private static final class PendingShare {
+        final SmbFile dir;
+        final String relative;
+        final int depth;
+
+        PendingShare(SmbFile dir, String relative, int depth) {
+            this.dir = dir;
+            this.relative = relative;
+            this.depth = depth;
         }
     }
 
@@ -253,6 +284,80 @@ public final class SmbClient {
         try {
             SmbFile file = new SmbFile(absoluteUrl, context());
             return new SmbRandomAccessFile(file, "r");
+        } catch (Throwable error) {
+            throw translation(error);
+        }
+    }
+
+    /** 写一小段内容（字幕 sidecar 就几十 KB 到几百 MB，整份进内存）。 */
+    public void write(String absoluteUrl, byte[] body) throws IOException {
+        try {
+            try (java.io.OutputStream output = new SmbFile(absoluteUrl, context()).getOutputStream()) {
+                output.write(body);
+            }
+        } catch (Throwable error) {
+            throw translation(error);
+        }
+    }
+
+    /** 写一个本机文件（PGS sidecar 能有几百 MB，流式写）。 */
+    public void writeFile(String absoluteUrl, java.io.File file) throws IOException {
+        try (java.io.OutputStream output = new SmbFile(absoluteUrl, context()).getOutputStream();
+             java.io.InputStream input = new java.io.FileInputStream(file)) {
+            byte[] buffer = new byte[65536];
+            int read;
+            while ((read = input.read(buffer)) > 0) {
+                output.write(buffer, 0, read);
+            }
+        } catch (Throwable error) {
+            throw translation(error);
+        }
+    }
+
+    public boolean exists(String absoluteUrl) {
+        try {
+            return new SmbFile(absoluteUrl, context()).exists();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public long length(String absoluteUrl) throws IOException {
+        try {
+            return new SmbFile(absoluteUrl, context()).length();
+        } catch (Throwable error) {
+            throw translation(error);
+        }
+    }
+
+    public byte[] readAll(String absoluteUrl) throws IOException {
+        try (java.io.InputStream input = new SmbFile(absoluteUrl, context()).getInputStream()) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[32768];
+            int read;
+            while ((read = input.read(buffer)) > 0) {
+                out.write(buffer, 0, read);
+            }
+            return out.toByteArray();
+        } catch (Throwable error) {
+            throw translation(error);
+        }
+    }
+
+    /** 区间读：转档要按字节跳读容器。 */
+    public byte[] readAt(String absoluteUrl, long offset, int length) throws IOException {
+        try {
+            SmbFile file = new SmbFile(absoluteUrl, context());
+            long size = file.length();
+            byte[] buffer = new byte[(int) Math.max(0, Math.min(length, size - offset))];
+            if (buffer.length == 0) {
+                return buffer;
+            }
+            try (jcifs.smb.SmbRandomAccessFile access = new jcifs.smb.SmbRandomAccessFile(file, "r")) {
+                access.seek(offset);
+                access.readFully(buffer);
+            }
+            return buffer;
         } catch (Throwable error) {
             throw translation(error);
         }

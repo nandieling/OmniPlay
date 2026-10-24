@@ -58,17 +58,25 @@ public final class PgsSubtitleParser {
                 return false;
             }
 
-            if (markerA != 'P' || markerB != 'G') {
+            // 同步字是 0x50 0x4A，也就是 'P' 'J'（经常被误写成 'PG'）。
+            if (markerA != 'P' || markerB != 'J') {
                 return true;
             }
 
             try {
-                long pts = readUnsignedInt();
-                readUnsignedInt();
+                // 段头共 10 字节：'PJ' + 5 字节 PTS + 段类型 + 16 位长度。
+                // PTS 沿用 MPEG 时间戳写法：'1000' + pts_ext(3) + '1' | pts[32..18] + '1' | pts[17..3] + '1'。
+                readUnsignedByte();
+                int highStart = readUnsignedByte();
+                int highEnd = readUnsignedByte();
+                int lowStart = readUnsignedByte();
+                int lowEnd = readUnsignedByte();
+                long ptsEighths = (long) ((((highStart << 8) | highEnd) >>> 1) << 15)
+                        | ((((lowStart << 8) | lowEnd) >>> 1) & 0x7FFF);
                 int type = readUnsignedByte();
                 int length = readUnsignedShort();
                 byte[] payload = readFully(length);
-                handleSegment(type, pts / PTS_TIMESCALE, payload);
+                handleSegment(type, ptsEighths * 8 / PTS_TIMESCALE, payload);
                 return true;
             } catch (EOFException ignored) {
                 return false;
@@ -236,14 +244,6 @@ public final class PgsSubtitleParser {
             int high = readUnsignedByte();
             int low = readUnsignedByte();
             return (high << 8) | low;
-        }
-
-        private long readUnsignedInt() throws IOException {
-            long a = readUnsignedByte();
-            long b = readUnsignedByte();
-            long c = readUnsignedByte();
-            long d = readUnsignedByte();
-            return (a << 24) | (b << 16) | (c << 8) | d;
         }
 
         private byte[] readFully(int length) throws IOException {

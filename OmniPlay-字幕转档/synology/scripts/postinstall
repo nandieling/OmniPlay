@@ -1,0 +1,7 @@
+#!/bin/sh
+DIR=$(dirname "$0")
+. "${DIR}/common.sh"
+mkdir -p "${VAR_DIR}"
+ensure_conf
+say "配置写在 ${CONF_FILE}，先把它改成本机的媒体库路径再启动套件。"
+exit 0

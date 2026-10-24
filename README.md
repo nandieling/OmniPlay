@@ -28,8 +28,8 @@
 
 | 目录 | 平台 | 技术栈 | 版本 | 说明 |
 | --- | --- | --- | --- | --- |
-| `OmniPlay开源-mac-ARM` | macOS 14+（Apple Silicon） | Swift / SwiftUI + MPVKit-GPL / libmpv / FFmpeg | 1.8 | 功能基准版，工程 `OmniPlay.xcodeproj`，App 名「觅影」，Bundle ID `nan.OmniPlay` |
-| `OmniPlay开源-mac-x64` | macOS 14+（Intel） | 同上 | 1.8 | 同一套工程的 x86_64 版本，已同步 ARM 版 1.8 |
+| `OmniPlay开源-mac-ARM` | macOS 14+（Apple Silicon） | Swift / SwiftUI + MPVKit-GPL / libmpv / FFmpeg | 1.9 | 功能基准版，工程 `OmniPlay.xcodeproj`，App 名「觅影」，Bundle ID `nan.OmniPlay` |
+| `OmniPlay开源-mac-x64` | macOS 14+（Intel） | 同上 | 1.9 | 同一套工程的 x86_64 版本，已同步 ARM 版 1.9 |
 | `OmniPlay-win` | Windows 10 / 11 x64 | Avalonia + .NET 10 + SQLite + libmpv | — | 独立重写，App 名「览影」，方案入口 `OmniPlay.Windows.slnx` |
 | `OmniPlay-安卓TV` | Android TV / 手机（minSdk 26） | Java + libmpv（NDK / JNI） | 1.17 | 双入口启动器：TV 遥控器 D-pad 导航 + 手机触摸海报网格 |
 
@@ -37,6 +37,7 @@
 
 - [macOS ARM 版 README](OmniPlay开源-mac-ARM/README.md)：完整功能清单、使用教程、Xcode 编译归档与打包、常见问题。
 - [macOS x64 版同步记录](OmniPlay开源-mac-x64/2026-10-07-sync-with-arm-1.8.md)：与 ARM 版的差异收敛过程。
+- [macOS x64 版 1.9 同步记录](OmniPlay开源-mac-x64/2026-10-24-sync-with-arm-1.9.md)：本轮从 ARM 版移植的功能与保留的 Intel 专属适配。
 - [Windows 版 README](OmniPlay-win/README.md)：构建、打包、日志与播放诊断、TMDB 配置、离线环境说明。
 - [安卓 TV 版 README](OmniPlay-安卓TV/README.md)：遥控器焦点导航、自研 WebDAV 传输层、主题体系、逐版本演进记录。
 
@@ -76,6 +77,25 @@
 - 续播精确定位到上次保存的进度；默认音轨、默认字幕、画质模式（流畅优先 / 平衡 / 画质优先）均可配置。
 - 播放页标题使用刮削后的影视名与季/集信息，不拼接原始文件名。
 
+### 直接打开视频文件（mac 版）
+
+- 访达「打开方式」选中觅影、设为默认后直接双击、文件菜单「打开视频文件…」（⌘O）、或把文件拖到海报墙窗口上，都能不经媒体库直接起播。
+- 覆盖 mp4、mkv、mov、avi、rmvb、flv、webm、m2ts、ts、m4v、wmv 与蓝光 ISO；设置里可一键把觅影设为这些类型的默认打开应用。
+- 详见 [macOS 直开文档](OmniPlay开源-mac-ARM/docs/2026-10-20-direct-file-playback.md)。
+
+### 液态玻璃主题（mac 版）
+
+- 主题分成「风格 × 配色」两维：5 套配色，风格有经典与液态玻璃两种。液态玻璃在所选配色的浅色底上画四色光斑场，再叠系统玻璃：右上角按钮簇玻璃胶囊、页眉玻璃胶囊、海报玻璃垫、筛选胶囊、详情页文件行与 NeoDB 按钮都有真折射与高光，标题栏与系统控件一并转浅色。
+- macOS 26 起走系统 `glassEffect`，macOS 14 / 15 退回毛玻璃材质 + 染色；改动集中在主题的语义化取值上，经典风格与 5 套配色的观感不变。
+- 实现与验证见 [macOS 液态玻璃主题文档](OmniPlay开源-mac-ARM/docs/2026-10-21-liquid-glass-theme.md)，Windows 与安卓 TV 已有各自深色主题，未跟进此样式。
+
+### NeoDB 同步（mac 版）
+
+- 详情页影视名称右边的 NeoDB 按钮弹窗里给影片打想看 / 在看 / 已看 / 搁置标记、五星评分和评论，设置页一键推送到 NeoDB，也能从 NeoDB 导回本机。
+- 登录方式三种：账户密码、实例 `/developer/` 创建的访问令牌、浏览器授权码；令牌存系统钥匙串。
+- 「已看」可由播放进度自动补齐，手工标记优先；走官方 https://neodb.social，不需要填实例地址。
+- 方案与接口对照见 [macOS NeoDB 同步文档](OmniPlay开源-mac-ARM/docs/2026-10-19-neodb-sync.md)，Windows 与安卓 TV 待移植。
+
 ### 离线缓存
 
 - mac 版与 Windows 版支持在首页或详情页按整部、整季、单集缓存到本地目录。
@@ -98,7 +118,9 @@
 | 导演 / 主演分类文件夹 | 是 | 是 | 否 |
 | 蓝光 ISO / BDMV | 是 | 是 | 是 |
 | 离线缓存 | 是 | 是 | 否（1.15 起从 TV 界面撤下） |
-| 主题配色 | 5 套浅色 | 5 套（含深色） | 5 浅 + 3 深 |
+| NeoDB 标记 / 评分 / 评论同步 | 是 | 否 | 否 |
+| 直接打开视频文件 / 设为默认打开方式 | 是 | 否 | 否 |
+| 主题 | 5 套浅色配色 × 经典 / 液态玻璃两种风格 | 5 套（含深色） | 5 浅 + 3 深 |
 | 播放器 | MPVKit-GPL / libmpv | libmpv（x64） | libmpv（NDK） |
 
 ## 快速上手
@@ -117,6 +139,8 @@ xcodebuild \
 ```
 
 产物在 `/tmp/omniplay-release-build/Build/Products/Release/觅影.app`。Archive、导出、DMG 与公证步骤见 [macOS ARM 版 README](OmniPlay开源-mac-ARM/README.md)。首次编译需要能访问 GitHub 以解析 MPVKit 等 Swift Package。
+
+刚换目录打开工程就报 `Missing package product 'GRDB'` / `'MPVKit-GPL'`，多半是包没解析成功（`MPVKit-GPL` 要从 GitHub Releases 拉 1.6GB 二进制），排查步骤见 [Missing package product 排查](OmniPlay开源-mac-ARM/2026-10-11-missing-package-product-grdb-mpvkit.md)。
 
 ### Windows
 

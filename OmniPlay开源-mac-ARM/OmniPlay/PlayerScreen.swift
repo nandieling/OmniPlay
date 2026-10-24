@@ -1048,6 +1048,10 @@ struct PlayerScreen: View {
     
     @StateObject private var playerManager = MPVPlayerManager()
     @AppStorage("seekDuration") var seekDuration: Int = 10
+    // 播放页控制区也跟着主题走：液态玻璃下给按钮垫玻璃条，经典主题维持原来的黑底
+    @AppStorage(AppThemeResolver.colorKey) var appTheme = ThemeType.appleLight.rawValue
+    @AppStorage(AppThemeResolver.styleKey) var appThemeStyle = ThemeStyle.classic.rawValue
+    var theme: AppTheme { AppThemeResolver.theme(colorRaw: appTheme, styleRaw: appThemeStyle) }
     
     @State private var videoURLs: [URL] = []
     @State private var allPlaylistFiles: [VideoFile] = []
@@ -1061,6 +1065,7 @@ struct PlayerScreen: View {
     @State private var playbackSourceAuthConfig: String?
     
     @State private var isBluRayFolder: Bool = false
+    @State private var prepareStartedAt: Date?
     @State private var blurayRootPath: String? = nil
     @State private var attachedDiscImageMountPaths: [String] = []
     @State private var remoteISOProxyRouteIDs: [String] = []
@@ -1068,12 +1073,16 @@ struct PlayerScreen: View {
     @State private var showControls = true
     @State private var isCursorHidden = false
     @State private var hideUITask: Task<Void, Never>? = nil
-    @State private var menuInteractionTask: Task<Void, Never>? = nil
     @State private var isMenuInteractionActive = false
+    // 正在跟踪的菜单及其宿主：SwiftUI 的 Menu 没有展开态回调，只能盯 AppKit 的跟踪通知
+    @State private var trackingMenu: NSMenu?
+    @State private var menuTrackingTokens: [NSObjectProtocol] = []
+    @State private var menuPointerMonitor: Any?
     @State private var isPointerInTopControlArea = false
     @State private var hasIssuedLoad = false
     @State private var hasPersistedBeforeExit = false
     @State private var isClosingPlayback = false
+    @State private var progressFlushToken = UUID()
     @State private var embyRemotePlaybackContext: EmbyRemotePlaybackContext?
     @State private var isSwitchingEmbyRemoteStream = false
     @Environment(\.dismiss) var dismiss
@@ -1322,6 +1331,17 @@ struct PlayerScreen: View {
         }
     }
     
+    /// 播放页控制区的小按钮：经典主题维持原来的黑底圆角，玻璃主题只留玻璃片
+    private func playerMenuLabel(_ systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 16, weight: .semibold))
+            .frame(width: 44, height: 38)
+            .foregroundColor(.white)
+            .background(theme.isLiquidGlass ? Color.clear : Color.black.opacity(0.75))
+            .cornerRadius(8)
+            .themeGlassPlate(theme, cornerRadius: 8)
+    }
+
     var body: some View {
         ZStack {
             Color.black.edgesIgnoringSafeArea(.all)
@@ -1346,6 +1366,8 @@ struct PlayerScreen: View {
                                 Image(systemName: "chevron.left.circle.fill").font(.system(size: 32))
                             }
                             .buttonStyle(.plain)
+                            .padding(6)
+                            .themeGlassPlate(theme, cornerRadius: 999)
                             .onHover { if $0 { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
                         }
                         Text(currentPlaybackTitle).font(.title3).fontWeight(.bold).padding(.leading, 10)
@@ -1369,31 +1391,11 @@ struct PlayerScreen: View {
                     
                     // 底部进度条与菜单
                     VStack(spacing: 15) {
-                        if shouldShowNextEpisodeButton {
-                            HStack {
-                                Spacer()
-                                Button(action: playNextEpisodeAndMarkCurrentWatched) {
-                                    Text("播放下一集")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(.white)
-                                        .padding(.horizontal, 14)
-                                        .padding(.vertical, 8)
-                                        .background(Color.black.opacity(0.72))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 10)
-                                                .stroke(Color.white.opacity(0.25), lineWidth: 1)
-                                        )
-                                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                                }
-                                .buttonStyle(.plain)
-                                .help("播放下一集")
-                            }
-                        }
-
                         // 底部播放控制区（常见播放器布局）
                         HStack(spacing: 40) {
                             Image(systemName: "backward.end.fill")
-                                .font(.system(size: 34))
+                                .font(.system(size: 32))
+                                .frame(width: 32, height: 32)
                                 .onContinuousPress {
                                     playerManager.seekRelative(seconds: Double(-seekDuration))
                                     resetHideTimer()
@@ -1403,12 +1405,14 @@ struct PlayerScreen: View {
                                 resetHideTimer()
                             }) {
                                 Image(systemName: playerManager.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                                    .font(.system(size: 60))
+                                    .font(.system(size: 56))
+                                    .frame(width: 56, height: 56)
                                     .shadow(radius: 10)
                             }
                             .buttonStyle(.plain)
                             Image(systemName: "forward.end.fill")
-                                .font(.system(size: 34))
+                                .font(.system(size: 32))
+                                .frame(width: 32, height: 32)
                                 .onContinuousPress {
                                     playerManager.seekRelative(seconds: Double(seekDuration))
                                     resetHideTimer()
@@ -1416,6 +1420,34 @@ struct PlayerScreen: View {
                         }
                         .foregroundColor(.white)
                         .onHover { if $0 { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
+                        // 图标版面尺寸固定，玻璃条只留 3pt 余量，不会被字形行框撑高
+                        .padding(.vertical, 3)
+                        .padding(.horizontal, 40)
+                        .themeGlassPlate(theme, cornerRadius: 999)
+                        .padding(.bottom, 40)   // 抬到字幕上方，别压住台词
+
+                        if shouldShowNextEpisodeButton {
+                            HStack {
+                                Spacer()
+                                Button(action: playNextEpisodeAndMarkCurrentWatched) {
+                                    Text("播放下一集")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 8)
+                                        .background(theme.isLiquidGlass ? Color.clear : Color.black.opacity(0.72))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                                        )
+                                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                                        .themeGlassPlate(theme, cornerRadius: 10)
+                                }
+                                .buttonStyle(.plain)
+                                .help("播放下一集")
+                            }
+                        }
+
                         
                         HStack {
                             Text(isMultipartMoviePlayback ? playerTimelineCurrentText : playerManager.currentTime).font(.caption.monospacedDigit())
@@ -1453,7 +1485,7 @@ struct PlayerScreen: View {
                                         }
                                     }
                                 }
-                            } label: { Image(systemName: "waveform").font(.system(size: 16, weight: .semibold)).frame(width: 44, height: 38).background(Color.black.opacity(0.75)).foregroundColor(.white).cornerRadius(8) }.help("音轨").menuStyle(.borderlessButton).fixedSize().colorScheme(.dark).simultaneousGesture(TapGesture().onEnded { beginMenuInteraction() })
+                            } label: { playerMenuLabel("waveform") }.help("音轨").menuStyle(.borderlessButton).fixedSize().colorScheme(.dark).simultaneousGesture(TapGesture().onEnded { beginMenuInteraction() })
                                                                                 
                             // 🌟 字幕菜单 (含本地外挂及时间轴控制)
                             Menu {
@@ -1557,7 +1589,7 @@ struct PlayerScreen: View {
                                     .background(Color.white.opacity(0.1)).cornerRadius(6)
                                 }.padding(.horizontal, 10)
                                 
-                            } label: { Image(systemName: "captions.bubble").font(.system(size: 16, weight: .semibold)).frame(width: 44, height: 38).background(Color.black.opacity(0.75)).foregroundColor(.white).cornerRadius(8) }.help("字幕").menuStyle(.borderlessButton).fixedSize().colorScheme(.dark).simultaneousGesture(TapGesture().onEnded { beginMenuInteraction() })
+                            } label: { playerMenuLabel("captions.bubble") }.help("字幕").menuStyle(.borderlessButton).fixedSize().colorScheme(.dark).simultaneousGesture(TapGesture().onEnded { beginMenuInteraction() })
 
                         }
                     }.foregroundColor(.white).padding(.horizontal, 30).padding(.bottom, 30).padding(.top, 40).background(LinearGradient(gradient: Gradient(colors: [.clear, .black.opacity(0.9)]), startPoint: .top, endPoint: .bottom))
@@ -1597,13 +1629,20 @@ struct PlayerScreen: View {
         .onAppear {
             log("onAppear movie=\(movie.title) initialFileId=\(initialFileId ?? "nil") seedFiles=\(initialPlaylistFiles?.count ?? 0) seedSource=\(initialSourceBasePath ?? "nil") seedProtocol=\(initialSourceProtocolType ?? "nil")")
             ensureComfortableWindowSize()
+            // ⌘Q 时 SwiftUI 不一定来得及走 onDisappear，就算走了也不该把写库交给协程，
+            // 所以把「立即落盘」登记给退出路径
+            PlaybackProgressFlushCenter.register(progressFlushToken) {
+                persistAndStopPlaybackIfNeeded(reason: "applicationWillTerminate")
+            }
+            startObservingMenus()
             prepareVideoWithPermission()
             resetHideTimer()
         }
         .onDisappear {
             traceClose("onDisappear triggered")
+            PlaybackProgressFlushCenter.unregister(progressFlushToken)
+            stopObservingMenus()
             hideUITask?.cancel()
-            menuInteractionTask?.cancel()
             setCursorHidden(false)
             persistAndStopPlaybackIfNeeded(reason: "onDisappear")
         }
@@ -1722,42 +1761,115 @@ struct PlayerScreen: View {
     
     private func resetHideTimer() {
         hideUITask?.cancel()
-        guard !isMenuInteractionActive else { return }
         guard !isPointerInTopControlArea else { return }
         hideUITask = Task {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                guard !isMenuInteractionActive else { return }
                 guard !isPointerInTopControlArea else { return }
-                withAnimation(.easeInOut(duration: 0.5)) { showControls = false }
+                hideControlsNow()
             }
         }
     }
 
+    /// NSMenu 不是 Sendable，从通知回调带进 MainActor 任务时要装一层
+    private struct TrackedMenuBox: @unchecked Sendable {
+        let menu: NSMenu?
+    }
+
+    /// 音轨/字幕菜单：菜单归 AppKit 管，SwiftUI 的 Menu 没有展开态回调，所以这里只盯
+    /// 跟踪通知知道菜单开没开；隐藏倒计时照旧走 3 秒，到点先取消菜单跟踪再收控制条，
+    /// 菜单不会单独留在画面上。用户在菜单里挪鼠标就一直续命。
     private func beginMenuInteraction() {
         hideUITask?.cancel()
-        menuInteractionTask?.cancel()
         isMenuInteractionActive = true
         if !showControls {
             withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
         }
         setCursorHidden(false)
-        menuInteractionTask = Task {
-            try? await Task.sleep(nanoseconds: 10_000_000_000)
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                isMenuInteractionActive = false
-                resetHideTimer()
-            }
-        }
+        watchMenuPointer()
+        resetHideTimer()
     }
 
     private func completeMenuInteraction() {
-        menuInteractionTask?.cancel()
+        stopWatchingMenuPointer()
         isMenuInteractionActive = false
         resetHideTimer()
     }
+
+    private func hideControlsNow() {
+        guard !isPointerInTopControlArea else {
+            resetHideTimer()
+            return
+        }
+        dismissOpenMenu()
+        withAnimation(.easeInOut(duration: 0.5)) { showControls = false }
+    }
+
+    /// 系统菜单是独立弹层，收控制条时它不会自己走，得主动掐掉它的跟踪。
+    /// cancelOperation: 只在它真的响应时当兜底用：SwiftUI 换上去的 AppKitApplication 没实现
+    /// 这个方法，在菜单跟踪里发过去直接就是一个 NSInvalidArgumentException。
+    private func dismissOpenMenu() {
+        let hadMenu = trackingMenu != nil || isMenuInteractionActive
+        let menu = trackingMenu
+        trackingMenu = nil
+        menu?.cancelTracking()
+        // 只有连菜单句柄都没拿到时才用这个兜底，能不碰就不碰
+        if hadMenu, menu == nil {
+            let app = NSApplication.shared
+            if app.responds(to: #selector(NSApplication.cancelOperation(_:))) {
+                app.cancelOperation(nil)
+            }
+        }
+        stopWatchingMenuPointer()
+        isMenuInteractionActive = false
+    }
+
+    private func watchMenuPointer() {
+        guard menuPointerMonitor == nil else { return }
+        menuPointerMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .scrollWheel]
+        ) { event in
+            Task { @MainActor in self.resetHideTimer() }
+            return event
+        }
+    }
+
+    private func stopWatchingMenuPointer() {
+        guard let monitor = menuPointerMonitor else { return }
+        NSEvent.removeMonitor(monitor)
+        menuPointerMonitor = nil
+    }
+
+    private func startObservingMenus() {
+        guard menuTrackingTokens.isEmpty else { return }
+        let center = NotificationCenter.default
+        menuTrackingTokens.append(center.addObserver(
+            forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
+        ) { note in
+            let box = TrackedMenuBox(menu: note.object as? NSMenu)
+            Task { @MainActor in
+                trackingMenu = box.menu ?? trackingMenu
+                watchMenuPointer()
+                resetHideTimer()
+            }
+        })
+        menuTrackingTokens.append(center.addObserver(
+            forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in
+                trackingMenu = nil
+                completeMenuInteraction()
+            }
+        })
+    }
+
+    private func stopObservingMenus() {
+        for token in menuTrackingTokens { NotificationCenter.default.removeObserver(token) }
+        menuTrackingTokens = []
+        dismissOpenMenu()
+    }
+
     
     private func setCursorHidden(_ hidden: Bool) {
         if isClosingPlayback && hidden {
@@ -1783,6 +1895,7 @@ struct PlayerScreen: View {
     }
     
     private func prepareVideoWithPermission() {
+        prepareStartedAt = Date()
         let cacheDirectory = OfflineCacheManager.shared.cacheDirectory
         log("prepare start cacheDir=\(cacheDirectory?.path ?? "nil")")
         if let seedSourceBasePath = initialSourceBasePath,
@@ -1993,15 +2106,20 @@ struct PlayerScreen: View {
 
         Task.detached {
             do {
-                try await AppDatabase.shared.dbQueue.write { db in
+                let finishedMovieIds = try await AppDatabase.shared.dbQueue.write { db -> [Int64] in
+                    var movieIds: [Int64] = []
                     for fileId in uniqueFileIds {
                         if var file = try VideoFile.fetchOne(db, key: fileId) {
                             Self.applyFinishedPlaybackState(to: &file)
                             try file.update(db)
+                            if let movieId = file.movieId { movieIds.append(movieId) }
                         }
                     }
+                    return movieIds
                 }
                 await MainActor.run { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
+                // 播完即自动标记已看并推给 NeoDB
+                await NeodbSyncService.shared.syncFinishedPlaybackMarks(movieIds: Set(finishedMovieIds))
             } catch {}
         }
     }
@@ -2032,46 +2150,43 @@ struct PlayerScreen: View {
         stopRemoteISOProxyRoutes()
         detachAttachedDiscImages()
         
-        if let fileId = fileIdToSave {
-            Task.detached {
-                let formatter = ISO8601DateFormatter()
-                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                let queue = String(cString: __dispatch_queue_get_label(nil), encoding: .utf8) ?? "unknown"
-                let thread = "bg"
-                print("[PlayerScreenClose][\(formatter.string(from: Date()))][\(thread)][q:\(queue)] progress save task begin fileId=\(fileId)")
-                do {
-                    try await AppDatabase.shared.dbQueue.write { db in
-                        for completedId in completedFileIds where completedId != fileId {
-                            if var completedFile = try VideoFile.fetchOne(db, key: completedId) {
-                                Self.applyFinishedPlaybackState(to: &completedFile)
-                                try completedFile.update(db)
-                            }
-                        }
-                        if var file = try VideoFile.fetchOne(db, key: fileId) {
-                            let resolvedDuration = max(durationToSave, file.duration)
-                            let finished = resolvedDuration > 0 && (progressToSave / resolvedDuration) >= 0.95
-                            let thresholded = progressToSave > 5.0 ? progressToSave : 0.0
-                            if finished {
-                                Self.applyFinishedPlaybackState(
-                                    to: &file,
-                                    observedDuration: durationToSave,
-                                    observedProgress: progressToSave
-                                )
-                            } else {
-                                file.playProgress = thresholded
-                                file.duration = resolvedDuration
-                                file.lastPlayedAt = thresholded > 0.0 ? Date().timeIntervalSince1970 : nil
-                            }
-                            try file.update(db)
-                        }
+        if let fileId = fileIdToSave, let dbQueue = AppDatabase.shared.dbQueue {
+            // 进度必须在这个调用栈里同步写库：⌘Q 之后 AppKit 直接收进程，丢进 Task.detached
+            // 的协程排不上队，进度就这么丢了。后面的广播与 NeoDB 推送才走异步。
+            let finishedMovieIds = (try? dbQueue.write { db -> [Int64] in
+                var movieIds: [Int64] = []
+                for completedId in completedFileIds where completedId != fileId {
+                    if var completedFile = try VideoFile.fetchOne(db, key: completedId) {
+                        Self.applyFinishedPlaybackState(to: &completedFile)
+                        try completedFile.update(db)
+                        if let movieId = completedFile.movieId { movieIds.append(movieId) }
                     }
-                    await MainActor.run { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
-                    let doneFormatter = ISO8601DateFormatter()
-                    doneFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                    let doneQueue = String(cString: __dispatch_queue_get_label(nil), encoding: .utf8) ?? "unknown"
-                    let doneThread = "bg"
-                    print("[PlayerScreenClose][\(doneFormatter.string(from: Date()))][\(doneThread)][q:\(doneQueue)] progress save task done fileId=\(fileId)")
-                } catch {}
+                }
+                if var file = try VideoFile.fetchOne(db, key: fileId) {
+                    let resolvedDuration = max(durationToSave, file.duration)
+                    let finished = resolvedDuration > 0 && (progressToSave / resolvedDuration) >= 0.95
+                    let thresholded = progressToSave > 5.0 ? progressToSave : 0.0
+                    if finished {
+                        Self.applyFinishedPlaybackState(
+                            to: &file,
+                            observedDuration: durationToSave,
+                            observedProgress: progressToSave
+                        )
+                        if let movieId = file.movieId { movieIds.append(movieId) }
+                    } else {
+                        file.playProgress = thresholded
+                        file.duration = resolvedDuration
+                        file.lastPlayedAt = thresholded > 0.0 ? Date().timeIntervalSince1970 : nil
+                    }
+                    try file.update(db)
+                }
+                return movieIds
+            }) ?? []
+            traceClose("progress written inline fileId=\(fileId) progress=\(progressToSave) finished=\(finishedMovieIds.count)")
+            Task.detached {
+                await MainActor.run { NotificationCenter.default.post(name: .libraryUpdated, object: nil) }
+                // 关闭播放窗时已播完的条目：自动标记已看并推给 NeoDB
+                await NeodbSyncService.shared.syncFinishedPlaybackMarks(movieIds: Set(finishedMovieIds))
             }
         }
     }
@@ -2084,6 +2199,8 @@ struct PlayerScreen: View {
     private func setSubtitleSize(_ size: Int) { playerManager.setSubtitleSize(size); resetHideTimer() }
     private func subtitleSizeLabel(_ size: Int) -> String { switch size { case 12: return "小"; case 16: return "标准"; case 20: return "大"; case 24: return "特大"; default: return "标准" } }
     private func ensureComfortableWindowSize() {
+        // 独立播放窗口的尺寸归 DirectPlaybackWindowManager 管，这里改会把全屏动画带歪
+        guard !isStandaloneWindow else { return }
         guard let window = NSApplication.shared.windows.first(where: { $0.isKeyWindow }) else { return }
         guard !window.styleMask.contains(.fullScreen) else { return }
         let minSize = NSSize(width: 1100, height: 680)
@@ -3740,9 +3857,11 @@ struct PlayerScreen: View {
     private func tryStartPlaybackIfReady() {
         guard !hasIssuedLoad else { return }
         guard !videoURLs.isEmpty else { return }
-        guard playerManager.drawableBindVersion > 0 else { return }
+        // 图层绑没绑都能下发 loadfile：没绑时播放器会先按「无视频轨」打开，
+        // 探测与缓冲跟建窗口并行，图层一绑上就补回视频轨。
         hasIssuedLoad = true
-        log("start playback after drawable ready version=\(playerManager.drawableBindVersion)")
+        let preparedElapsed = prepareStartedAt.map { String(format: "%.0fms", Date().timeIntervalSince($0) * 1000) } ?? "未知"
+        log("start playback drawable=\(playerManager.drawableBindVersion > 0) 准备耗时=\(preparedElapsed)")
         playerManager.loadFiles(urls: videoURLs, startPosition: startPosition, isBluRay: isBluRayFolder, blurayRootPath: blurayRootPath, trackPreferenceKey: currentVideoFileId)
     }
 }

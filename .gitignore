@@ -97,6 +97,10 @@ build/
 Build/
 **/build/
 **/Build/
+# Gradle/IDE 就地下载的构建工具链（安卓工程里的 .jdk 是 336MB 的 JDK，别提交）
+.jdk/
+**/.jdk/
+.jdk-user/
 tmp/
 **/tmp/
 publish/

@@ -47,5 +47,15 @@ struct OmniPlayApp: App {
                 // 它的作用是：只要 appLanguage 发生变化，立刻摧毁旧界面并用新语言重建整个 App！
                 .id(appLanguage)
         }
+        .commands {
+            // 直开视频文件：和访达双击、拖进海报墙走的是同一条链路
+            CommandGroup(replacing: .newItem) {
+                Button("打开视频文件…") {
+                    DirectFilePlaybackManager.shared.presentOpenPanel()
+                }
+                .keyboardShortcut("o", modifiers: .command)
+                .help("不经媒体库，直接播放一个视频文件或蓝光 ISO")
+            }
+        }
     }
 }

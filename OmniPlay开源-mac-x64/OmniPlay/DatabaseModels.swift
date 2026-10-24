@@ -50,7 +50,7 @@ enum MediaSourceProtocol: String, Codable, CaseIterable {
             while value.count > 1 && value.hasSuffix("/") {
                 value.removeLast()
             }
-            return value
+            return Self.usableLocalPath(value)
         case .webdav, .plex, .emby, .jellyfin:
             // The address is often copied from a NAS UI as `nas:45722` or
             // `http://nas:45722/api/health`.  URL(string:) treats the former
@@ -98,6 +98,16 @@ enum MediaSourceProtocol: String, Codable, CaseIterable {
         case .direct:
             return "/"
         }
+    }
+
+    /// 早先版本可能把中文共享的挂载点按 URL 转义写进了库（/Volumes/%E7%94%B5%E5%BD%B1）。
+    /// 字面路径不在盘上、还原后又存在时按还原的算，老数据不用重建媒体源也能扫。
+    private static nonisolated func usableLocalPath(_ path: String) -> String {
+        guard path.contains("%"), path.hasPrefix("/"),
+              let decoded = path.removingPercentEncoding, decoded != path else { return path }
+        let manager = FileManager.default
+        guard !manager.fileExists(atPath: path), manager.fileExists(atPath: decoded) else { return path }
+        return decoded
     }
 
     nonisolated func isValidBaseURL(_ value: String) -> Bool {
@@ -380,7 +390,9 @@ nonisolated struct MediaSource: Codable, FetchableRecord, PersistableRecord {
     }
 }
 
-final class WebDAVCredentialStore {
+/// 凭据只存钥匙串。整类刻意不做主线程隔离：SecItem* 本身线程安全，而扫描路径必须
+/// 能在后台读它（见 `loadCredentialAsync`）。
+nonisolated final class WebDAVCredentialStore: @unchecked Sendable {
     static let shared = WebDAVCredentialStore()
 
     struct Credential {
@@ -492,6 +504,16 @@ final class WebDAVCredentialStore {
         }
         let password = dict["password"] ?? ""
         return Credential(username: username, password: password)
+    }
+
+    /// 扫描路径专用：`SecItemCopyMatching` 要等 SecurityAgent，遇到 ACL 校验还会弹授权框，
+    /// 在主线程同步调用会把指针钉住几十秒。丢到全局队列，主线程只等续接。
+    func loadCredentialAsync(id: String) async -> Credential? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Credential?, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: self.loadCredential(id: id))
+            }
+        }
     }
 
     func removeCredential(id: String) {

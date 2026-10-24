@@ -31,6 +31,48 @@ private struct WebDAVBrowserStarredFolder: Identifiable, Equatable {
     var id: String { key }
 }
 
+/// 局域网媒体源弹窗里的类型选择：SMB 只在 UI 层出现，入库仍是本地目录 + SMB 挂载信息
+private enum RemoteSourceKind: String, CaseIterable, Identifiable {
+    case webdav, smb, plex, emby, jellyfin
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .webdav: return "WebDAV"
+        case .smb: return "SMB"
+        case .plex: return "Plex"
+        case .emby: return "Emby"
+        case .jellyfin: return "Jellyfin"
+        }
+    }
+
+    var protocolKind: MediaSourceProtocol? {
+        MediaSourceProtocol(rawValue: rawValue)
+    }
+
+    init(_ protocolKind: MediaSourceProtocol) {
+        self = RemoteSourceKind(rawValue: protocolKind.rawValue) ?? .webdav
+    }
+}
+
+private struct SMBBrowserEntry: Identifiable, Equatable {
+    let share: String
+    let relativePath: String
+    let name: String
+
+    var id: String { "\(share)|\(relativePath)" }
+    var key: String { id }
+}
+
+private struct SMBStarredTarget: Identifiable, Equatable {
+    let share: String
+    let relativePath: String
+    let name: String
+
+    var id: String { "\(share)|\(relativePath)" }
+}
+
 private struct MediaServerSourceDraft {
     let protocolKind: MediaSourceProtocol
     let normalizedURL: String
@@ -192,6 +234,20 @@ extension View { @ViewBuilder func conditionalHelp(_ text: String, show: Bool) -
 
 enum MovieSortOption: String, CaseIterable { case name = "名称"; case rating = "评分"; case year = "上映年份" }
 
+private func posterWallDropURLs(from providers: [NSItemProvider]) async -> [URL] {
+    var urls: [URL] = []
+    for provider in providers {
+        guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else { continue }
+        let url: URL? = await withCheckedContinuation { continuation in
+            provider.loadObject(ofClass: NSURL.self) { object, _ in
+                continuation.resume(returning: (object as? NSURL) as URL?)
+            }
+        }
+        if let url { urls.append(url) }
+    }
+    return urls
+}
+
 struct PosterWallView: View {
     private static let recentWebDAVHistoryKey = "PosterWallRecentWebDAVHistory"
     private let topBarHeight: CGFloat = 52
@@ -216,6 +272,7 @@ struct PosterWallView: View {
     @State private var sourceToRename: MediaSource? = nil
     @State private var renamingSourceName: String = ""
     @State private var isShowingManualRemoteSourceSheet = false
+    @State private var remoteSourceKind: RemoteSourceKind = .plex
     @State private var isShowingAddWebDAVSheet = false
     @State private var webDAVName: String = ""
     @State private var webDAVBaseURL: String = ""
@@ -257,6 +314,28 @@ struct PosterWallView: View {
     @State private var pendingLuckyConfiguration: LuckyStunSourceConfiguration? = nil
     @State private var isShowingWebDAVPreScanLoginSheet = false
     @State private var isShowingWebDAVFolderBrowserSheet = false
+    @State private var isShowingSMBBrowserSheet = false
+    @State private var shouldShowSMBBrowserAfterLoginDismiss = false
+    @State private var smbHost = ""
+    @State private var smbUser = ""
+    @State private var smbPassword = ""
+    @State private var smbSourceName = ""
+    @State private var smbMessage = ""
+    @State private var smbMessageIsError = false
+    @State private var smbIsWorking = false
+    @State private var smbIsLoadingBrowser = false
+    @State private var smbIsBatchMounting = false
+    @State private var smbConnection: SMBShareInfo? = nil
+    @State private var smbShareNames: [String] = []
+    @State private var smbBrowserShare = ""
+    @State private var smbBrowserMountPath = ""
+    @State private var smbBrowserRelative = ""
+    @State private var smbBrowserStack: [String] = []
+    @State private var smbBrowserEntries: [SMBBrowserEntry] = []
+    @State private var smbStarredTargets: [SMBStarredTarget] = []
+    @State private var smbMountedKeys: Set<String> = []
+    @State private var smbTempMountedShares: Set<String> = []
+    @State private var smbTempMountPaths: [String: String] = [:]
     @State private var shouldStartLuckyWebDAVAfterDismiss = false
     @State private var shouldShowWebDAVBrowserAfterLoginDismiss = false
     @State private var webDAVBrowserName: String = ""
@@ -281,12 +360,14 @@ struct PosterWallView: View {
     @AppStorage("showMediaSourceRealPath") var showMediaSourceRealPath = true
     @AppStorage("removeWebDAVCredentialsOnDelete") var removeWebDAVCredentialsOnDelete = false
     
-    @AppStorage("appTheme") var appTheme = ThemeType.crystal.rawValue
-    var theme: AppTheme { ThemeType(rawValue: appTheme)?.colors ?? ThemeType.crystal.colors }
+    @AppStorage(AppThemeResolver.colorKey) var appTheme = ThemeType.crystal.rawValue
+    @AppStorage(AppThemeResolver.styleKey) var appThemeStyle = ThemeStyle.classic.rawValue
+    var theme: AppTheme { AppThemeResolver.theme(colorRaw: appTheme, styleRaw: appThemeStyle) }
     @Environment(\.colorScheme) private var colorScheme
     
     @ObservedObject var thumbManager = ThumbnailManager.shared
     @ObservedObject var cacheManager = OfflineCacheManager.shared
+    @ObservedObject private var directPlayback = DirectFilePlaybackManager.shared
     @StateObject private var lanScanner = LANScanner()
     
     @State private var searchText: String = ""
@@ -321,6 +402,8 @@ struct PosterWallView: View {
     @State private var personProfiles: [String: PersonProfile] = [:]
     @State private var folderFilmography: [String: [TMDBFilmographyItem]] = [:]
     @State private var folderFilmographyLoading: Set<String> = []
+    /// 用户正在滚动海报墙。滚动期间卡片少干活：不接 hover 抖动，玻璃垫降成纯染色底。
+    @State private var isWallScrolling = false
     
     // 🌟 彻底删除了所有与 network 相关的 State
     
@@ -332,7 +415,7 @@ struct PosterWallView: View {
     
     var displayedMovies: [Movie] { var result = movies; if !searchText.isEmpty { result = result.filter { $0.title.localizedCaseInsensitiveContains(searchText) } }; result.sort { m1, m2 in let isLess: Bool; switch selectedSortOption { case .name: isLess = m1.title.localizedStandardCompare(m2.title) == .orderedAscending; case .year: isLess = (m1.releaseDate ?? "") < (m2.releaseDate ?? ""); case .rating: isLess = (m1.voteAverage ?? 0.0) < (m2.voteAverage ?? 0.0) }; return isAscending ? isLess : !isLess }; return result }
     private var discoveredNetworkDevices: [DiscoveredDevice] {
-        lanScanner.discoveredDevices.filter { $0.type.isWebDAV || $0.type.isMediaServer }
+        lanScanner.discoveredDevices.filter { $0.type.isWebDAV || $0.type.isMediaServer || $0.type == .smb }
     }
 
     // MARK: - 首页分类文件夹（导演/主演）
@@ -383,7 +466,10 @@ struct PosterWallView: View {
             )
         }
         .sorted { lhs, rhs in
-            // 分类文件夹按名称排序，升降序由首页箭头按钮切换
+            // 没有中文译名的外文分类永远排在中文名后面，组内升降序由首页箭头按钮切换
+            let lhsForeign = !TMDBService.containsChinese(lhs.folder.name)
+            let rhsForeign = !TMDBService.containsChinese(rhs.folder.name)
+            if lhsForeign != rhsForeign { return !lhsForeign }
             let cmp = lhs.folder.name.localizedStandardCompare(rhs.folder.name)
             if cmp != .orderedSame {
                 return categoryFolderSortAsc ? cmp == .orderedAscending : cmp == .orderedDescending
@@ -508,6 +594,11 @@ struct PosterWallView: View {
                 get: { activeCategoryMode },
                 set: { newMode in
                     withAnimation(.easeInOut(duration: 0.2)) { homeCategoryMode = newMode.rawValue }
+                    // 切进导演/主演分类时催一轮外文人名中文译名补齐，
+                    // 补齐完成后通过 libraryUpdated 刷新分类标题
+                    if newMode.personKind != nil {
+                        refreshCategoryFolderState()
+                    }
                 }
             )) {
                 ForEach(HomeCategoryMode.allCases) { mode in
@@ -519,15 +610,14 @@ struct PosterWallView: View {
             HStack(spacing: 5) {
                 Image(systemName: activeCategoryMode == .none ? "square.grid.2x2" : "person.2.fill")
                     .font(.system(size: 13, weight: .semibold))
-                Text(activeCategoryMode == .none ? "全部分类" : "按\(activeCategoryMode.kindLabel)")
-                    .font(.subheadline.weight(.semibold))
+                // 当前分类只在弹窗里显示，按钮上只留图标与上下箭头
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 10, weight: .bold))
             }
             .foregroundColor(activeCategoryMode == .none ? Color.secondary : theme.accent)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(Capsule().fill(activeCategoryMode == .none ? theme.surface.opacity(0.6) : theme.accent.opacity(0.12)))
+            .themeVibrant(theme, capsule: true, tint: activeCategoryMode == .none ? theme.chipFill : theme.accent.opacity(0.12))
             .overlay(Capsule().stroke(activeCategoryMode == .none ? Color.secondary.opacity(0.25) : theme.accent.opacity(0.5), lineWidth: 1))
         }
         .menuStyle(.borderlessButton)
@@ -751,7 +841,7 @@ struct PosterWallView: View {
             .padding(25)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(theme.background.ignoresSafeArea())
+        .background(theme.backdropLayer.ignoresSafeArea())
         .modifier(RemoveNavTitleModifier())
         .task(id: group.id) {
             await loadFilmographyIfNeeded(for: group)
@@ -894,7 +984,7 @@ struct PosterWallView: View {
     var body: some View {
         NavigationStack {
             ZStack(alignment: .top) {
-                theme.background.ignoresSafeArea()
+                theme.backdropLayer.ignoresSafeArea()
                 
                 ScrollView {
                     if movies.isEmpty && continueWatchingMovies.isEmpty {
@@ -905,10 +995,14 @@ struct PosterWallView: View {
                     } else {
                         VStack(alignment: .leading, spacing: 24) {
                             if !continueWatchingMovies.isEmpty {
+                                // 玻璃主题下给标题垫一条玻璃胶囊，文字左缘仍对齐海报
                                 Text("继续播放")
                                     .font(.title2).fontWeight(.bold)
                                     .foregroundColor(theme.textPrimary)
-                                    .padding(.horizontal, 25).padding(.top, 8)
+                                    .themeGlassPill(theme)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.leading, 25)
+                                    .padding(.top, 8)
                                 ScrollView(.horizontal, showsIndicators: false) {
                                     HStack(spacing: 20) {
                                         ForEach(continueWatchingMovies, id: \.id) { movie in
@@ -930,11 +1024,12 @@ struct PosterWallView: View {
                                 Divider().background(theme.textSecondary.opacity(0.3)).padding(.vertical, 10)
                             }
                             HStack(spacing: 12) {
+                                // 标题与筛选控件整体做成一颗玻璃胶囊；非玻璃主题不加任何内边距，观感原样
+                                HStack(spacing: 12) {
                                 Text("所有影视")
                                     .font(.title2).fontWeight(.bold)
                                     .foregroundColor(theme.textPrimary)
                                 categoryMenuButton
-                                Spacer().frame(width: 15)
                                 if isSearchActive {
                                     TextField("搜索...", text: $searchText)
                                         .textFieldStyle(.roundedBorder).frame(width: 160).transition(.opacity.combined(with: .move(edge: .trailing)))
@@ -958,6 +1053,8 @@ struct PosterWallView: View {
                                         .font(.system(size: 14, weight: .bold)).foregroundColor(.secondary)
                                 }.buttonStyle(.plain)
                                 .conditionalHelp(activeCategoryMode == .none ? "切换排序方向" : "分类文件夹按名称排序，点击切换升/降序", show: enableFastTooltip)
+                                }
+                                .themeGlassPill(theme)
                                 Spacer()
                             }.padding(.horizontal, 25).padding(.top, continueWatchingMovies.isEmpty ? 6 : 4)
                             
@@ -979,6 +1076,8 @@ struct PosterWallView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .environment(\.isPosterWallScrolling, isWallScrolling)
+                .wallScrollPhaseGating(isScrolling: $isWallScrolling)
                 .padding(.top, topBarHeight)
                 
                 if let cacheMessage = cacheManager.cacheStatusMessage {
@@ -987,8 +1086,7 @@ struct PosterWallView: View {
                         .foregroundColor(theme.textPrimary)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
-                        .background(.ultraThinMaterial)
-                        .clipShape(Capsule())
+                        .themeVibrant(theme, capsule: true)
                         .shadow(radius: 8)
                         .padding(.top, 18)
                         .padding(.trailing, 18)
@@ -1031,55 +1129,60 @@ struct PosterWallView: View {
                     }
                     
                     Spacer(minLength: 20)
-                    
-                    Button(action: { isShowingManageSources.toggle() }) {
-                        Image(systemName: "folder.badge.plus")
-                            .font(.system(size: 21, weight: .medium))
-                            .foregroundColor(topToolbarInactiveIconColor)
-                            .frame(width: 28, height: 28)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("toolbar.addSource")
-                    .conditionalHelp("查看已挂载媒体源，并添加本地文件夹或 WebDAV 媒体源", show: enableFastTooltip)
-                    .popover(isPresented: $isShowingManageSources, arrowEdge: .top) { folderMenuPanel }
-                    
-                    Button(action: { triggerScanAndScrape() }) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 21, weight: .medium))
-                            .foregroundColor(isProcessing ? topToolbarDisabledIconColor : topToolbarInactiveIconColor)
-                            .frame(width: 28, height: 28)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("toolbar.sync")
-                    .disabled(isProcessing)
-                    .conditionalHelp("重新扫描目录并刷新刮削结果", show: enableFastTooltip)
-                    
-                    Button(action: { withAnimation { isHomeCacheModeActive.toggle() } }) {
-                        Image(systemName: isHomeCacheModeActive ? "icloud.fill" : "icloud")
-                            .font(.system(size: 21, weight: .medium))
-                            .foregroundColor(isHomeCacheModeActive ? theme.accent : topToolbarInactiveIconColor)
-                            .frame(width: 28, height: 28)
-                    }
-                    .buttonStyle(.plain)
-                    .conditionalHelp("切换离线缓存编辑模式", show: enableFastTooltip)
 
-                    Button(action: {
-                        settingsFocusTMDBApi = false
-                        showSettings = true
-                    }) {
-                        Image(systemName: "gearshape")
-                            .font(.system(size: 21, weight: .medium))
-                            .foregroundColor(topToolbarInactiveIconColor)
-                            .frame(width: 28, height: 28)
+                    // 右上角这一簇按钮整体垫一块圆角玻璃，玻璃只包住按钮本身；非玻璃主题原样
+                    HStack(spacing: 16) {
+                        Button(action: { isShowingManageSources.toggle() }) {
+                            Image(systemName: "folder.badge.plus")
+                                .font(.system(size: 21, weight: .medium))
+                                .foregroundColor(topToolbarInactiveIconColor)
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("toolbar.addSource")
+                        .conditionalHelp("查看已挂载媒体源，并添加本地文件夹、SMB 共享或 WebDAV 媒体源", show: enableFastTooltip)
+                        .popover(isPresented: $isShowingManageSources, arrowEdge: .top) { folderMenuPanel }
+                    
+                        Button(action: { triggerScanAndScrape() }) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 21, weight: .medium))
+                                .foregroundColor(isProcessing ? topToolbarDisabledIconColor : topToolbarInactiveIconColor)
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("toolbar.sync")
+                        .disabled(isProcessing)
+                        .conditionalHelp("重新扫描目录并刷新刮削结果", show: enableFastTooltip)
+                    
+                        Button(action: { withAnimation { isHomeCacheModeActive.toggle() } }) {
+                            Image(systemName: isHomeCacheModeActive ? "icloud.fill" : "icloud")
+                                .font(.system(size: 21, weight: .medium))
+                                .foregroundColor(isHomeCacheModeActive ? theme.accent : topToolbarInactiveIconColor)
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .conditionalHelp("切换离线缓存编辑模式", show: enableFastTooltip)
+
+                        Button(action: {
+                            settingsFocusTMDBApi = false
+                            showSettings = true
+                        }) {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 21, weight: .medium))
+                                .foregroundColor(topToolbarInactiveIconColor)
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("toolbar.settings")
+                        .conditionalHelp("打开偏好设置", show: enableFastTooltip)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("toolbar.settings")
-                    .conditionalHelp("打开偏好设置", show: enableFastTooltip)
+                    .themeTopBarCluster(theme)
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 10)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity).navigationTitle("我的觅影库")
+            .frame(maxWidth: .infinity, maxHeight: .infinity).modifier(RemoveNavTitleModifier())
+            .preferredColorScheme(theme.preferredScheme)
             .sheet(isPresented: $showSettings) {
                 SettingsView(focusTMDBApi: settingsFocusTMDBApi)
                     .onDisappear { settingsFocusTMDBApi = false }
@@ -1092,8 +1195,11 @@ struct PosterWallView: View {
                     sourceInfoSheet(source)
                 }
             }
-            .sheet(isPresented: $isShowingManualRemoteSourceSheet) {
+            .sheet(isPresented: $isShowingManualRemoteSourceSheet, onDismiss: showPendingSMBBrowser) {
                 manualRemoteSourceSheet()
+            }
+            .sheet(isPresented: $isShowingSMBBrowserSheet, onDismiss: finalizeSMBBrowserIfNeeded) {
+                smbBrowserSheet()
             }
             .sheet(isPresented: $isShowingWebDAVPreScanLoginSheet, onDismiss: showPendingWebDAVBrowser) {
                 webDAVPreScanLoginSheet()
@@ -1104,7 +1210,7 @@ struct PosterWallView: View {
             .sheet(item: $categoryPosterPickerGroup) { group in
                 categoryPosterPickerSheet(for: group)
             }
-            .sheet(isPresented: $isShowingMediaServerSheet) {
+            .sheet(isPresented: $isShowingMediaServerSheet, onDismiss: showPendingSMBBrowser) {
                 mediaServerSourceSheet()
             }
             .sheet(isPresented: $isShowingLuckyStunSourceSheet, onDismiss: startPendingLuckyWebDAV) {
@@ -1112,6 +1218,14 @@ struct PosterWallView: View {
             }
             .sheet(isPresented: $isShowingRemoveSourceSheet) {
                 removeSourceSheet()
+            }
+            .onDrop(of: [UTType.fileURL], isTargeted: nil, perform: handleFileDrop)
+            .alert("无法打开视频文件", isPresented: Binding(
+                get: { directPlayback.lastOpenError != nil },
+                set: { if !$0 { directPlayback.clearOpenError() } })) {
+                Button("好", role: .cancel) { }
+            } message: {
+                Text(directPlayback.lastOpenError?.message ?? "")
             }
             .alert(Text(scanErrorAlertTitle), isPresented: $isShowingScanErrorAlert) {
                 Button("好", role: .cancel) { }
@@ -1245,60 +1359,667 @@ struct PosterWallView: View {
         }
     }
     
+    // MARK: - SMB 网络共享源
+
+    /// SMB 表单就长在「局域网媒体源」弹窗里，这里只负责预选类型与地址
+    private func openSMBSourceSheet(host: String = "") {
+        isShowingManageSources = false
+        closeRemoteSourceSheets()
+        resetSMBBrowserState()
+        smbHost = host
+        remoteSourceKind = .smb
+        // 刚关掉的浮层要等一轮 runloop 才能让位给新弹窗，和 WebDAV 那条路一致
+        DispatchQueue.main.async {
+            isShowingManualRemoteSourceSheet = true
+        }
+    }
+
+    private func resetSMBBrowserState() {
+        smbHost = ""
+        smbUser = ""
+        smbPassword = ""
+        smbSourceName = ""
+        smbMessage = ""
+        smbMessageIsError = false
+        smbIsWorking = false
+        smbIsLoadingBrowser = false
+        smbIsBatchMounting = false
+        smbConnection = nil
+        smbShareNames = []
+        smbBrowserShare = ""
+        smbBrowserMountPath = ""
+        smbBrowserRelative = ""
+        smbBrowserStack = []
+        smbBrowserEntries = []
+        smbStarredTargets = []
+        smbMountedKeys = []
+        smbTempMountedShares = []
+        smbTempMountPaths = [:]
+    }
+
+    private var smbStarredKeys: Set<String> { Set(smbStarredTargets.map(\.id)) }
+
+    private var smbCanGoBack: Bool { !smbBrowserShare.isEmpty }
+
+    private var smbBrowserLocationLabel: String {
+        guard let connection = smbConnection else { return "smb://\(smbHost)" }
+        guard !smbBrowserShare.isEmpty else { return "smb://\(connection.host)" }
+        let suffix = smbBrowserRelative.isEmpty ? "" : "/" + smbBrowserRelative
+        return "smb://\(connection.host)/\(smbBrowserShare)\(suffix)"
+    }
+
+    /// 当前浏览的这一层能不能整体标星（共享根或共享里的某个文件夹）
+    private var smbCurrentFolderTarget: SMBStarredTarget? {
+        guard !smbBrowserShare.isEmpty else { return nil }
+        let name = smbBrowserRelative.isEmpty
+            ? smbBrowserShare
+            : String(smbBrowserRelative.split(separator: "/").last ?? "")
+        return SMBStarredTarget(share: smbBrowserShare, relativePath: smbBrowserRelative, name: name)
+    }
+
+    private var smbLoginFormFields: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("填好地址后会列出服务器上的共享；可给多个共享或共享里的文件夹点星标，关闭列表时统一挂载并扫描刮削。")
+                .font(.caption)
+                .foregroundColor(theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("显示名称（可选，留空用共享名）", text: $smbSourceName)
+                .textFieldStyle(.roundedBorder)
+            TextField("服务器地址，例如 smb://192.168.1.20 或 192.168.1.20/影视", text: $smbHost)
+                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 8) {
+                TextField("用户名（可选）", text: $smbUser)
+                    .textFieldStyle(.roundedBorder)
+                SecureField("密码（可选）", text: $smbPassword)
+                    .textFieldStyle(.roundedBorder)
+            }
+            if !smbMessage.isEmpty {
+                Text(smbMessage)
+                    .font(.caption)
+                    .foregroundColor(smbMessageIsError ? theme.dangerColor : theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func smbBrowserSheet() -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Text(smbBrowserShare.isEmpty ? "选择 SMB 共享" : "选择 SMB 共享文件夹")
+                    .font(.title3.bold())
+                    .foregroundColor(theme.textPrimary)
+                Spacer()
+                if smbIsLoadingBrowser || smbIsBatchMounting {
+                    ProgressView().controlSize(.small)
+                }
+                Button {
+                    closeSMBBrowser()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundColor(theme.textSecondary)
+                }
+                .buttonStyle(.plain)
+                .disabled(smbIsLoadingBrowser || smbIsBatchMounting)
+                .help(smbStarredTargets.isEmpty ? "关闭" : "关闭并挂载标星的共享")
+            }
+
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(smbSourceName.isEmpty ? (smbConnection?.host ?? smbHost) : smbSourceName)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(theme.textPrimary)
+                    Text(verbatim: smbBrowserLocationLabel)
+                        .font(.caption)
+                        .foregroundColor(theme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                if let target = smbCurrentFolderTarget {
+                    Button {
+                        toggleSMBStar(target)
+                    } label: {
+                        Image(systemName: smbStarredKeys.contains(target.id) ? "star.fill" : "star")
+                    }
+                    .buttonStyle(.bordered)
+                    .help(smbStarredKeys.contains(target.id) ? "取消标星当前文件夹" : "标星当前文件夹")
+                }
+                Spacer()
+            }
+
+            HStack {
+                Button {
+                    navigateSMBBrowserBack()
+                } label: {
+                    Label("返回上级", systemImage: "chevron.left")
+                }
+                .disabled(!smbCanGoBack || smbIsLoadingBrowser)
+                Spacer()
+                Button {
+                    reloadSMBBrowserLevel()
+                } label: {
+                    Label("刷新", systemImage: "arrow.clockwise")
+                }
+                .disabled(smbIsLoadingBrowser)
+            }
+
+            if !smbStarredTargets.isEmpty {
+                Text("已标星 \(smbStarredTargets.count) 个共享/文件夹，关闭列表后会加入挂载媒体源。")
+                    .font(.caption)
+                    .foregroundColor(theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !smbMessage.isEmpty {
+                Text(smbMessage)
+                    .font(.caption)
+                    .foregroundColor(smbMessageIsError ? theme.dangerColor : theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(smbBrowserEntries) { entry in
+                        smbBrowserRow(entry)
+                    }
+                }
+            }
+            .frame(minHeight: 220, maxHeight: 360)
+            .overlay {
+                if smbBrowserEntries.isEmpty && !smbIsLoadingBrowser {
+                    Text(smbBrowserShare.isEmpty ? "这台服务器没有可挂载的共享。" : "这个文件夹里没有子文件夹，点右上角星标收藏当前文件夹。")
+                        .font(.caption)
+                        .foregroundColor(theme.textSecondary)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button(smbStarredTargets.isEmpty ? "关闭" : "关闭并挂载 \(smbStarredTargets.count) 个共享") {
+                    closeSMBBrowser()
+                }
+                .disabled(smbIsLoadingBrowser || smbIsBatchMounting)
+            }
+        }
+        .padding(20)
+        .frame(width: 560)
+        .themeSheetChrome(theme)
+    }
+
+    private func smbBrowserRow(_ entry: SMBBrowserEntry) -> some View {
+        let isMounted = smbMountedKeys.contains(entry.key)
+        let isStarred = smbStarredKeys.contains(entry.key)
+        let isBusy = smbIsLoadingBrowser || smbIsBatchMounting
+
+        return HStack(spacing: 10) {
+            Button {
+                enterSMBEntry(entry)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: smbBrowserShare.isEmpty
+                        ? "externaldrive.connected.to.line.below"
+                        : "folder")
+                        .foregroundColor(theme.accent)
+                    Text(entry.name)
+                        .foregroundColor(theme.textPrimary)
+                        .lineLimit(1)
+                    if isMounted {
+                        Text("已挂载")
+                            .font(.caption2)
+                            .foregroundColor(theme.successColor)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundColor(theme.textSecondary)
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(isBusy)
+
+            Button {
+                toggleSMBStar(entry)
+            } label: {
+                Image(systemName: (isMounted || isStarred) ? "star.fill" : "star")
+                    .foregroundColor((isMounted || isStarred) ? theme.accent : theme.textSecondary)
+            }
+            .buttonStyle(.plain)
+            .help(isMounted ? "已挂载" : (isStarred ? "取消标星" : "标星此项"))
+            .disabled(isMounted || isBusy)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .themeVibrant(theme, cornerRadius: 10)
+    }
+
+    private func connectSMBAndBrowse() {
+        guard var location = SMBSourceSupport.parseLocation(smbHost) else {
+            smbMessage = "服务器地址无效，请输入 smb://主机 或 主机/共享 这样的地址。"
+            smbMessageIsError = true
+            return
+        }
+        // 表单里填的账号优先于地址里带的
+        if let user = nilIfBlank(smbUser) { location.username = user }
+        if !smbPassword.isEmpty { location.password = smbPassword }
+        let targetShare = location.share
+        let probe = SMBShareInfo(host: location.host, share: "", username: location.username, password: location.password)
+
+        smbIsWorking = true
+        smbMessage = "正在读取共享列表..."
+        smbMessageIsError = false
+
+        Task {
+            let result = await SMBSourceManager.listShares(probe)
+            await MainActor.run {
+                smbIsWorking = false
+                if case .failure(let error) = result {
+                    smbMessage = """
+                    连接失败：\(error.localizedDescription)
+                    也可以在访达里用「连接服务器」连到 smb://\(probe.host)，觅影会直接复用已经挂载好的目录。
+                    """
+                    smbMessageIsError = true
+                    return
+                }
+                let shares = (try? result.get()) ?? []
+                smbConnection = probe
+                smbUser = location.username ?? ""
+                smbPassword = location.password ?? ""
+                smbShareNames = shares
+                smbMountedKeys = smbMountedSourceKeys(from: mediaSources)
+                smbBrowserStack = []
+                showSMSShareList()
+                smbMessage = shares.isEmpty ? "连接成功，但这台服务器没有列出磁盘共享。" : ""
+                smbMessageIsError = false
+                presentSMBBrowser()
+                // 地址里写明了共享：直接进去看它的文件夹
+                if !targetShare.isEmpty, shares.contains(targetShare) {
+                    loadSMSShareLevel(share: targetShare, relative: "")
+                }
+            }
+        }
+    }
+
+    private func presentSMBBrowser() {
+        if isShowingManualRemoteSourceSheet || isShowingMediaServerSheet {
+            shouldShowSMBBrowserAfterLoginDismiss = true
+            dismissRemoteSourceForm()
+        } else {
+            isShowingSMBBrowserSheet = true
+        }
+    }
+
+    private func showPendingSMBBrowser() {
+        guard shouldShowSMBBrowserAfterLoginDismiss else { return }
+        shouldShowSMBBrowserAfterLoginDismiss = false
+        isShowingSMBBrowserSheet = true
+    }
+
+    private func showSMSShareList() {
+        smbBrowserShare = ""
+        smbBrowserMountPath = ""
+        smbBrowserRelative = ""
+        smbBrowserEntries = smbShareNames.map { SMBBrowserEntry(share: $0, relativePath: "", name: $0) }
+    }
+
+    private func reloadSMBBrowserLevel() {
+        if smbBrowserShare.isEmpty {
+            refreshSMSShareList()
+        } else {
+            loadSMSShareLevel(share: smbBrowserShare, relative: smbBrowserRelative)
+        }
+    }
+
+    private func refreshSMSShareList() {
+        guard let connection = smbConnection else { return }
+        let probe = SMBShareInfo(host: connection.host, share: "", username: connection.username, password: connection.password)
+        smbIsLoadingBrowser = true
+        smbMessage = ""
+        smbMessageIsError = false
+        Task {
+            let result = await SMBSourceManager.listShares(probe)
+            await MainActor.run {
+                smbIsLoadingBrowser = false
+                switch result {
+                case .success(let shares):
+                    smbShareNames = shares
+                    showSMSShareList()
+                    smbMessage = shares.isEmpty ? "这台服务器没有列出磁盘共享。" : ""
+                    smbMessageIsError = false
+                case .failure(let error):
+                    smbMessage = "读取共享失败：\(error.localizedDescription)"
+                    smbMessageIsError = true
+                }
+            }
+        }
+    }
+
+    private func enterSMBEntry(_ entry: SMBBrowserEntry) {
+        if smbBrowserShare.isEmpty {
+            smbBrowserStack = []
+            loadSMSShareLevel(share: entry.share, relative: "")
+        } else {
+            smbBrowserStack.append(smbBrowserRelative)
+            let nextRelative = smbBrowserRelative.isEmpty ? entry.name : "\(smbBrowserRelative)/\(entry.name)"
+            loadSMSShareLevel(share: smbBrowserShare, relative: nextRelative)
+        }
+    }
+
+    private func navigateSMBBrowserBack() {
+        guard !smbBrowserShare.isEmpty else { return }
+        if let previous = smbBrowserStack.last {
+            smbBrowserStack.removeLast()
+            loadSMSShareLevel(share: smbBrowserShare, relative: previous)
+        } else {
+            showSMSShareList()
+        }
+    }
+
+    /// 挂载共享并列出它下面某一层的子目录；没挂过的共享算「只为浏览而挂」，取消时会顺手卸载
+    private func loadSMSShareLevel(share: String, relative: String) {
+        guard let connection = smbConnection else { return }
+        let info = SMBShareInfo(host: connection.host, share: share, username: connection.username, password: connection.password)
+        if !SMBSourceManager.isMounted("/Volumes/" + share) {
+            smbTempMountedShares.insert(share)
+        }
+        smbIsLoadingBrowser = true
+        smbMessage = ""
+        smbMessageIsError = false
+
+        Task {
+            let mountResult = await SMBSourceManager.mount(info)
+            guard case .success(let mountPath) = mountResult else {
+                let reason = smbFailureReason(mountResult)
+                await MainActor.run {
+                    smbIsLoadingBrowser = false
+                    smbMessage = "挂载共享失败：\(reason)"
+                    smbMessageIsError = true
+                }
+                return
+            }
+            let directory = smbLocalPath(mountPath: mountPath, relative: relative)
+            let names = await Task.detached(priority: .userInitiated) {
+                SMBSourceManager.listSubdirectories(at: directory)
+            }.value
+            await MainActor.run {
+                smbBrowserShare = share
+                smbBrowserMountPath = mountPath
+                smbBrowserRelative = relative
+                if smbTempMountedShares.contains(share) {
+                    // 记下真实挂载点，卷名撞车时也能卸干净
+                    smbTempMountPaths[share] = mountPath
+                }
+                smbBrowserEntries = names.map {
+                    SMBBrowserEntry(share: share, relativePath: relative.isEmpty ? $0 : "\(relative)/\($0)", name: $0)
+                }
+                smbMountedKeys = smbMountedSourceKeys(from: mediaSources)
+                smbIsLoadingBrowser = false
+                smbMessage = names.isEmpty ? "这个文件夹里没有子文件夹，可以标星当前文件夹。" : ""
+                smbMessageIsError = false
+            }
+        }
+    }
+
+    private nonisolated func smbFailureReason(_ result: Result<String, SMBMountError>) -> String {
+        if case .failure(let error) = result { return error.localizedDescription }
+        return "未知错误"
+    }
+
+    private func toggleSMBStar(_ entry: SMBBrowserEntry) {
+        toggleSMBStar(SMBStarredTarget(share: entry.share, relativePath: entry.relativePath, name: entry.name))
+    }
+
+    private func toggleSMBStar(_ target: SMBStarredTarget) {
+        guard !smbMountedKeys.contains(target.id) else { return }
+        if let index = smbStarredTargets.firstIndex(where: { $0.id == target.id }) {
+            smbStarredTargets.remove(at: index)
+        } else {
+            smbStarredTargets.append(target)
+        }
+    }
+
+    /// 按 Esc 直接关掉共享列表时也别丢掉标星：照样挂载入库
+    private func finalizeSMBBrowserIfNeeded() {
+        guard !smbStarredTargets.isEmpty, !smbIsBatchMounting else { return }
+        mountStarredSMBTargetsAndClose()
+    }
+
+    private func closeSMBBrowser() {
+        guard !smbIsLoadingBrowser, !smbIsBatchMounting else { return }
+        guard !smbStarredTargets.isEmpty else {
+            isShowingSMBBrowserSheet = false
+            unmountBrowseOnlyShares(smbTempMountPaths, keeping: smbSourcesShares())
+            resetSMBBrowserState()
+            return
+        }
+        mountStarredSMBTargetsAndClose()
+    }
+
+    private func mountStarredSMBTargetsAndClose() {
+        let targets = smbStarredTargets
+        guard let connection = smbConnection, !targets.isEmpty else { return }
+        // 先清空标星，Esc 关闭触发的 onDismiss 才不会重复挂载
+        smbStarredTargets = []
+        let customName = nilIfBlank(smbSourceName)
+        let tempMounts = smbTempMountPaths
+        let keptShares = Set(targets.map(\.share)).union(smbSourcesShares())
+
+        smbIsBatchMounting = true
+        smbMessage = ""
+        smbMessageIsError = false
+
+        Task {
+            var saved: [(target: SMBStarredTarget, mountPath: String, path: String)] = []
+            var failures: [String] = []
+            for target in targets {
+                let info = SMBShareInfo(host: connection.host, share: target.share, username: connection.username, password: connection.password)
+                let mountResult = await SMBSourceManager.mount(info)
+                switch mountResult {
+                case .success(let mountPath):
+                    saved.append((target, mountPath, smbLocalPath(mountPath: mountPath, relative: target.relativePath)))
+                case .failure(let error):
+                    failures.append("\(target.share)：\(error.localizedDescription)")
+                }
+            }
+
+            let sourceIDs: [Int64]
+            do {
+                sourceIDs = try await saveSMBSources(saved, connection: connection, customName: customName)
+            } catch {
+                await MainActor.run {
+                    smbIsBatchMounting = false
+                    smbMessage = "保存媒体源失败：\(error.localizedDescription)"
+                    smbMessageIsError = true
+                }
+                return
+            }
+
+            await MainActor.run {
+                smbIsBatchMounting = false
+                guard !saved.isEmpty else {
+                    smbMessage = "共享挂载失败：" + (failures.isEmpty ? "没有选中可挂载的共享。" : failures.joined(separator: "；"))
+                    smbMessageIsError = true
+                    return
+                }
+                for item in saved {
+                    smbMountedKeys.insert(item.target.id)
+                }
+                isShowingSMBBrowserSheet = false
+                loadData()
+                resetSMBBrowserState()
+                unmountBrowseOnlyShares(tempMounts, keeping: keptShares)
+                if isProcessing {
+                    needsRescanAfterCurrentRun = true
+                    processingMessage = "扫描中，标星的 SMB 共享已加入下一轮队列..."
+                } else if !sourceIDs.isEmpty {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        triggerScanAndScrape(sourceIDs: sourceIDs)
+                    }
+                }
+            }
+        }
+    }
+
+    /// 标星目标入库：统一按本地目录入库，authConfig 带 SMB 信息供重挂与协议标签使用
+    private func saveSMBSources(
+        _ saved: [(target: SMBStarredTarget, mountPath: String, path: String)],
+        connection: SMBShareInfo,
+        customName: String?
+    ) async throws -> [Int64] {
+        let payloads: [(name: String, path: String, authConfig: String?)] = saved.map { item in
+            let info = SMBShareInfo(
+                host: connection.host,
+                share: item.target.share,
+                username: connection.username,
+                password: connection.password,
+                mountPath: item.mountPath
+            )
+            let generated = item.target.relativePath.isEmpty
+                ? item.target.share
+                : "\(item.target.share) · \(item.target.name)"
+            let name = (saved.count == 1 ? customName : nil) ?? generated
+            return (name.isEmpty ? "SMB 媒体源" : name, item.path, SMBSourceSupport.authConfigJSON(for: info))
+        }
+
+        return try await AppDatabase.shared.dbQueue.write { db -> [Int64] in
+            var ids: [Int64] = []
+            for payload in payloads {
+                let addressConfig = addressConfigurationString(
+                    protocolKind: .local,
+                    localAddress: payload.path,
+                    localLabel: "SMB",
+                    externalAddresses: []
+                )
+                let existing = try MediaSource.fetchAll(
+                    db,
+                    sql: "SELECT * FROM mediaSource WHERE baseUrl = ?",
+                    arguments: [payload.path]
+                ).first
+                if var source = existing {
+                    source.name = payload.name
+                    source.baseUrl = payload.path
+                    source.authConfig = payload.authConfig
+                    source.addressConfig = addressConfig
+                    source.isEnabled = true
+                    source.disabledAt = nil
+                    try source.update(db)
+                    ids.append(source.id ?? 0)
+                } else {
+                    var source = MediaSource(
+                        id: nil,
+                        name: payload.name,
+                        protocolType: MediaSourceProtocol.local.rawValue,
+                        baseUrl: payload.path,
+                        authConfig: payload.authConfig
+                    )
+                    source.addressConfig = addressConfig
+                    try source.insert(db)
+                    ids.append(source.id ?? db.lastInsertedRowID)
+                }
+            }
+            return ids
+        }
+    }
+
+    /// 现有 SMB 源已经占用的 key，用来把「已挂载」标出来
+    private nonisolated func smbMountedSourceKeys(from sources: [MediaSource]) -> Set<String> {
+        var keys: Set<String> = []
+        for source in sources {
+            guard let info = SMBSourceSupport.shareInfo(from: source) else { continue }
+            let roots = [info.mountPath, "/Volumes/" + info.share].compactMap { $0 }.filter { !$0.isEmpty }
+            for shareRoot in roots {
+                if source.baseUrl == shareRoot {
+                    keys.insert("\(info.share)|")
+                } else if source.baseUrl.hasPrefix(shareRoot + "/") {
+                    keys.insert("\(info.share)|" + String(source.baseUrl.dropFirst(shareRoot.count + 1)))
+                }
+            }
+        }
+        return keys
+    }
+
+    /// 现有 SMB 源用到的共享名：这些共享的挂载点不能被浏览收尾时卸掉
+    private func smbSourcesShares() -> Set<String> {
+        Set(mediaSources.compactMap { SMBSourceSupport.shareInfo(from: $0)?.share })
+    }
+
+    private nonisolated func smbLocalPath(mountPath: String, relative: String) -> String {
+        relative.isEmpty ? mountPath : mountPath + "/" + relative
+    }
+
+    /// 只为浏览而挂载、又没被标星或已有媒体源占用的共享，收尾时卸掉
+    private func unmountBrowseOnlyShares(_ mounts: [String: String], keeping keptShares: Set<String>) {
+        let doomed = mounts.filter { !keptShares.contains($0.key) }
+        guard !doomed.isEmpty else { return }
+        Task {
+            for (share, mountPath) in doomed {
+                _ = await SMBSourceManager.unmount(mountPath.isEmpty ? "/Volumes/" + share : mountPath)
+            }
+        }
+    }
+
+    private func nilIfBlank(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     private var folderMenuPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(mediaSources.isEmpty ? "暂无源" : "已挂载媒体源：").font(.headline).foregroundColor(.secondary)
+            Text(mediaSources.isEmpty ? "暂无源" : "已挂载媒体源：").font(.headline).foregroundColor(theme.textSecondary)
             ForEach(mediaSources, id: \.id) { source in
                 HStack(spacing: 10) {
-                    Image(systemName: sourceIconName(source)).foregroundColor(.blue)
+                    Image(systemName: sourceIconName(source)).foregroundColor(theme.accent)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(source.displayNameWithActiveLabel)
                             .font(.body)
                             .fontWeight(.semibold)
-                            .foregroundColor(.primary)
+                            .foregroundColor(theme.textPrimary)
                             .lineLimit(1)
                         Text("\(sourceProtocolLabel(source)) · \(source.isEnabled ? "已开启" : "已关闭")")
                             .font(.caption2)
-                            .foregroundColor(source.isEnabled ? .secondary : .orange)
+                            .foregroundColor(source.isEnabled ? theme.textSecondary : theme.warningColor)
                         if showMediaSourceRealPath {
                             Text(source.displayBaseURL())
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(theme.textSecondary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
                         if let sourceID = source.id, let status = sourceConnectivityStatus[sourceID] {
                             Text(status)
                                 .font(.caption2)
-                                .foregroundColor(status.hasPrefix("连接成功") ? .green : (status == "检测中..." ? .secondary : .red))
+                                .foregroundColor(status.hasPrefix("连接成功")
+                                    ? theme.successColor
+                                    : (status == "检测中..." ? theme.textSecondary : theme.dangerColor))
                                 .lineLimit(2)
                         }
                     }
                     .frame(maxWidth: 300, alignment: .leading)
                     Spacer()
+                    Button(action: { toggleMediaSourceEnabled(source) }) {
+                        Image(systemName: source.isEnabled ? "power" : "power.circle")
+                            .foregroundColor(source.isEnabled ? theme.warningColor : theme.successColor)
+                    }
+                    .buttonStyle(.bordered)
+                    .help(source.isEnabled ? "停用这个媒体源" : "启用这个媒体源")
                     Button(action: { checkMediaSourceConnectivity(source) }) {
                         Image(systemName: checkingSourceIDs.contains(source.id ?? -1) ? "hourglass" : "bolt.fill")
                     }
+                    .buttonStyle(.bordered)
                     .disabled(source.id == nil || checkingSourceIDs.contains(source.id ?? -1))
                     .help("优先检测局域网地址，失败后依次检测外网地址")
-                    Button(action: { toggleMediaSourceEnabled(source) }) {
-                        Image(systemName: source.isEnabled ? "power" : "power.circle")
-                            .foregroundColor(source.isEnabled ? .orange : .green)
-                    }
-                    .buttonStyle(.plain)
                     Button(action: {
                         sourceInfoTarget = source
                         isShowingSourceInfoSheet = true
                     }) {
                         Image(systemName: "pencil")
-                            .foregroundColor(.secondary)
-                    }.buttonStyle(.plain)
+                            .foregroundColor(theme.textSecondary)
+                    }.buttonStyle(.bordered)
                     Button(action: {
                         sourcePendingRemoval = source
                         isShowingRemoveSourceSheet = true
                     }) {
                         Image(systemName: "minus.circle.fill").foregroundColor(.red.opacity(0.8))
-                    }.buttonStyle(.plain)
+                    }.buttonStyle(.bordered)
                 }
             }
             
@@ -1306,7 +2027,7 @@ struct PosterWallView: View {
                 .padding(.top, 4)
             
             VStack(alignment: .leading, spacing: 10) {
-                Text("新增媒体源").font(.subheadline.weight(.semibold)).foregroundColor(.secondary)
+                Text("新增媒体源").font(.subheadline.weight(.semibold)).foregroundColor(theme.textSecondary)
                 Button(action: {
                     isShowingManageSources = false
                     promptAndSaveLocalFolder()
@@ -1340,7 +2061,7 @@ struct PosterWallView: View {
                 HStack {
                     Text("预扫描局域网媒体源")
                         .font(.subheadline.weight(.semibold))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.textSecondary)
                     Spacer()
                     Button(lanScanner.isScanning ? "预扫描中..." : "重新扫描") {
                         lanScanner.startScanning()
@@ -1355,14 +2076,14 @@ struct PosterWallView: View {
                         ProgressView().controlSize(.small)
                         Text("正在扫描网络环境...")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(theme.textSecondary)
                     }
                 }
 
                 if discoveredNetworkDevices.isEmpty {
-                    Text("扫描到 WebDAV、Plex、Emby 或 Jellyfin 后，点击设备进入登录。")
+                    Text("扫描到 SMB 共享、WebDAV、Plex、Emby 或 Jellyfin 后，点击设备继续设置。")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
@@ -1371,17 +2092,19 @@ struct PosterWallView: View {
                                 openDiscoveredDeviceFromManageSheet(device)
                             }) {
                                 HStack(alignment: .top, spacing: 10) {
-                                    Image(systemName: device.type.isMediaServer ? "server.rack" : "globe.asia.australia.fill")
-                                        .foregroundColor(.blue)
+                                    Image(systemName: device.type == .smb
+                                        ? "externaldrive.connected.to.line.below"
+                                        : (device.type.isMediaServer ? "server.rack" : "globe.asia.australia.fill"))
+                                        .foregroundColor(theme.accent)
                                         .frame(width: 22)
                                         .padding(.top, 1)
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(discoveredDeviceTitle(device))
-                                            .foregroundColor(.primary)
+                                            .foregroundColor(theme.textPrimary)
                                             .lineLimit(1)
                                         Text(verbatim: discoveredDeviceURLString(for: device))
                                             .font(.caption.monospacedDigit())
-                                            .foregroundColor(.secondary)
+                                            .foregroundColor(theme.textSecondary)
                                             .lineLimit(1)
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1389,8 +2112,7 @@ struct PosterWallView: View {
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(.ultraThinMaterial)
-                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                                .themeVibrant(theme, cornerRadius: 10)
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
@@ -1399,11 +2121,15 @@ struct PosterWallView: View {
                 }
             }
         }.padding(18).frame(minWidth: 280, maxWidth: 420)
+        .themeSheetChrome(theme)
     }
 
     private func sourceProtocolLabel(_ source: MediaSource) -> String {
         if let luckyStunDisplayName = source.luckyStunDisplayName {
             return luckyStunDisplayName
+        }
+        if SMBSourceSupport.shareInfo(from: source) != nil {
+            return "SMB"
         }
         switch source.protocolKind {
         case .webdav: return "WebDAV"
@@ -1416,6 +2142,9 @@ struct PosterWallView: View {
     }
 
     private func sourceIconName(_ source: MediaSource) -> String {
+        if SMBSourceSupport.shareInfo(from: source) != nil {
+            return "externaldrive.connected.to.line.below"
+        }
         switch source.protocolKind {
         case .webdav: return "network"
         case .plex, .emby, .jellyfin: return "server.rack"
@@ -1624,17 +2353,20 @@ struct PosterWallView: View {
     private func closeRemoteSourceSheets() {
         shouldStartLuckyWebDAVAfterDismiss = false
         shouldShowWebDAVBrowserAfterLoginDismiss = false
+        shouldShowSMBBrowserAfterLoginDismiss = false
         isShowingManualRemoteSourceSheet = false
         isShowingMediaServerSheet = false
         isShowingLuckyStunSourceSheet = false
         isShowingWebDAVPreScanLoginSheet = false
         isShowingWebDAVFolderBrowserSheet = false
+        isShowingSMBBrowserSheet = false
     }
 
     private func openManualRemoteSourceChooser() {
         isShowingManageSources = false
         closeRemoteSourceSheets()
         resetMediaServerForm()
+        remoteSourceKind = RemoteSourceKind(mediaServerProtocol)
         DispatchQueue.main.async {
             isShowingManualRemoteSourceSheet = true
         }
@@ -1776,7 +2508,7 @@ struct PosterWallView: View {
             if let luckyStatusMessage {
                 Text(luckyStatusMessage)
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -1790,6 +2522,7 @@ struct PosterWallView: View {
         }
         .padding(20)
         .frame(width: 520)
+        .themeSheetChrome(theme)
     }
 
     private var isLuckySourceCredentialComplete: Bool {
@@ -1819,13 +2552,58 @@ struct PosterWallView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("添加局域网媒体源")
                 .font(.title3.bold())
-            Picker("类型", selection: $mediaServerProtocol) {
-                Text("WebDAV").tag(MediaSourceProtocol.webdav)
-                Text("Plex").tag(MediaSourceProtocol.plex)
-                Text("Emby").tag(MediaSourceProtocol.emby)
-                Text("Jellyfin").tag(MediaSourceProtocol.jellyfin)
+            Picker("类型", selection: $remoteSourceKind) {
+                ForEach(RemoteSourceKind.allCases) { kind in
+                    Text(kind.label).tag(kind)
+                }
             }
             .pickerStyle(.segmented)
+
+            if remoteSourceKind == .smb {
+                smbLoginFormFields
+            } else {
+                mediaServerFormFields
+            }
+
+            HStack {
+                Spacer()
+                Button("取消") { dismissRemoteSourceForm() }
+                if remoteSourceKind == .smb {
+                    Button(smbIsWorking ? "连接中..." : "保存并列出共享") { connectSMBAndBrowse() }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(smbIsWorking)
+                } else {
+                    Button(remoteSourceSaveButtonTitle) { saveRemoteSourceForm() }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(mediaServerIsPreScanning)
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+        .onChange(of: remoteSourceKind) { _, newValue in
+            remoteSourceKindDidChange(newValue)
+        }
+        .onChange(of: mediaServerProtocol) { oldValue, newValue in
+            remoteSourceKind = RemoteSourceKind(newValue)
+            mediaServerProtocolDidChange(newValue, resetIdentity: oldValue != newValue)
+        }
+        .themeSheetChrome(theme)
+    }
+
+    /// 分段里选了普通媒体服务器：把选择同步回 mediaServerProtocol，
+    /// 让原来的 onChange 继续负责重置表单；选 SMB 时不动媒体服务器的状态
+    private func remoteSourceKindDidChange(_ kind: RemoteSourceKind) {
+        guard let protocolKind = kind.protocolKind else { return }
+        if protocolKind == mediaServerProtocol {
+            mediaServerProtocolDidChange(protocolKind, resetIdentity: false)
+        } else {
+            mediaServerProtocol = protocolKind
+        }
+    }
+
+    private var mediaServerFormFields: some View {
+        VStack(alignment: .leading, spacing: 14) {
             TextField("显示名称（可选）", text: $mediaServerName)
                 .textFieldStyle(.roundedBorder)
             TextField(mediaServerAddressPlaceholder, text: $mediaServerBaseURL)
@@ -1852,21 +2630,9 @@ struct PosterWallView: View {
             if let mediaServerMessage {
                 Text(mediaServerMessage)
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            HStack {
-                Spacer()
-                Button("取消") { dismissRemoteSourceForm() }
-                Button(remoteSourceSaveButtonTitle) { saveRemoteSourceForm() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(mediaServerIsPreScanning)
-            }
-        }
-        .padding(20)
-        .frame(width: 520)
-        .onChange(of: mediaServerProtocol) { oldValue, newValue in
-            mediaServerProtocolDidChange(newValue, resetIdentity: oldValue != newValue)
         }
     }
 
@@ -1874,7 +2640,7 @@ struct PosterWallView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("媒体源登录信息").font(.title3.bold())
             Text(source.displayNameWithActiveLabel).font(.headline)
-            Text("地址：\(source.displayBaseURL())").font(.caption).foregroundColor(.secondary)
+            Text("地址：\(source.displayBaseURL())").font(.caption).foregroundColor(theme.textSecondary)
             Divider()
             Text("协议：\(sourceProtocolLabel(source))")
             Text("登录信息")
@@ -1893,6 +2659,7 @@ struct PosterWallView: View {
         }
         .padding(20)
         .frame(width: 480)
+        .themeSheetChrome(theme)
     }
 
     private func renameSourceSheet() -> some View {
@@ -1901,7 +2668,7 @@ struct PosterWallView: View {
                 .font(.title3.bold())
             Text("仅修改应用内显示名称，不会改动真实文件夹。")
                 .font(.caption)
-                .foregroundColor(.secondary)
+                .foregroundColor(theme.textSecondary)
             TextField("输入新的显示名称", text: $renamingSourceName)
                 .textFieldStyle(.roundedBorder)
             HStack {
@@ -1921,6 +2688,7 @@ struct PosterWallView: View {
         }
         .padding(20)
         .frame(width: 420)
+        .themeSheetChrome(theme)
     }
 
     private func manualRemoteSourceSheet() -> some View {
@@ -1934,7 +2702,7 @@ struct PosterWallView: View {
                 if let source = sourcePendingRemoval {
                     Text("将移除“\(source.name)”及其影片索引。")
                         .font(.subheadline)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.textSecondary)
                     if source.protocolKind == .webdav {
                         if WebDAVCredentialStore.shared.credentialID(from: source.authConfig) != nil {
                             let message = removeWebDAVCredentialsOnDelete
@@ -1942,18 +2710,18 @@ struct PosterWallView: View {
                             : "设置中未开启“移除 WebDAV 源时同时删除凭据”，将保留保存的登录信息。可在设置里调整此行为。"
                             Text(message)
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(theme.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         } else {
                             Text("此 WebDAV 源未保存凭据。")
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(theme.textSecondary)
                         }
                     }
                 } else {
                     Text("未找到待移除的媒体源。")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.textSecondary)
                 }
                 HStack {
                 Spacer()
@@ -1975,6 +2743,7 @@ struct PosterWallView: View {
         }
         .padding(22)
         .frame(width: 420)
+        .themeSheetChrome(theme)
     }
 
     private func resetWebDAVDraft(useRecentHistory: Bool = true) {
@@ -2219,8 +2988,7 @@ struct PosterWallView: View {
                 }
             }
             .padding(10)
-            .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .themeVibrant(theme, cornerRadius: 10)
 
             TextField("显示名称（可选）", text: $webDAVName)
                 .textFieldStyle(.roundedBorder)
@@ -2349,7 +3117,7 @@ struct PosterWallView: View {
                 .accessibilityIdentifier("webdav.sheet.title")
             Text("保存登录信息后会先进入共享文件夹列表；可给多个目标文件夹点星标，关闭列表时统一挂载并扫描刮削。")
                 .font(.caption)
-                .foregroundColor(.secondary)
+                .foregroundColor(theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             TextField("显示名称（可选）", text: $webDAVBrowserName)
@@ -2368,7 +3136,7 @@ struct PosterWallView: View {
             if let webDAVBrowserMessage {
                 Text(webDAVBrowserMessage)
                     .font(.caption)
-                    .foregroundColor(webDAVBrowserMessageIsError ? .red : .secondary)
+                    .foregroundColor(webDAVBrowserMessageIsError ? theme.dangerColor : theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -2390,6 +3158,7 @@ struct PosterWallView: View {
         }
         .padding(20)
         .frame(width: 500)
+        .themeSheetChrome(theme)
     }
 
     private func webDAVFolderBrowserSheet() -> some View {
@@ -2406,7 +3175,7 @@ struct PosterWallView: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.title3)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.textSecondary)
                 }
                 .buttonStyle(.plain)
                 .disabled(webDAVBrowserIsLoading || webDAVBrowserIsBatchMounting)
@@ -2418,7 +3187,7 @@ struct PosterWallView: View {
                     .font(.subheadline.weight(.semibold))
                 Text(readableRemoteBrowserURL(webDAVBrowserCurrentURL.isEmpty ? webDAVBrowserBaseURL : webDAVBrowserCurrentURL))
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.textSecondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -2449,14 +3218,14 @@ struct PosterWallView: View {
             if !webDAVBrowserStarredFolders.isEmpty {
                 Text("已标星 \(webDAVBrowserStarredFolders.count) 个文件夹，关闭列表后会加入挂载媒体源。")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             if let webDAVBrowserMessage {
                 Text(webDAVBrowserMessage)
                     .font(.caption)
-                    .foregroundColor(webDAVBrowserMessageIsError ? .red : .secondary)
+                    .foregroundColor(webDAVBrowserMessageIsError ? theme.dangerColor : theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -2472,7 +3241,7 @@ struct PosterWallView: View {
                 if webDAVBrowserItems.isEmpty && !webDAVBrowserIsLoading {
                     Text(webDAVBrowserProtocol == .webdav ? "当前目录没有可浏览的子文件夹。" : "当前服务器没有可挂载的媒体库。")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.textSecondary)
                 }
             }
 
@@ -2486,6 +3255,7 @@ struct PosterWallView: View {
         }
         .padding(20)
         .frame(width: 560)
+        .themeSheetChrome(theme)
     }
 
     private func webDAVFolderBrowserRow(_ item: WebDAVDirectoryItem) -> some View {
@@ -2501,14 +3271,14 @@ struct PosterWallView: View {
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "folder")
-                            .foregroundColor(.blue)
+                            .foregroundColor(theme.accent)
                         Text(item.displayName)
-                            .foregroundColor(.primary)
+                            .foregroundColor(theme.textPrimary)
                             .lineLimit(1)
                         Spacer()
                         Image(systemName: "chevron.right")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(theme.textSecondary)
                     }
                 }
                 .buttonStyle(.plain)
@@ -2516,9 +3286,9 @@ struct PosterWallView: View {
             } else {
                 HStack(spacing: 8) {
                     Image(systemName: "rectangle.stack.fill")
-                        .foregroundColor(.blue)
+                        .foregroundColor(theme.accent)
                     Text(item.displayName)
-                        .foregroundColor(.primary)
+                        .foregroundColor(theme.textPrimary)
                         .lineLimit(1)
                     Spacer()
                 }
@@ -2528,7 +3298,7 @@ struct PosterWallView: View {
                 toggleWebDAVBrowserStar(item)
             } label: {
                 Image(systemName: (isMounted || isStarred) ? "star.fill" : "star")
-                    .foregroundColor((isMounted || isStarred) ? .yellow : .secondary)
+                    .foregroundColor((isMounted || isStarred) ? theme.accent : theme.textSecondary)
             }
             .buttonStyle(.plain)
             .help(isMounted ? "已挂载" : (isStarred ? "取消标星" : "标星此文件夹"))
@@ -2536,8 +3306,7 @@ struct PosterWallView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .themeVibrant(theme, cornerRadius: 10)
     }
 
     private func saveWebDAVBrowserLoginAndBrowse(presentBrowserWhenLoaded: Bool = true) {
@@ -2887,7 +3656,8 @@ struct PosterWallView: View {
             isShowingAddWebDAVSheet = false
             isShowingManualRemoteSourceSheet = true
         case .smb:
-            break
+            isShowingAddWebDAVSheet = false
+            openSMBSourceSheet(host: device.ipAddress)
         }
     }
 
@@ -2905,6 +3675,8 @@ struct PosterWallView: View {
             DispatchQueue.main.async {
                 isShowingWebDAVPreScanLoginSheet = true
             }
+        } else if device.type == .smb {
+            openSMBSourceSheet(host: device.ipAddress)
         }
     }
 
@@ -2931,6 +3703,9 @@ struct PosterWallView: View {
     }
 
     private func discoveredDeviceURLString(for device: DiscoveredDevice) -> String {
+        if device.type == .smb {
+            return "smb://\(device.ipAddress):\(device.port)"
+        }
         let scheme = (device.type == .webdavHTTPS || device.port == 443 || device.port == 5006 || device.port == 8920) ? "https" : "http"
         return "\(scheme)://\(device.ipAddress):\(device.port)"
     }
@@ -3406,12 +4181,24 @@ struct PosterWallView: View {
             do {
                 switch protocolKind {
                 case .local:
-                    var isDirectory: ObjCBool = false
-                    guard FileManager.default.fileExists(atPath: candidate.address, isDirectory: &isDirectory), isDirectory.boolValue else {
-                        throw NSError(domain: "OmniPlayConnectivity", code: 1, userInfo: [NSLocalizedDescriptionKey: "目录不存在或不可访问"])
+                    // /Volumes 下只剩挂载失败留下的空壳时不能算连通
+                    if SMBSourceManager.isUsableSourceDirectory(candidate.address) {
+                        break
                     }
+                    // SMB 源掉挂载：先按保存的凭据静默重挂一次，并把新位置写回库里再判定
+                    if let smbInfo = SMBSourceSupport.shareInfo(from: source),
+                       let dbQueue = AppDatabase.shared.dbQueue,
+                       await SMBSourceManager.remount(smbInfo, for: source, dbQueue: dbQueue) != nil {
+                        break
+                    }
+                    throw NSError(domain: "OmniPlayConnectivity", code: 1, userInfo: [NSLocalizedDescriptionKey: "目录不存在或不可访问"])
                 case .webdav:
-                    let credential = WebDAVCredentialStore.shared.credentialID(from: source.authConfig).flatMap { WebDAVCredentialStore.shared.loadCredential(id: $0) }
+                    // 钥匙串读取放后台：这一步跑在连通性预检里，同步读会把指针钉在转圈上
+                    var storedCredential: WebDAVCredentialStore.Credential?
+                    if let credentialID = WebDAVCredentialStore.shared.credentialID(from: source.authConfig) {
+                        storedCredential = await WebDAVCredentialStore.shared.loadCredentialAsync(id: credentialID)
+                    }
+                    let credential = storedCredential
                         ?? WebDAVCredentialStore.shared.decodeLegacyCredential(from: source.authConfig)
                     let result = await WebDAVPreflightChecker().check(
                         baseURL: candidate.address,
@@ -3457,7 +4244,9 @@ struct PosterWallView: View {
         isLoadingLibraryData = true
         needsLibraryReloadAfterCurrentLoad = false
 
-        DispatchQueue.global(qos: .utility).async {
+        // 这里的读写是同步访问，占着 GRDB 的读连接。跑在 utility 上时主线程一旦等连接，
+        // 调度器就报优先级反转（user-interactive 等 utility），所以媒体库访问统一用 user-initiated。
+        DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try libraryManager.cleanupExpiredDisabledSources()
                 let fetchedMovies = try libraryManager.fetchAllMovies()
@@ -3647,6 +4436,9 @@ struct PosterWallView: View {
             isShowingScanErrorAlert = true
             return
         }
+        // 这一轮真的找到并入库过文件，就别再报「没有扫描到视频文件」
+        let foundCount = sourceResults.reduce(0) { $0 + $1.scannedCount + $1.insertedCount }
+        if foundCount > 0 { return }
         // 库里已经有内容时不再打扰：那种情况下 0 命中只是「没有新增」。
         guard movies.isEmpty else { return }
         scanErrorAlertTitle = "没有扫描到视频文件"
@@ -3684,13 +4476,14 @@ struct PosterWallView: View {
         removedSourceIDsDuringRun = []
         activeScanningSourceID = nil
         
-        currentScanTask = Task(priority: .utility) {
+        currentScanTask = Task(priority: .userInitiated) {
             do {
                 if Task.isCancelled {
                     await MainActor.run { finishScanRun(runID: runID, reloadData: true) }
                     return
                 }
-                try? libraryManager.cleanupExpiredDisabledSources()
+                // SMB 共享在重启/休眠后可能掉挂载，扫描开始前先静默重挂
+                await SMBSourceManager.remountPersistedSources()
                 let validSources = try await AppDatabase.shared.dbQueue.read { db in
                     if let sourceIDs, !sourceIDs.isEmpty {
                         let targetIDs = Set(sourceIDs)
@@ -3708,14 +4501,9 @@ struct PosterWallView: View {
                 }
                 
                 if validSources.isEmpty {
+                    // 一个可扫描的源都没有（比如刚删完源）不值得弹窗拦人，安静收尾就行
                     await MainActor.run {
                         finishScanRun(runID: runID, reloadData: true)
-                        // 没有任何可扫描的启用媒体源时给出可见提示
-                        if currentScanRunID == runID {
-                            scanErrorAlertTitle = "扫描刮削失败"
-                            scanErrorMessage = "扫描刮削失败：没有已启用且可扫描的媒体源，请先在“添加媒体源”里挂载本地目录或 WebDAV/Plex/Emby/Jellyfin。"
-                            isShowingScanErrorAlert = true
-                        }
                     }
                     return
                 }
@@ -3908,7 +4696,7 @@ struct PosterWallView: View {
 
 // 首页分类文件夹卡片：封面 + 名称 + 数量；鼠标悬停到右上角时出现编辑按钮
 // 隐藏导航栏标题：macOS 15+ 用 toolbar(removing:)，macOS 14 用空标题兜底
-private struct RemoveNavTitleModifier: ViewModifier {
+struct RemoveNavTitleModifier: ViewModifier {
     func body(content: Content) -> some View {
         if #available(macOS 15.0, *) {
             content.toolbar(removing: .title)
@@ -3978,4 +4766,44 @@ private struct CategoryFolderGroup: Identifiable {
     let movies: [Movie]
 
     var id: String { folder.id }
+}
+
+extension PosterWallView {
+    /// 把访达里拖进来的文件交给直开链路，视频之外的文件由它回报原因。
+    fileprivate func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard !providers.isEmpty else { return false }
+        Task { @MainActor in
+            let urls = await posterWallDropURLs(from: providers)
+            guard !urls.isEmpty else {
+                DirectFilePlaybackManager.shared.reportDroppedNothing()
+                return
+            }
+            DirectFilePlaybackManager.shared.handleOpen(urls: urls)
+        }
+        return true
+    }
+}
+
+// MARK: - 滚动相位
+
+private struct WallScrollPhaseModifier: ViewModifier {
+    @Binding var isScrolling: Bool
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.onScrollPhaseChange { _, phase in
+                let active = phase != .idle
+                if active != isScrolling { isScrolling = active }
+            }
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    /// 把「用户正在滚动」传给海报卡：macOS 15 起用系统的滚动相位回调，更早系统维持原行为。
+    func wallScrollPhaseGating(isScrolling: Binding<Bool>) -> some View {
+        modifier(WallScrollPhaseModifier(isScrolling: isScrolling))
+    }
 }

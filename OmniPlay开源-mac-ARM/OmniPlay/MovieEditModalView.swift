@@ -15,6 +15,10 @@ struct MovieEditModalView: View {
     @State private var casts: String
     @State private var overview: String
     
+    @AppStorage(AppThemeResolver.colorKey) var appTheme = ThemeType.appleLight.rawValue
+    @AppStorage(AppThemeResolver.styleKey) var appThemeStyle = ThemeStyle.classic.rawValue
+    var theme: AppTheme { AppThemeResolver.theme(colorRaw: appTheme, styleRaw: appThemeStyle) }
+
     @State private var sourceFileName: String = "正在解析文件..."
     @State private var tempNewPosterPath: String? = nil
     
@@ -33,6 +37,7 @@ struct MovieEditModalView: View {
         VStack(spacing: 18) {
             Text("手动编辑资料")
                 .font(.title2.bold())
+                .foregroundColor(theme.textPrimary)
                 .padding(.top, 22)
 
             ScrollView {
@@ -63,14 +68,14 @@ struct MovieEditModalView: View {
                         OverviewTextView(text: $overview)
                         .frame(minHeight: 134)
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.2)))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.textSecondary.opacity(0.2)))
                     }
 
                     editorSection("海报管理") {
                         VStack(alignment: .leading, spacing: 10) {
                             Text("当前海报")
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(theme.textSecondary)
 
                             Text(tempNewPosterPath ?? movie.posterPath ?? "暂无海报")
                                 .font(.caption)
@@ -97,11 +102,15 @@ struct MovieEditModalView: View {
                     saveChanges()
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.blue)
+                .tint(theme.accent)
             }
             .padding(.bottom, 20)
         }
         .frame(width: 640, height: 640)
+        .background(theme.backdropLayer)
+        .tint(theme.accent)
+        .foregroundStyle(theme.textPrimary)
+        .preferredColorScheme(theme.preferredScheme)
         .onAppear {
             loadSourceFile()
             loadDoubanRating()
@@ -116,7 +125,7 @@ struct MovieEditModalView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
@@ -127,7 +136,7 @@ struct MovieEditModalView: View {
                 .foregroundColor(.secondary)
             Text(verbatim: value)
                 .font(.caption)
-                .foregroundColor(.secondary)
+                .foregroundColor(theme.textSecondary)
                 .lineLimit(nil)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)

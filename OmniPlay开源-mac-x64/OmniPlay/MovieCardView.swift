@@ -7,11 +7,19 @@ struct MovieCardView: View {
     var isContinueWatchingContext: Bool = false
     var isHomeCacheModeActive: Bool = false
     
-    @AppStorage("appTheme") var appTheme = ThemeType.appleLight.rawValue
-    var theme: AppTheme { ThemeType(rawValue: appTheme)?.colors ?? ThemeType.appleLight.colors }
+    @AppStorage(AppThemeResolver.colorKey) var appTheme = ThemeType.appleLight.rawValue
+    @AppStorage(AppThemeResolver.styleKey) var appThemeStyle = ThemeStyle.classic.rawValue
+    var theme: AppTheme { AppThemeResolver.theme(colorRaw: appTheme, styleRaw: appThemeStyle) }
     @AppStorage("enableFastTooltip") var enableFastTooltip = true
     
-    @ObservedObject var cacheManager = OfflineCacheManager.shared
+    /// 不挂 `@ObservedObject`：那等于让每张海报卡都订阅缓存器的全部 `@Published`，
+    /// 下载进度一跳就是整屏卡片集体重绘。真正用得上的几个变化在下面按条订。
+    let cacheManager = OfflineCacheManager.shared
+    /// 缓存模式下的进度刷新靠这个计数触发重绘（body 不必显式读它，`@State` 变了就会重算）
+    @State private var cacheTick = 0
+    @State private var availabilityTask: Task<Void, Never>? = nil
+    /// 海报墙正在滚动：这时不理会 hover 抖动，海报玻璃垫也降成纯染色底
+    @Environment(\.isPosterWallScrolling) private var isPosterWallScrolling
     
     @State private var showSearchModal = false
     @State private var showEditModal = false
@@ -25,7 +33,8 @@ struct MovieCardView: View {
     @State private var doubanMetadata: DoubanMetadata? = nil
     @State private var refreshTask: Task<Void, Never>? = nil
     
-    private let availabilityTimer = Timer.publish(every: 15.0, on: .main, in: .common).autoconnect()
+    /// 全墙共用一条 15 秒定时器，不再每张卡各起一条
+    private var availabilityTimer: Publishers.Autoconnect<Timer.TimerPublisher> { PosterWallAvailabilityTicker.publisher }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -84,7 +93,14 @@ struct MovieCardView: View {
                     .transition(.opacity)
                 }
             }
-            .onHover { isHovering = $0 }
+            .onHover { hovering in
+                // 滚动时指针底下的卡片一直在换人，这些 hover 抖动只会引来整片重绘
+                if !isPosterWallScrolling { isHovering = hovering }
+            }
+            .onChange(of: isPosterWallScrolling) { _, scrolling in
+                if scrolling { isHovering = false }
+            }
+            .themeGlassMat(theme, simplified: isPosterWallScrolling)
             
             Text(movie.title)
                 .font(.headline)
@@ -94,15 +110,14 @@ struct MovieCardView: View {
                 .multilineTextAlignment(.center)
             
             VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
+                // 年份居中，已看/未看贴在年份右手边，整组一起居中
+                HStack(spacing: 5) {
+                    Spacer(minLength: 0)
                     if let date = movie.releaseDate, date.count >= 4 {
                         Text(String(date.prefix(4)))
                             .font(.caption)
                             .foregroundColor(theme.textSecondary)
                     }
-                    
-                    Spacer(minLength: 0)
-                    
                     if hasMissingFiles {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 12))
@@ -115,13 +130,14 @@ struct MovieCardView: View {
                             .foregroundColor(isFullyWatched ? theme.accent : theme.textSecondary.opacity(0.5))
                     }
                     .buttonStyle(.plain)
+                    Spacer(minLength: 0)
                 }
                 
                 if let progressRatio = continueWatchingProgressRatio {
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
                             Capsule()
-                                .fill(theme.surface.opacity(0.75))
+                                .fill(theme.subtleFill)
                                 .frame(height: 4)
                             Capsule()
                                 .fill(theme.accent)
@@ -138,11 +154,18 @@ struct MovieCardView: View {
         .onDisappear {
             refreshTask?.cancel()
             refreshTask = nil
+            availabilityTask?.cancel()
+            availabilityTask = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: .libraryUpdated)) { _ in refreshCardState() }
         .onReceive(cacheManager.$cachedFileKeys) { _ in refreshAvailabilityWithoutDB() }
         .onReceive(cacheManager.$cachedFileNames) { _ in refreshAvailabilityWithoutDB() }
         .onReceive(availabilityTimer) { _ in refreshAvailabilityWithoutDB() }
+        .onReceive(cacheManager.objectWillChange) { _ in
+            // 以前这里等价于 @ObservedObject：任何缓存状态变化都惊动整屏卡片。
+            // 现在只有会显示进度与缓存状态的那批卡片（缓存模式）才跟着刷新。
+            if isHomeCacheModeActive { cacheTick += 1 }
+        }
         .sheet(isPresented: $showSearchModal) { MovieSearchModalView(movie: movie) }
         .sheet(isPresented: $showEditModal) { MovieEditModalView(movie: movie) }
         .alert("取消离线缓存？", isPresented: $showCancelCacheConfirmation) {
@@ -251,7 +274,8 @@ struct MovieCardView: View {
                 let allFilesWatched = !files.isEmpty && files.allSatisfy { file in
                     file.duration > 0 && (file.playProgress / file.duration) >= 0.95
                 }
-                let missingFiles = evaluateMissingState(with: snapshot.pairs)
+                let probes = await MainActor.run { cacheManager.missingSourceProbes(for: snapshot.pairs) }
+                let missingFiles = OfflineCacheManager.hasMissingSource(probes: probes)
                 await MainActor.run {
                     self.movieFiles = files
                     self.sourcePairs = snapshot.pairs
@@ -310,16 +334,36 @@ struct MovieCardView: View {
     
     private func refreshAvailabilityWithoutDB() {
         guard !sourcePairs.isEmpty else { return }
-        let latestMissing = evaluateMissingState(with: sourcePairs)
-        if latestMissing != hasMissingFiles {
-            hasMissingFiles = latestMissing
-        }
-    }
-    
-    private func evaluateMissingState(with pairs: [(VideoFile, MediaSource?)]) -> Bool {
-        pairs.contains { file, source in
-            cacheManager.hasMissingSource(for: file, mediaSource: source)
+        // 探测点在主线程按内存状态算好，stat 丢到后台：外置盘与 NAS 挂载点上的 stat 会卡住滚动
+        let probes = cacheManager.missingSourceProbes(for: sourcePairs)
+        availabilityTask?.cancel()
+        availabilityTask = Task(priority: .utility) {
+            let latestMissing = OfflineCacheManager.hasMissingSource(probes: probes)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                if latestMissing != hasMissingFiles {
+                    hasMissingFiles = latestMissing
+                }
+            }
         }
     }
 
+}
+
+/// 整面海报墙共用一条存在性检查定时器：以前每张卡各起一条，几十条定时器会把主线程切成几十次小任务。
+enum PosterWallAvailabilityTicker {
+    static let publisher: Publishers.Autoconnect<Timer.TimerPublisher> =
+        Timer.publish(every: 15.0, on: .main, in: .common).autoconnect()
+}
+
+private struct PosterWallScrollingKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// 海报墙是否正在滚动。滚动中卡片要尽量少干活：不接 hover，玻璃垫降成纯色。
+    var isPosterWallScrolling: Bool {
+        get { self[PosterWallScrollingKey.self] }
+        set { self[PosterWallScrollingKey.self] = newValue }
+    }
 }

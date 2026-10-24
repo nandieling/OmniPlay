@@ -10,6 +10,10 @@ struct MovieSearchModalView: View {
     @State private var originalFilename: String = "正在加载源文件信息..."
     @State private var doubanMetadata: DoubanMetadata? = nil
     
+    @AppStorage(AppThemeResolver.colorKey) var appTheme = ThemeType.appleLight.rawValue
+    @AppStorage(AppThemeResolver.styleKey) var appThemeStyle = ThemeStyle.classic.rawValue
+    var theme: AppTheme { AppThemeResolver.theme(colorRaw: appTheme, styleRaw: appThemeStyle) }
+
     @State private var searchResults: [TMDBResult] = []
     @State private var isSearching = false
     @State private var errorMessage = ""
@@ -22,20 +26,20 @@ struct MovieSearchModalView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("手动匹配").font(.title2).fontWeight(.bold)
+                Text("手动匹配").font(.title2).fontWeight(.bold).foregroundColor(theme.textPrimary)
                 Spacer()
-                Button(action: { dismiss() }) { Image(systemName: "xmark.circle.fill").font(.title2).foregroundColor(.gray) }.buttonStyle(.plain)
+                Button(action: { dismiss() }) { Image(systemName: "xmark.circle.fill").font(.title2).foregroundColor(theme.textSecondary) }.buttonStyle(.plain)
             }
-            .padding().background(Color(NSColor.windowBackgroundColor))
-            Divider()
+            .padding().background(theme.background)
+            Divider().background(theme.textSecondary.opacity(0.3))
             
             VStack(alignment: .leading, spacing: 15) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("源文件名称：").font(.caption).foregroundColor(.secondary)
+                    Text("源文件名称：").font(.caption).foregroundColor(theme.textSecondary)
                     Text(originalFilename)
-                        .font(.body).fontWeight(.medium).foregroundColor(.blue)
+                        .font(.body).fontWeight(.medium).foregroundColor(theme.accent)
                         .padding(10).frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.blue.opacity(0.1)).cornerRadius(8).textSelection(.enabled)
+                        .background(theme.accent.opacity(0.1)).cornerRadius(8).textSelection(.enabled)
                 }
 
                 VStack(alignment: .leading, spacing: 15) {
@@ -71,9 +75,9 @@ struct MovieSearchModalView: View {
                     if isSearching {
                         ProgressView("正在向 TMDB 请求数据...").frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else if !errorMessage.isEmpty {
-                        Text(errorMessage).foregroundColor(.red).frame(maxWidth: .infinity, maxHeight: .infinity)
+                        Text(errorMessage).foregroundColor(theme.dangerColor).frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else if searchResults.isEmpty {
-                        Text("暂无搜索结果，请输入关键字后回车开始匹配").foregroundColor(.gray).frame(maxWidth: .infinity, maxHeight: .infinity)
+                        Text("暂无搜索结果，请输入关键字后回车开始匹配").foregroundColor(theme.textSecondary).frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         List(searchResults, id: \.id) { result in
                             HStack(spacing: 12) {
@@ -83,9 +87,9 @@ struct MovieSearchModalView: View {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(displayTitle(for: result)).font(.headline)
                                     let displayDate = result.releaseDate ?? result.firstAirDate ?? ""
-                                    Text(String(displayDate.prefix(4))).font(.subheadline).foregroundColor(.secondary)
+                                    Text(String(displayDate.prefix(4))).font(.subheadline).foregroundColor(theme.textSecondary)
                                     if let overview = result.overview, !overview.isEmpty {
-                                        Text(overview).font(.caption).foregroundColor(.gray).lineLimit(2)
+                                        Text(overview).font(.caption).foregroundColor(theme.textSecondary).lineLimit(2)
                                     }
                                 }
                                 Spacer()
@@ -94,12 +98,17 @@ struct MovieSearchModalView: View {
                             .padding(.vertical, 4)
                         }
                         .listStyle(.plain)
+                        .scrollContentBackground(.hidden)   // 让主题底从结果列表后面透出来
                     }
                 }
             }
             .padding(20)
         }
         .frame(width: 640, height: 650)
+        .background(theme.backdropLayer)
+        .tint(theme.accent)
+        .foregroundStyle(theme.textPrimary)
+        .preferredColorScheme(theme.preferredScheme)
         .onAppear {
             fetchOriginalFile()
             loadDoubanMetadata()

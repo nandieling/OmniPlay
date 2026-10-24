@@ -111,11 +111,17 @@ enum OmniPlayICloudSync {
             }
         }
         if didCopy {
+            // 云端只有一份 .sqlite；本地残留的 WAL 会被 SQLite 当成未提交事务回放，
+            // 把刚拉下来的库又盖回去，所以换文件时一起清掉
+            AppDatabase.removeWALFiles(beside: localDB)
             AppDatabase.shared.databaseURL = localDB
         }
     }
 
     static func push(database: URL, container: URL) {
+        // WAL 模式下最近的改动可能还在 -wal 里，先落盘再拷文件，
+        // 免得推到云端的副本比本地少一段事务
+        AppDatabase.shared.checkpointForCopy()
         let cloudDB = container.appendingPathComponent(dbFileName)
         let fm = FileManager.default
         let coordinator = NSFileCoordinator()

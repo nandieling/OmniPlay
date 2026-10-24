@@ -105,21 +105,18 @@ class OfflineCacheManager: ObservableObject {
     
     func getLocalPlaybackURL(for file: VideoFile) -> URL? {
         guard let dir = cacheDirectory else { return nil }
-        
-        let preferredURL = cachedURL(for: file, in: dir)
-        if FileManager.default.fileExists(atPath: preferredURL.path) {
-            return preferredURL
-        }
-        
+        return cacheCandidateURLs(for: file, in: dir).first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// 缓存目录里的两个候选落点：当前结构是「缓存目录/文件名」，旧结构是「缓存目录/sourceId/相对路径」。
+    private func cacheCandidateURLs(for file: VideoFile, in dir: URL) -> [URL] {
         let normalizedPath = file.relativePath.isEmpty
             ? file.fileName
             : file.relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let legacyURL = dir.appendingPathComponent(String(file.sourceId)).appendingPathComponent(normalizedPath)
-        if FileManager.default.fileExists(atPath: legacyURL.path) {
-            return legacyURL
-        }
-        
-        return nil
+        return [
+            cachedURL(for: file, in: dir),
+            dir.appendingPathComponent(String(file.sourceId)).appendingPathComponent(normalizedPath),
+        ]
     }
     
     func isCached(_ file: VideoFile) -> Bool {
@@ -139,12 +136,47 @@ class OfflineCacheManager: ObservableObject {
     }
     
     func hasMissingSource(for file: VideoFile, mediaSource: MediaSource?) -> Bool {
-        if isCached(file) { return false }
-        guard let mediaSource else { return true }
-        guard let kind = mediaSource.protocolKind else { return true }
-        if kind == .webdav || kind == .plex || kind == .emby || kind == .jellyfin { return false }
-        let sourceURL = sourceFileURL(for: file, mediaSource: mediaSource)
-        return !FileManager.default.fileExists(atPath: sourceURL.path)
+        Self.hasMissingSource(probes: missingSourceProbes(for: [(file, mediaSource)]))
+    }
+
+    /// 源文件存在性检查的一半：在主线程只查内存里的缓存集合并拼出要探测的路径，
+    /// 真正的 `fileExists` 交给 `Self.hasMissingSource(probes:)` 到后台跑。
+    /// 整屏海报每张都要检查，而这些 stat 可能落在外置盘或 NAS 挂载点上。
+    struct MissingSourceProbe {
+        /// 不用 stat 就能定论的结果；nil 表示还得探一次
+        var resolvedMissing: Bool?
+        var cachePaths: [String] = []
+        var sourcePath: String?
+    }
+
+    func missingSourceProbes(for pairs: [(VideoFile, MediaSource?)]) -> [MissingSourceProbe] {
+        pairs.map { file, mediaSource in
+            if cachedFileKeys.contains(cacheKey(for: file)) || cachedFileNames.contains(file.fileName) {
+                return MissingSourceProbe(resolvedMissing: false)
+            }
+            guard let mediaSource, let kind = mediaSource.protocolKind else {
+                return MissingSourceProbe(resolvedMissing: true)
+            }
+            if kind == .webdav || kind == .plex || kind == .emby || kind == .jellyfin {
+                // 走网络协议的源不做本地 stat，探了也没意义
+                return MissingSourceProbe(resolvedMissing: false)
+            }
+            var probe = MissingSourceProbe(resolvedMissing: nil)
+            if let dir = cacheDirectory {
+                probe.cachePaths = cacheCandidateURLs(for: file, in: dir).map(\.path)
+            }
+            probe.sourcePath = sourceFileURL(for: file, mediaSource: mediaSource).path
+            return probe
+        }
+    }
+
+    static func hasMissingSource(probes: [MissingSourceProbe]) -> Bool {
+        probes.contains { probe in
+            if let resolved = probe.resolvedMissing { return resolved }
+            if probe.cachePaths.contains(where: { FileManager.default.fileExists(atPath: $0) }) { return false }
+            guard let sourcePath = probe.sourcePath else { return true }
+            return !FileManager.default.fileExists(atPath: sourcePath)
+        }
     }
     
     // MARK: - 2. 核心搬运引擎 (空间预检 + 带进度复制)

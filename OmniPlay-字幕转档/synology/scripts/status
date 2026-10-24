@@ -1,0 +1,9 @@
+#!/bin/sh
+# DSM 用退出码判断套件是否在运行：0 = 运行中
+DIR=$(dirname "$0")
+. "${DIR}/common.sh"
+
+if [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
+    exit 0
+fi
+exit 3

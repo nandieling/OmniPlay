@@ -1,0 +1,143 @@
+name: macOS 打包
+
+# ARM（Apple Silicon）与 x64（Intel）两份工程各编译一次，产出 zip + dmg。
+# 打 tag（v*）时额外发一个 GitHub Release；PR 和手动触发只跑构建与制品。
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - "OmniPlay开源-mac-ARM/**"
+      - "OmniPlay开源-mac-x64/**"
+      - ".github/workflows/macos-release.yml"
+
+concurrency:
+  group: macos-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 构建 ${{ matrix.label }}
+    runs-on: macos-26        # 工程用了 glassEffect/Glass，需要 macOS 26 SDK；改回 macos-15 会编译失败
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: arm64
+            label: Apple Silicon
+            project: OmniPlay开源-mac-ARM
+            arch: arm64
+          - id: x64
+            label: Intel
+            project: OmniPlay开源-mac-x64
+            arch: x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 选择 Xcode 26
+        run: |
+          set -euo pipefail
+          xc="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -n "$xc" ]; then sudo xcode-select --switch "$xc"; fi
+          xcodebuild -version
+          sdk="$(xcrun --sdk macosx --show-sdk-version)"
+          echo "macOS SDK: $sdk"
+          if [ "${sdk%%.*}" -lt 26 ]; then
+            echo "::error::macOS SDK $sdk 太旧，工程需要 26 及以上（glassEffect 等 API 在旧 SDK 里不存在）"
+            exit 1
+          fi
+
+      - name: 预解析 Swift Package
+        working-directory: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          xcodebuild -project OmniPlay.xcodeproj -scheme OmniPlay \
+            -destination "platform=macOS,arch=${{ matrix.arch }}" \
+            -clonedSourcePackagesDirPath build/ci/SourcePackages \
+            -skipPackagePluginValidation -skipMacroValidation \
+            resolvePackageDependencies
+
+      - name: 单元测试
+        if: matrix.id == 'arm64'
+        continue-on-error: true      # 打包不依赖测试结果，测试失败只提示不拦发布
+        working-directory: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          xcodebuild -project OmniPlay.xcodeproj -scheme OmniPlay \
+            -configuration Debug \
+            -destination "platform=macOS,arch=${{ matrix.arch }}" \
+            -derivedDataPath build/ci/DerivedData \
+            -clonedSourcePackagesDirPath build/ci/SourcePackages \
+            -skipPackagePluginValidation -skipMacroValidation \
+            test -only-testing:OmniPlayTests
+
+      - name: 编译 Release
+        working-directory: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          xcodebuild -project OmniPlay.xcodeproj -scheme OmniPlay \
+            -configuration Release \
+            -destination "platform=macOS,arch=${{ matrix.arch }}" \
+            -derivedDataPath build/ci/DerivedData \
+            -clonedSourcePackagesDirPath build/ci/SourcePackages \
+            -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Manual PROVISIONING_PROFILE_SPECIFIER="" DEVELOPMENT_TEAM="" \
+            build
+
+      - name: 打包 zip 与 dmg
+        working-directory: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          app="$(ls -d build/ci/DerivedData/Build/Products/Release/*.app | head -1)"
+          version="$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")"
+          base="OmniPlay-${version}-mac-${{ matrix.id }}"
+          out="$GITHUB_WORKSPACE/dist"        # 用绝对路径，避免 working-directory 把产物甩到仓库外
+          mkdir -p "$out"
+          ditto -c -k --keepParent "$app" "$out/${base}.zip"
+
+          stage="$(mktemp -d)"
+          ditto "$app" "$stage/$(basename "$app")"
+          ln -s /Applications "$stage/Applications"
+          hdiutil create -quiet -volname "觅影 ${version}" -srcfolder "$stage" -ov -format UDZO "$out/${base}.dmg"
+          rm -rf "$stage"
+
+          ( cd "$out" && shasum -a 256 "${base}.zip" "${base}.dmg" > "${base}.sha256" )
+          ls -lh "$out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omniplay-mac-${{ matrix.id }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: 发布 GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 上传到 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ls -lh dist
+          version="${TAG#v}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" dist/*.zip dist/*.dmg dist/*.sha256 \
+              --title "觅影 ${version}" --generate-notes
+          else
+            gh release upload "$TAG" dist/*.zip dist/*.dmg dist/*.sha256 --clobber
+          fi

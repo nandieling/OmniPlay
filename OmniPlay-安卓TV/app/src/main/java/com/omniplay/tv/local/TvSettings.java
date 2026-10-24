@@ -24,10 +24,12 @@ public final class TvSettings {
     public static final String KEY_DEFAULT_AUDIO_LANGUAGE = "default_audio_language";
     public static final String KEY_DEFAULT_SUBTITLE_LANGUAGE = "default_subtitle_language";
     public static final String KEY_PLAYBACK_QUALITY_MODE = "playback_quality_mode";
+    public static final String KEY_PLAYER_STRETCH_TO_FILL = "player_stretch_to_fill";
     public static final String KEY_SCRAPE_LANGUAGE = "scrape_language";
     public static final String KEY_OFFLINE_CACHE_DIR = "offline_cache_dir";
     public static final String KEY_PHONE_INPUT_TOKEN = "phone_input_token";
     public static final String KEY_THEME = "theme_id";
+    public static final String KEY_SCRAPE_RULE_EPOCH = "scrape_rule_epoch";
 
     public static final String QUALITY_SMOOTH = "smooth";
     public static final String QUALITY_BALANCED = "balanced";
@@ -37,6 +39,18 @@ public final class TvSettings {
 
     public TvSettings(Context context) {
         preferences = context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+    }
+
+    /**
+     * 名称 / 年份清洗规则的版本号。每次改动这套规则就把版本往前推一次，
+     * 库里那些按老规则判错的条目会被重新判定一次（只跑一次，不会每轮扫描都重来）。
+     */
+    public int scrapeRuleEpoch() {
+        return preferences.getInt(KEY_SCRAPE_RULE_EPOCH, 0);
+    }
+
+    public void setScrapeRuleEpoch(int value) {
+        preferences.edit().putInt(KEY_SCRAPE_RULE_EPOCH, value).apply();
     }
 
     public boolean autoScanOnStartup() {
@@ -85,6 +99,15 @@ public final class TvSettings {
 
     public void setDefaultSubtitleLanguage(String value) {
         preferences.edit().putString(KEY_DEFAULT_SUBTITLE_LANGUAGE, value).apply();
+    }
+
+    /** 播放时是否把画面拉伸铺满全屏；默认 false = 保持影视自己的比例、多出来的地方留黑边。 */
+    public boolean playerStretchToFill() {
+        return preferences.getBoolean(KEY_PLAYER_STRETCH_TO_FILL, false);
+    }
+
+    public void setPlayerStretchToFill(boolean enabled) {
+        preferences.edit().putBoolean(KEY_PLAYER_STRETCH_TO_FILL, enabled).apply();
     }
 
     public String playbackQualityMode() {

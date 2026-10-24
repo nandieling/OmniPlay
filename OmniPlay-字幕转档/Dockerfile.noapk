@@ -1,0 +1,32 @@
+# apk 源完全拉不动时的备用镜像。
+# 基镜自带 python3，构建过程不发一次外部请求（除了拉基镜本身，那个走 Docker 的
+# 加速地址，前面已经证明是通的）；ffmpeg 不装进镜像，改从群晖的 ffmpeg 套件挂进来。
+#   sudo docker build -f Dockerfile.noapk -t omniplay-sidecar:latest .
+# compose 里把 build.dockerfile 改成 Dockerfile.noapk，并解开 ffmpeg 那行挂载。
+#
+# 基镜特意用 Debian 而不是 alpine：群晖套件里的 ffmpeg 是 glibc 编的，它的 ELF
+# 加载器和 libstdc++ 都要宿主机那套，塞进 musl 的 alpine 里起不来。
+FROM python:3.12-slim
+
+WORKDIR /srv/omniplay-sidecar
+COPY sidecar.py ./
+COPY web ./web
+
+RUN mkdir -p /var/lib/sidecar
+
+ENV SIDECAR_ROOTS=/media
+ENV SIDECAR_DB=/var/lib/sidecar/state.db
+ENV SIDECAR_LANGS=zh
+ENV SIDECAR_PORT=45733
+ENV SIDECAR_INTERVAL=900
+# 整个套件目录挂到 /opt/ffmpeg，ffmpeg 靠自己的 rpath 找同目录的库
+ENV SIDECAR_FFMPEG=/opt/ffmpeg/bin/ffmpeg
+ENV SIDECAR_FFPROBE=/opt/ffmpeg/bin/ffprobe
+
+VOLUME ["/var/lib/sidecar", "/media"]
+EXPOSE 45733
+
+HEALTHCHECK --interval=60s --timeout=5s --start-period=10s \
+    CMD python3 -c "import urllib.request,os;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('SIDECAR_PORT','45733')+'/health',timeout=4)"
+
+ENTRYPOINT ["python3", "/srv/omniplay-sidecar/sidecar.py"]

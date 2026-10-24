@@ -16,8 +16,9 @@ struct MovieDetailView: View {
     @Environment(\.dismiss) var dismiss
     @AppStorage("seekDuration") var seekDuration: Int = 10
     
-    @AppStorage("appTheme") var appTheme = ThemeType.appleLight.rawValue
-    var theme: AppTheme { ThemeType(rawValue: appTheme)?.colors ?? ThemeType.appleLight.colors }
+    @AppStorage(AppThemeResolver.colorKey) var appTheme = ThemeType.appleLight.rawValue
+    @AppStorage(AppThemeResolver.styleKey) var appThemeStyle = ThemeStyle.classic.rawValue
+    var theme: AppTheme { AppThemeResolver.theme(colorRaw: appTheme, styleRaw: appThemeStyle) }
     @AppStorage("enableFastTooltip") var enableFastTooltip = true
     
     // 🌟 修复：在这里声明管家，让详情页全局都能认识它！
@@ -41,6 +42,7 @@ struct MovieDetailView: View {
     @State private var playbackAlertMessage = ""
     @State private var showPlaybackAlert = false
     @State private var doubanMetadata: DoubanMetadata? = nil
+    @State private var isShowingNeodbMark = false
     
     init(movie: Movie) {
         self.movie = movie
@@ -107,7 +109,8 @@ struct MovieDetailView: View {
                 .frame(width: geo.size.width, height: geo.size.height).clipped()
                 .blur(radius: 80, opaque: true)
                 .overlay(.regularMaterial)
-                .overlay(theme.background.opacity(0.6))
+                // 冲淡海报的一层跟随主题：玻璃主题下就是那层斜向渐变底，换主题底色跟着变
+                .overlay { theme.backdropLayer.opacity(theme.heroDimming) }
             }.ignoresSafeArea()
             
             ScrollView {
@@ -140,7 +143,11 @@ struct MovieDetailView: View {
                         }
                         
                         VStack(alignment: .leading, spacing: 16) {
-                            Text(displayMovieTitle).font(.system(size: 46, weight: .heavy)).foregroundColor(theme.textPrimary).lineLimit(2)
+                            HStack(alignment: .firstTextBaseline, spacing: 14) {
+                                Text(displayMovieTitle).font(.system(size: 46, weight: .heavy)).foregroundColor(theme.textPrimary).lineLimit(2)
+
+                                // NeoDB 标记按钮挪到下面「开始播放 / 已播未播」那一排的末尾
+                            }
                             
                             HStack(spacing: 16) {
                                 if let year = preferredYear { Text(year) }
@@ -279,7 +286,7 @@ struct MovieDetailView: View {
                         }
                         .padding(.top, 60)
                     } else {
-                        if videoFiles.count > 1 {
+                        if versionGroups.count > 1 {
                             movieVersionList
                                 .padding(.horizontal, 60)
                                 .padding(.top, 44)
@@ -313,7 +320,11 @@ struct MovieDetailView: View {
                 Spacer()
             }
         }
+        .sheet(isPresented: $isShowingNeodbMark) {
+            NeodbMarkSheet(localId: activeMovieId ?? 0, title: displayMovieTitle)
+        }
         .navigationBarBackButtonHidden(true)
+        .modifier(RemoveNavTitleModifier())
         .alert("无法播放", isPresented: $showPlaybackAlert) {
             Button("知道了", role: .cancel) { }
         } message: {
@@ -870,31 +881,85 @@ struct MovieDetailView: View {
         }
     }
 
+    /// 版本列表第一行的文件名：取路径最后一段，拿不到时退回记录里的文件名
+    private func versionRowTitle(for file: VideoFile) -> String {
+        let name = (file.relativePath as NSString).lastPathComponent
+        if !name.isEmpty { return name }
+        return file.fileName.isEmpty ? "未知文件" : file.fileName
+    }
+
     private func formatTime(_ time: Double) -> String { if time.isNaN || time < 0 { return "00:00" }; let t = Int(time); return t / 3600 > 0 ? String(format: "%02d:%02d:%02d", t/3600, (t%3600)/60, t%60) : String(format: "%02d:%02d", (t%3600)/60, t%60) }
+
+    /// 详情页版本行：同一张蓝光盘（同一 BDMV 下的多条 STREAM）算一个版本
+    private struct MovieVersionGroup {
+        let title: String
+        let files: [VideoFile]
+        let isBluRayPackage: Bool
+
+        var primary: VideoFile { files[0] }
+        var segmentCount: Int { files.count }
+
+        var timeline: (progress: Double, duration: Double, played: Bool) {
+            var progress = 0.0
+            var duration = 0.0
+            for file in files where file.duration > 0 {
+                duration += file.duration
+                let watched = file.playProgress / file.duration >= 0.95
+                progress += watched ? file.duration : min(max(file.playProgress, 0), file.duration)
+            }
+            if files.count == 1, duration == 0, let only = files.first {
+                return (only.playProgress, only.duration, only.playProgress > 5)
+            }
+            return (progress, duration, files.contains { $0.playProgress > 5 })
+        }
+    }
+
+    private var versionGroups: [MovieVersionGroup] {
+        var keys: [String] = []
+        var buckets: [String: [VideoFile]] = [:]
+        for file in videoFiles {
+            let key = MediaNameParser.bluRayPackageKey(relativePath: file.relativePath).map { "bdmv:\($0)" } ?? "file:\(file.id)"
+            if buckets[key] == nil { keys.append(key) }
+            buckets[key, default: []].append(file)
+        }
+        return keys.compactMap { key -> MovieVersionGroup? in
+            guard let bucket = buckets[key], !bucket.isEmpty else { return nil }
+            let isPackage = key.hasPrefix("bdmv:")
+            let files = isPackage ? bucket.sorted { lhs, rhs in
+                let lhsKey = MediaNameParser.bluRayStreamPlaybackSortKey(for: lhs.fileName)
+                let rhsKey = MediaNameParser.bluRayStreamPlaybackSortKey(for: rhs.fileName)
+                if lhsKey.number != rhsKey.number { return lhsKey.number < rhsKey.number }
+                return lhsKey.name < rhsKey.name
+            } : bucket
+            guard let head = files.first else { return nil }
+            let title = isPackage
+                ? (MediaNameParser.bluRayPackageTitle(relativePath: head.relativePath) ?? versionRowTitle(for: head))
+                : versionRowTitle(for: head)
+            return MovieVersionGroup(title: title, files: files, isBluRayPackage: isPackage)
+        }
+    }
 
     private var movieVersionList: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("版本 / 文件（\(videoFiles.count)）")
+            Text("版本 / 文件（\(versionGroups.count)）")
                 .font(.title2.bold())
                 .foregroundColor(theme.textPrimary)
 
-            ForEach(Array(videoFiles.enumerated()), id: \.element.id) { index, file in
-                let isSelected = currentVideoFileId == file.id
-                Button(action: { currentVideoFileId = file.id }) {
+            ForEach(versionGroups, id: \.primary.id) { group in
+                let isSelected = group.files.contains { $0.id == currentVideoFileId }
+                let timeline = group.timeline
+                Button(action: { currentVideoFileId = group.primary.id }) {
                     HStack(alignment: .top, spacing: 14) {
                         Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                             .foregroundColor(isSelected ? theme.accent : theme.textSecondary)
                             .font(.title3)
                         VStack(alignment: .leading, spacing: 5) {
-                            Text("版本 \(index + 1) · \(file.fileName.isEmpty ? file.relativePath : file.fileName)")
+                            // 蓝光包显示盘名，散片显示文件名
+                            Text(group.title)
                                 .font(.headline)
                                 .foregroundColor(theme.textPrimary)
                                 .lineLimit(2)
-                            Text(file.relativePath.isEmpty ? "未知路径" : file.relativePath)
-                                .font(.caption)
-                                .foregroundColor(theme.textSecondary)
-                                .lineLimit(2)
-                            Text("\(formatTime(file.playProgress)) / \(file.duration > 0 ? formatTime(file.duration) : "--:--") · \(file.playProgress > 5 ? "已播放" : "未播放")")
+                            Text("\(formatTime(timeline.progress)) / \(timeline.duration > 0 ? formatTime(timeline.duration) : "--:--") · \(timeline.played ? "已播放" : "未播放")\(group.segmentCount > 1 ? " · 蓝光 \(group.segmentCount) 段" : "")")
                                 .font(.caption.monospacedDigit())
                                 .foregroundColor(theme.textSecondary)
                         }
@@ -903,7 +968,8 @@ struct MovieDetailView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(theme.surface.opacity(isSelected ? 0.9 : 0.55))
+                    .background(theme.rowFill(selected: isSelected))
+                    .themeGlassPlate(theme, cornerRadius: 10)
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected ? theme.accent : theme.textSecondary.opacity(0.16), lineWidth: isSelected ? 1.5 : 1))
                     .cornerRadius(10)
                 }
@@ -952,9 +1018,9 @@ struct MovieDetailView: View {
                 }
                 .padding(.horizontal, 24)
                 .padding(.vertical, 12)
-                .foregroundColor(theme.accent)
-                .background(Capsule().fill(theme.accent.opacity(0.1)))
-                .overlay(Capsule().stroke(theme.accent, lineWidth: 1.5))
+                .foregroundColor(theme.textPrimary)
+                .themeGlassPlate(theme, cornerRadius: 999)
+                .overlay(Capsule().stroke(theme.textSecondary.opacity(0.2), lineWidth: 1))
             }
             .buttonStyle(.plain)
 
@@ -969,10 +1035,16 @@ struct MovieDetailView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 12)
                 .foregroundColor(theme.textPrimary)
-                .background(Capsule().fill(theme.surface.opacity(0.5)))
+                .background(Capsule().fill(theme.chipFill))
+                .themeGlassPlate(theme, cornerRadius: 999)
                 .overlay(Capsule().stroke(theme.textSecondary.opacity(0.2), lineWidth: 1))
             }
             .buttonStyle(.plain)
+
+            // NeoDB 标记：样式与左边的已播/未播同款，按钮上只有文字
+            if let movieId = activeMovieId, movieId > 0 {
+                NeodbMarkStatusButton(localId: movieId, theme: theme) { isShowingNeodbMark = true }
+            }
         }
         .fixedSize(horizontal: true, vertical: false)
     }
@@ -982,7 +1054,7 @@ struct MovieDetailView: View {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Rectangle()
-                        .fill(theme.surface)
+                        .fill(theme.subtleFill)
                         .frame(height: 4)
                         .cornerRadius(2)
                     Rectangle()
@@ -1067,8 +1139,9 @@ struct EpisodeCardView: View {
     let isCacheSupported: Bool
     let isDetailCacheModeActive: Bool
     
-    @AppStorage("appTheme") var appTheme = ThemeType.appleLight.rawValue
-    var theme: AppTheme { ThemeType(rawValue: appTheme)?.colors ?? ThemeType.appleLight.colors }
+    @AppStorage(AppThemeResolver.colorKey) var appTheme = ThemeType.appleLight.rawValue
+    @AppStorage(AppThemeResolver.styleKey) var appThemeStyle = ThemeStyle.classic.rawValue
+    var theme: AppTheme { AppThemeResolver.theme(colorRaw: appTheme, styleRaw: appThemeStyle) }
     @ObservedObject var cacheManager = OfflineCacheManager.shared
     @State private var isHovering = false
     @State private var showEditModal = false
@@ -1203,13 +1276,14 @@ struct EpisodeThumbnailView: View {
     let height: CGFloat
     @State private var thumbnail: NSImage? = nil
     
-    @AppStorage("appTheme") var appTheme = ThemeType.appleLight.rawValue
-    var theme: AppTheme { ThemeType(rawValue: appTheme)?.colors ?? ThemeType.appleLight.colors }
+    @AppStorage(AppThemeResolver.colorKey) var appTheme = ThemeType.appleLight.rawValue
+    @AppStorage(AppThemeResolver.styleKey) var appThemeStyle = ThemeStyle.classic.rawValue
+    var theme: AppTheme { AppThemeResolver.theme(colorRaw: appTheme, styleRaw: appThemeStyle) }
     
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 10)
-                .fill(theme.surface.opacity(0.32))
+                .fill(theme.placeholderFill)
 
             if let img = thumbnail {
                 Image(nsImage: img)

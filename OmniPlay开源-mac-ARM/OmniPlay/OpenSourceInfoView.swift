@@ -689,10 +689,10 @@ struct OpenSourceInfoSheet: View {
                 }
                 .padding(20)
             }
-            .background(theme.background)
+            .background(theme.backdropLayer)
         }
         .frame(width: 720, height: 700)
-        .background(theme.background)
+        .background(theme.backdropLayer)
         .sheet(item: $selectedLicenseDocument) { document in
             OpenSourceLicenseTextSheet(document: document, theme: theme)
         }
@@ -897,10 +897,10 @@ private struct OpenSourceDependencyDetailSheet: View {
                 }
                 .padding(20)
             }
-            .background(theme.background)
+            .background(theme.backdropLayer)
         }
         .frame(width: 760, height: 760)
-        .background(theme.background)
+        .background(theme.backdropLayer)
         .sheet(item: $selectedLicenseDocument) { document in
             OpenSourceLicenseTextSheet(document: document, theme: theme)
         }
@@ -968,7 +968,7 @@ private struct OpenSourceLicenseTextSheet: View {
             .padding()
         }
         .frame(width: 760, height: 760)
-        .background(theme.background)
+        .background(theme.backdropLayer)
         .task(id: document.id) {
             loadLicenseText()
         }
@@ -1028,11 +1028,13 @@ private struct OpenSourcePanel<Content: View>: View {
 struct SettingsValueRow: View {
     let title: String
     let value: String
+    /// 不传就退回系统次要色（开源详情页那张表自带配色）
+    var theme: AppTheme? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Text(title)
-                .foregroundColor(.secondary)
+                .foregroundColor(theme?.textSecondary ?? .secondary)
                 .frame(width: 88, alignment: .leading)
 
             Text(value)

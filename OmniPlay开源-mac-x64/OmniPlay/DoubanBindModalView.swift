@@ -59,6 +59,10 @@ struct DoubanBindingPanel: View {
     var showsTitle: Bool = true
     var usesFlexibleSpacer: Bool = true
 
+    @AppStorage(AppThemeResolver.colorKey) var appTheme = ThemeType.appleLight.rawValue
+    @AppStorage(AppThemeResolver.styleKey) var appThemeStyle = ThemeStyle.classic.rawValue
+    var theme: AppTheme { AppThemeResolver.theme(colorRaw: appTheme, styleRaw: appThemeStyle) }
+
     @State private var subjectInput: String
     @State private var isFetching = false
     @State private var errorMessage = ""
@@ -104,7 +108,7 @@ struct DoubanBindingPanel: View {
 
                 Text("找到正确条目后复制 subject 链接回来绑定。")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.textSecondary)
             }
 
             if let existingMetadata {
@@ -116,19 +120,19 @@ struct DoubanBindingPanel: View {
                     }
                 }
                 .font(.caption)
-                .foregroundColor(.secondary)
+                .foregroundColor(theme.textSecondary)
                 .lineLimit(1)
             }
 
             Text("豆瓣仅支持手动绑定单个条目；不会自动搜索豆瓣，也不会参与批量扫描。刷新会走本地缓存和低频限速，遇到风控会自动暂停。")
                 .font(.caption)
-                .foregroundColor(.secondary)
+                .foregroundColor(theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             if !errorMessage.isEmpty {
                 Text(errorMessage)
                     .font(.caption)
-                    .foregroundColor(.red)
+                    .foregroundColor(theme.dangerColor)
                     .fixedSize(horizontal: false, vertical: true)
             }
 

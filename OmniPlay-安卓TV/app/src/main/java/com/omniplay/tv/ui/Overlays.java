@@ -58,6 +58,8 @@ public final class Overlays {
         private final List<List<View>> rows = new ArrayList<>();
         private boolean open;
         private boolean gridPushed;
+        /** 被别的弹窗压在下面时收到的重声明：等这一层重新回到顶层再补链接。 */
+        private boolean staleRows;
 
         Overlay(Overlays owner, Options options, View backdrop, ScrollView scroll, LinearLayout body) {
             this.owner = owner;
@@ -77,9 +79,17 @@ public final class Overlays {
             rows.clear();
             rows.addAll(focusRows);
             if (gridPushed) {
+                if (owner.top() != this) {
+                    // 上面还压着一层（媒体源抽屉里点开登录框，抽屉自己又刷了一遍局域网列表）：
+                    // 这时候 replaceTop 抢的是最上面那层的网格，焦点会掉回抽屉里，登录框
+                    // 从此再也走不进去。先记账，等回到顶层再补。
+                    staleRows = true;
+                    return;
+                }
                 // Already the top grid: re-link in place instead of stacking another copy,
                 // and leave the screen grid underneath alone.
                 owner.grid.replaceTop(rows);
+                staleRows = false;
             } else {
                 owner.grid.push(rows, initial);
                 gridPushed = true;
@@ -96,6 +106,15 @@ public final class Overlays {
 
         public void focus(View initial) {
             focus(Collections.singletonList(Collections.singletonList(initial)), initial);
+        }
+
+        /** 这一层重新回到顶层：把被压着期间攒下的方向键声明补上。 */
+        void relinkRows() {
+            if (!staleRows || !open) {
+                return;
+            }
+            staleRows = false;
+            owner.grid.replaceTop(rows);
         }
 
         /**
@@ -126,8 +145,15 @@ public final class Overlays {
             if (gridPushed) {
                 owner.grid.pop(options.restoreFocus);
             }
+            Overlay promoted = owner.top();
+            if (promoted != null) {
+                promoted.relinkRows();
+            }
             if (onClose != null) {
                 onClose.run();
+            }
+            if (owner.onStackChanged != null) {
+                owner.onStackChanged.run();
             }
             return true;
         }
@@ -160,6 +186,9 @@ public final class Overlays {
             setVisibility(text == null || text.length() == 0 ? GONE : VISIBLE);
         }
     }
+
+    /** 弹层压上或揭开时回调一次：页面借此把「弹层开着时欠的一次重绘」补上。 */
+    public Runnable onStackChanged;
 
     private final FrameLayout host;
     private final Theme theme;
@@ -237,6 +266,9 @@ public final class Overlays {
         overlay.status.setMaxLines(3);
         panel.addView(overlay.status, Widgets.margins(Widgets.column(), 0, 0, 0, theme.sdp(8)));
         stack.add(overlay);
+        if (onStackChanged != null) {
+            onStackChanged.run();
+        }
         return overlay;
     }
 

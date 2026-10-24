@@ -18,6 +18,7 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -223,6 +224,31 @@ public final class Widgets {
 
     public Button toolbarButton(String label) {
         return toolbarButton(label, false);
+    }
+
+    /**
+     * Toolbar button that shows only a symbol (mac 版工具栏那几个 SF Symbols 的画法)。
+     * 焦点语言与文字按钮完全一致：同一套底色、强调色边框、抬起与轻微放大。
+     */
+    public ImageView iconButton(Drawable icon, String label, boolean active) {
+        ImageView button = new ImageView(context);
+        button.setImageDrawable(icon);
+        button.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        button.setPadding(theme.sdp(14), theme.sdp(10), theme.sdp(14), theme.sdp(10));
+        button.setContentDescription(label);
+        button.setTooltipText(label);
+        button.setBackgroundTintList(null);
+        button.setStateListAnimator(null);
+        button.setClipToOutline(true);
+        button.setFocusable(true);
+        button.setFocusableInTouchMode(false);
+        theme.styleIconFocus(button, active, theme.sdp(9));
+        return button;
+    }
+
+    /** Re-states an icon button after its toggle flipped (展开 / 收起). */
+    public void iconButtonActive(View button, boolean active) {
+        theme.styleIconFocus(button, active, theme.sdp(9));
     }
 
     /** A two-line row in a list (saved connections, discovered devices, folder entries). */
@@ -532,7 +558,7 @@ public final class Widgets {
             int baseFill = selected ? Theme.GLASS_STRONG : Theme.GLASS;
             slice.setTextColor(focused ? Theme.FOCUS : (selected ? Theme.TEXT : Theme.MUTED));
             slice.setBackground(focused
-                    ? theme.panel(Theme.darker(baseFill, Theme.FOCUS_DARKEN), Theme.BORDER,
+                    ? theme.panel(Theme.darker(baseFill, Theme.FOCUS_DARKEN), Theme.FOCUS,
                             Theme.STROKE, theme.sdp(8))
                     : selected
                     ? theme.panel(Theme.GLASS_STRONG, Theme.BORDER, Theme.STROKE, theme.sdp(8))

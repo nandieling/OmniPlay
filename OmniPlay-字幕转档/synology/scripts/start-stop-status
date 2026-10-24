@@ -1,0 +1,10 @@
+#!/bin/sh
+# DSM6 时代的老接口，留着图个兼容
+DIR=$(dirname "$0")
+case "$1" in
+    start)   exec "${DIR}/start" ;;
+    stop)    exec "${DIR}/stop" ;;
+    restart) exec "${DIR}/restart" ;;
+    status)  exec "${DIR}/status" ;;
+esac
+exec "${DIR}/status"

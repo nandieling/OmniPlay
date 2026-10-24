@@ -4,11 +4,34 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.Surface;
 
+import java.util.ArrayList;
+
 public final class MpvPlayer {
+    // 进程内所有还活着的实例。换模式、换片子时任何一条路径漏了释放，实例就会躲在后台继续
+    // 解码出声（电视上表现为退出软件后声音还在循环），留一份名册才好在退出时一网打尽。
+    private static final ArrayList<MpvPlayer> LIVE = new ArrayList<>();
+
+    public static void destroyAll() {
+        ArrayList<MpvPlayer> snapshot;
+        synchronized (LIVE) {
+            snapshot = new ArrayList<>(LIVE);
+        }
+        for (MpvPlayer player : snapshot) {
+            player.destroy();
+        }
+    }
+
     public interface PlaybackEventListener {
         void onPlaybackStarted();
 
         void onPlaybackError(String message);
+
+        /**
+         * 画面几何变了（换片、换分辨率、换显示模式）：显示比例得照新的尺寸再算一遍。
+         * 不实现也没关系，这条只是给「保持比例 / 拉伸」那个开关用的。
+         */
+        default void onVideoGeometryChanged() {
+        }
     }
 
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -23,6 +46,12 @@ public final class MpvPlayer {
             PlaybackEventListener listener = playbackEventListener;
             if (listener != null) {
                 listener.onPlaybackStarted();
+                listener.onVideoGeometryChanged();
+            }
+        } else if ("video-reconfig".equals(eventName)) {
+            PlaybackEventListener reconfigured = playbackEventListener;
+            if (reconfigured != null) {
+                reconfigured.onVideoGeometryChanged();
             }
         } else if ("error".equals(eventName)) {
             if (detail != null && !detail.isEmpty()) {
@@ -44,6 +73,11 @@ public final class MpvPlayer {
         if (handle == 0) {
             lastError = "无法创建 libmpv 播放器。";
             return false;
+        }
+        synchronized (LIVE) {
+            if (!LIVE.contains(this)) {
+                LIVE.add(this);
+            }
         }
         MpvBridge.nativeSetPlaybackMode(handle, directPlaybackMode);
         MpvBridge.nativeSetEventListener(handle, nativeEventListener);
@@ -197,6 +231,48 @@ public final class MpvPlayer {
         return "yes".equals(getStringProperty("idle", "no"));
     }
 
+    /**
+     * 显示比例。{@code stretchToFill} 时把显示宽高比强行写成屏幕比例（mpv 的 aspect 覆盖，
+     * 画面会变形但铺满），否则交回 auto 让 mpv 自己留黑边。
+     *
+     * <p>直出模式（{@code vo=mediacodec_embed}）下 mpv 根本不渲染，这里只是不让它留着
+     * 上一次设定的尾巴；那一路的黑边由 {@code SurfaceView.setAspectRatio} 负责。</p>
+     */
+    public void setAspectMode(boolean stretchToFill, String displayAspect) {
+        if (!initialized) {
+            return;
+        }
+        MpvBridge.nativeSetString(handle, "panscan", "0");
+        MpvBridge.nativeSetString(handle, "aspect",
+                stretchToFill && displayAspect != null && !displayAspect.isEmpty()
+                        ? displayAspect : "auto");
+    }
+
+    /** 画面在屏幕上应该占的比例（已含像素宽高比）；读不到时返回 0，等几何事件再补一次。 */
+    public double displayAspectRatio() {
+        if (!initialized) {
+            return 0;
+        }
+        double width = getDoubleProperty("dwidth", 0);
+        double height = getDoubleProperty("dheight", 0);
+        if (width > 1 && height > 1) {
+            return width / height;
+        }
+        // dwidth / dheight 在部分构建里读不到，退回编码尺寸（字符串形如 "1920x1080"）。
+        String size = getStringProperty("video-size", "");
+        int at = size.indexOf('x');
+        if (at <= 0) {
+            return 0;
+        }
+        try {
+            double codedWidth = Double.parseDouble(size.substring(0, at).trim());
+            double codedHeight = Double.parseDouble(size.substring(at + 1).trim());
+            return codedWidth > 1 && codedHeight > 1 ? codedWidth / codedHeight : 0;
+        } catch (NumberFormatException malformed) {
+            return 0;
+        }
+    }
+
     public String getStringProperty(String property, String fallback) {
         if (!initialized) {
             return fallback;
@@ -257,6 +333,9 @@ public final class MpvPlayer {
     }
 
     public void destroy() {
+        synchronized (LIVE) {
+            LIVE.remove(this);
+        }
         if (handle != 0) {
             MpvBridge.nativeSetEventListener(handle, null);
             MpvBridge.nativeDestroy(handle);

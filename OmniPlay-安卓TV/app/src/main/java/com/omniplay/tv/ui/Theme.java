@@ -38,10 +38,12 @@ public final class Theme {
         public final int surface;
         public final int textPrimary;
         public final int textSecondary;
+        /** 页面底色往强调色那侧偏一点的「晕染色」，只用在背景渐变的两端。 */
+        public final int wash;
         public final boolean dark;
 
         Variant(String id, String name, String accent, String background, String surface,
-                String textPrimary, String textSecondary, boolean dark) {
+                String textPrimary, String textSecondary, String wash, boolean dark) {
             this.id = id;
             this.name = name;
             this.accent = Color.parseColor(accent);
@@ -49,27 +51,28 @@ public final class Theme {
             this.surface = Color.parseColor(surface);
             this.textPrimary = Color.parseColor(textPrimary);
             this.textSecondary = Color.parseColor(textSecondary);
+            this.wash = Color.parseColor(wash);
             this.dark = dark;
         }
     }
 
     public static final List<Variant> VARIANTS = Collections.unmodifiableList(Arrays.asList(
-            new Variant("appleLight", "原生经典", "#007AFF", "#F2F2F7", "#FFFFFF",
-                    "#000000", "#8E8E93", false),
-            new Variant("crystal", "晶透白", "#007AFF", "#FFFFFF", "#F2F2F7",
-                    "#000000", "#3C3C43", false),
-            new Variant("linen", "亚麻灰", "#0D9488", "#F9F9F9", "#F1F1F1",
-                    "#1F2937", "#6B7280", false),
-            new Variant("mint", "薄荷清", "#10B981", "#F1FAF7", "#E0F2F1",
-                    "#064E3B", "#689F88", false),
-            new Variant("rose", "北欧粉", "#D946EF", "#FFF7FA", "#FFE4EC",
-                    "#701A75", "#A855F7", false),
-            new Variant("midnight", "午夜蓝", "#4F8CFF", "#0B1220", "#161F30",
-                    "#F2F5FA", "#9AA8BC", true),
-            new Variant("graphite", "石墨黑", "#2DD4BF", "#16171A", "#222428",
-                    "#E8EAED", "#9CA3AF", true),
-            new Variant("oled", "纯黑", "#0A84FF", "#000000", "#101012",
-                    "#F5F5F7", "#98989F", true)));
+            new Variant("appleLight", "原生经典", "#0A7AFF", "#F1F2F6", "#FFFFFF",
+                    "#0A0A0C", "#86868E", "#E6EBF5", false),
+            new Variant("crystal", "晶透白", "#0A84FF", "#F7F9FC", "#FFFFFF",
+                    "#07080C", "#5C6572", "#E4EFFF", false),
+            new Variant("linen", "亚麻灰", "#0F8F83", "#F4F3F0", "#FCFCFA",
+                    "#22262C", "#6B7280", "#E7E4DC", false),
+            new Variant("mint", "薄荷清", "#0F9F6E", "#EFF6F3", "#FFFFFF",
+                    "#0C3B30", "#557F72", "#DBEFE4", false),
+            new Variant("rose", "北欧粉", "#DB2777", "#FCF3F7", "#FFFFFF",
+                    "#45202E", "#96657A", "#F9DFEA", false),
+            new Variant("midnight", "午夜蓝", "#6BA5FF", "#070D1A", "#121B2C",
+                    "#EFF3FA", "#93A6C0", "#102347", true),
+            new Variant("graphite", "石墨黑", "#34D3B0", "#101113", "#1C1E22",
+                    "#E7E9EC", "#99A0AA", "#1A2126", true),
+            new Variant("oled", "纯黑", "#0A84FF", "#000000", "#0C0D10",
+                    "#F2F2F5", "#94919C", "#060A14", true)));
 
     public static final String DEFAULT_VARIANT = com.omniplay.tv.local.TvSettings.DEFAULT_THEME_ID;
 
@@ -81,6 +84,8 @@ public final class Theme {
     public static int TEXT = Color.rgb(17, 24, 39);
     public static int MUTED = Color.rgb(75, 85, 99);
     public static int SUBTLE = Color.rgb(107, 114, 128);
+    /** 背景渐变的晕染色，随主题切换；见 {@link #appBackground()}。 */
+    public static int WASH = Color.rgb(230, 235, 245);
     public static int FOCUS = Color.rgb(37, 99, 235);
     public static int ACCENT = Color.rgb(20, 184, 166);
     public static int FOCUS_SOFT = Color.rgb(232, 240, 255);
@@ -101,7 +106,11 @@ public final class Theme {
 
     public static final float FOCUS_SCALE = 1.045f;
     /** How much deeper a control's own fill goes when the remote lands on it. */
-    public static final float FOCUS_DARKEN = 0.42f;
+    /**
+     * 聚焦时底色压深的比例。0 = 不压深：焦点只由「轻微放大 + 抬起 + 边框换成强调色」表达，
+     * 遥控器下按钮不会一闪一闪地变暗，深色主题里的底色也保持稳定。
+     */
+    public static final float FOCUS_DARKEN = 0f;
     public static final int FOCUS_ANIMATION_MS = 120;
     /** Border every control draws, at rest and while focused; only its colour ever changes. */
     public static int STROKE = 1;
@@ -136,6 +145,7 @@ public final class Theme {
         int black = Color.BLACK;
         ACCENT = variant.accent;
         BACKGROUND = variant.background;
+        WASH = variant.wash;
         SURFACE = variant.surface;
         TEXT = variant.textPrimary;
         SUBTLE = variant.textSecondary;
@@ -223,12 +233,15 @@ public final class Theme {
 
     /** The app background: a soft daylight wash, used by every screen. */
     public GradientDrawable appBackground() {
+        // 左上角只是微微染一点颜色，右下角才让强调色显出来：海报墙滚起来时背景有方向感，
+        // 又不会跟海报抢视线。中间一段保持纯底色，整屏不会发灰。
         return new GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
                 new int[]{
-                        blend(BACKGROUND, ACCENT, DARK ? 0.05f : 0.03f),
+                        blend(BACKGROUND, WASH, 0.55f),
                         BACKGROUND,
-                        blend(BACKGROUND, ACCENT, DARK ? 0.16f : 0.11f)
+                        BACKGROUND,
+                        blend(WASH, ACCENT, DARK ? 0.30f : 0.22f)
                 });
     }
 
@@ -289,6 +302,14 @@ public final class Theme {
      * inside the listener allocated one per arrow key and forced the view to rebuild its outline,
      * and therefore its shadow, on every single focus move.
      */
+    /**
+     * 聚焦时的底色：在原底色里掺一点强调色。以前「选中」是靠一圈强调色边框说的，遥控器每走
+     * 一格就有一圈蓝线冒出来；现在只留轻微放大、一层阴影和这一点底色，边框颜色一动不动。
+     */
+    public static int focusFill(int base) {
+        return blend(base, FOCUS, DARK ? 0.20f : 0.10f);
+    }
+
 /** Repaints the parts of a control that are not its background (label colour, tint). */
     public interface FocusRepaint {
         void apply(boolean hasFocus);
@@ -316,39 +337,69 @@ public final class Theme {
         };
     }
 
-    // Focus is the control's own colour made deeper plus {@link #FOCUS_SCALE}, and its border
-    // stays exactly as thick as it is at rest: an accent ring around every control reads as noise
-    // on a TV sitting two meters away, and it made the whole screen look boxed in.
+    // Focus is {@link #FOCUS_SCALE} plus a lift, and the control's own border switching to the
+    // accent colour. The fill stays put (FOCUS_DARKEN is 0): a fill that dips on every arrow key
+    // reads as flicker two metres away. The border keeps its rest thickness -- only its colour
+    // changes -- so nothing on screen grows a box around it.
 
-    /** Filled pill: darker fill, slight grow; used for toolbar and dialog buttons. */
+    /** Filled pill: slight grow, lifted, border turns accent; toolbar and dialog buttons. */
     public void styleButtonFocus(Button button, boolean active, int radius) {
         int restFill = active ? GLASS_STRONG : GLASS;
         GradientDrawable rest = panel(restFill, BORDER, STROKE, radius);
-        GradientDrawable focused = panel(darker(restFill, FOCUS_DARKEN), BORDER, STROKE, radius);
+        GradientDrawable focused = panel(focusFill(restFill), active ? FOCUS : BORDER, STROKE, radius);
         swapOnFocus(button, rest, focused, 0, dp(6), hasFocus ->
                 button.setTextColor(hasFocus || active ? FOCUS : TEXT), null);
+    }
+
+    /**
+     * Icon-only toolbar button: same focus language as the text buttons, only the glyph is
+     * repainted (a monochrome Canvas drawable simply takes the accent tint through a colour filter).
+     */
+    public void styleIconFocus(View target, boolean active, int radius) {
+        // mac 版这排工具栏按钮是 .buttonStyle(.plain)：平时看不见底，图标直接浮在背景上。
+        // TV 上只有拿到焦点才给出圆角底与强调色描边，激活态靠图标自己染成强调色表示。
+        GradientDrawable rest = panel(Color.TRANSPARENT, Color.TRANSPARENT, STROKE, radius);
+        GradientDrawable focused = panel(focusFill(GLASS), Color.TRANSPARENT, 0, radius);
+        swapOnFocus(target, rest, focused, 0, dp(6), hasFocus -> {
+            if (!(target instanceof ImageView)) {
+                return;
+            }
+            ImageView icon = (ImageView) target;
+            if (hasFocus || active) {
+                icon.setColorFilter(FOCUS);
+            } else {
+                icon.clearColorFilter();
+            }
+        }, null);
     }
 
     /** Settings and list rows: same shape, but the label never changes colour. */
     public void styleRowFocus(Button button) {
         GradientDrawable rest = panel(GLASS, BORDER, STROKE, dp(10));
-        GradientDrawable focused = panel(darker(GLASS, FOCUS_DARKEN), BORDER, STROKE, dp(10));
+        GradientDrawable focused = panel(focusFill(GLASS), BORDER, STROKE, dp(10));
         swapOnFocus(button, rest, focused, 0, dp(6),
                 hasFocus -> button.setTextColor(TEXT), null);
     }
 
     public void styleInputFocus(EditText editText) {
         GradientDrawable rest = panel(SURFACE, BORDER, dp(1), dp(8));
-        GradientDrawable focused = panel(darker(SURFACE, FOCUS_DARKEN), BORDER, dp(1), dp(8));
+        GradientDrawable focused = panel(focusFill(SURFACE), BORDER, dp(1), dp(8));
         editText.setBackground(rest);
-        editText.setOnFocusChangeListener((focusedView, hasFocus) -> focusedView.setBackground(
-                hasFocus ? focused : rest));
+        editText.setOnFocusChangeListener((focusedView, hasFocus) -> {
+            focusedView.setBackground(hasFocus ? focused : rest);
+            animateFocusScale(focusedView, hasFocus);
+            if (hasFocus && focusedView instanceof EditText) {
+                // 默认会把光标放到整串文字最前面，遥控器上删除键按下去毫无反应。
+                EditText field = (EditText) focusedView;
+                field.setSelection(field.getText().length());
+            }
+        });
     }
 
     /** A plain card that lifts when focused (list rows, source cards). */
     public void styleCardFocus(View card, Runnable onFocused) {
         swapOnFocus(card, panel(withAlpha(SURFACE, 0), Color.TRANSPARENT, 0, dp(10)),
-                panel(darker(withAlpha(SURFACE, 235), FOCUS_DARKEN), BORDER, STROKE, dp(10)),
+                panel(focusFill(withAlpha(SURFACE, 235)), Color.TRANSPARENT, 0, dp(10)),
                 0, dp(10), noRepaint(), onFocused);
     }
 
@@ -363,21 +414,10 @@ public final class Theme {
         frame.setElevation(0);
         card.setBackground(transparent);
         card.setElevation(0);
-        // 海报是图片，光换底色看不出来；盖一层预先画好的暗色遮罩，聚焦时把它显出来。
-        View dim = new View(frame.getContext());
-        dim.setBackground(panel(withAlpha(Color.rgb(8, 12, 20), 140), BORDER, dp(1), dp(12)));
-        dim.setVisibility(View.INVISIBLE);
-        dim.setFocusable(false);
-        dim.setClickable(false);
-        frame.addView(dim, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // 选中一张海报只说两件事：轻微放大 + 一层阴影。以前额外盖了一层暗色遮罩，
+        // 遥控器每走一格海报就暗一下，看着像图片在闪，用户要的恰恰是「原图别动」。
         card.setOnFocusChangeListener((focusedView, hasFocus) -> {
             focusedView.setElevation(hasFocus ? dp(8) : 0);
-            // 卡片是先建的、海报是后塞进来的，遮罩得在聚焦时自己排到最上面才盖得住图。
-            if (hasFocus) {
-                dim.bringToFront();
-            }
-            dim.setVisibility(hasFocus ? View.VISIBLE : View.INVISIBLE);
             animateFocusScale(focusedView, hasFocus);
             if (hasFocus && onFocused != null) {
                 onFocused.run();
@@ -387,7 +427,7 @@ public final class Theme {
 
     public void styleBadgeFocus(TextView badge) {
         swapOnFocus(badge, panel(GLASS_STRONG, BORDER, 0, dp(8)),
-                panel(darker(GLASS_STRONG, FOCUS_DARKEN), BORDER, 0, dp(8)),
+                panel(focusFill(GLASS_STRONG), BORDER, STROKE, dp(8)),
                 0, dp(8), noRepaint(), null);
     }
 
@@ -397,7 +437,7 @@ public final class Theme {
     public void stylePlayerButtonFocus(Button button) {
         int restFill = withAlpha(DARK ? SURFACE : Color.WHITE, 74);
         GradientDrawable rest = panel(restFill, withAlpha(Color.WHITE, 96), STROKE, dp(24));
-        GradientDrawable focused = panel(darker(restFill, FOCUS_DARKEN * 1.6f),
+        GradientDrawable focused = panel(focusFill(restFill),
                 withAlpha(Color.WHITE, 96), STROKE, dp(24));
         swapOnFocus(button, rest, focused, 0, 0, hasFocus ->
                 button.setTextColor(hasFocus ? FOCUS : PLAYER_TEXT), null);
@@ -406,7 +446,7 @@ public final class Theme {
     public void stylePlayerIconFocus(ImageButton button) {
         int restFill = withAlpha(Color.WHITE, 34);
         GradientDrawable rest = panel(restFill, withAlpha(Color.WHITE, 140), STROKE, dp(24));
-        GradientDrawable focused = panel(darker(restFill, FOCUS_DARKEN * 1.6f),
+        GradientDrawable focused = panel(focusFill(restFill),
                 withAlpha(Color.WHITE, 140), STROKE, dp(24));
         swapOnFocus(button, rest, focused, 0, 0, hasFocus -> {
             if (hasFocus) {
@@ -422,7 +462,7 @@ public final class Theme {
         int plate = DARK ? SURFACE : Color.WHITE;
         int restFill = withAlpha(plate, selected ? 46 : 22);
         GradientDrawable rest = panel(restFill, withAlpha(Color.WHITE, 120), STROKE, dp(10));
-        GradientDrawable focused = panel(darker(restFill, FOCUS_DARKEN * 1.6f),
+        GradientDrawable focused = panel(focusFill(restFill),
                 withAlpha(Color.WHITE, 120), STROKE, dp(10));
         swapOnFocus(button, rest, focused, 0, 0, hasFocus -> button.setTextColor(
                 hasFocus ? FOCUS : (selected ? ACCENT : PLAYER_TEXT)), null);

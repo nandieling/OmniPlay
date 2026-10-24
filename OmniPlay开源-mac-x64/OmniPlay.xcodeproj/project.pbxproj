@@ -453,6 +453,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "觅影";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "方便添加电影";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "觅影需要访问局域网设备（如 NAS、WebDAV、Plex、Emby、Jellyfin）以连接并播放你的媒体文件。";
 				INFOPLIST_KEY_NSNetworkVolumesUsageDescription = OmniPlay;
 				INFOPLIST_KEY_NSRemovableVolumesUsageDescription = OmniPlay;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -470,7 +471,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				LIBRARY_SEARCH_PATHS = "$(inherited)";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.8;
+				MARKETING_VERSION = 1.9;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
@@ -529,6 +530,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "觅影";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "方便添加电影";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "觅影需要访问局域网设备（如 NAS、WebDAV、Plex、Emby、Jellyfin）以连接并播放你的媒体文件。";
 				INFOPLIST_KEY_NSNetworkVolumesUsageDescription = OmniPlay;
 				INFOPLIST_KEY_NSRemovableVolumesUsageDescription = OmniPlay;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -546,7 +548,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				LIBRARY_SEARCH_PATHS = "$(inherited)";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.8;
+				MARKETING_VERSION = 1.9;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
@@ -587,7 +589,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.8;
+				MARKETING_VERSION = 1.9;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
@@ -619,7 +621,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.8;
+				MARKETING_VERSION = 1.9;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
@@ -650,7 +652,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.8;
+				MARKETING_VERSION = 1.9;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
@@ -680,7 +682,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.8;
+				MARKETING_VERSION = 1.9;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
@@ -754,8 +756,8 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/mpvkit/MPVKit";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.41.0;
+				kind = revision;
+				revision = 613c0ccc3acf70e136aaff880a9b5fe8fdfaf5b8;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

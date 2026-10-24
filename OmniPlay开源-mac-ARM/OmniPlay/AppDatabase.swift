@@ -16,7 +16,7 @@ enum AppDatabaseError: LocalizedError {
 
 class AppDatabase {
     static let shared = AppDatabase()
-    var dbQueue: DatabaseQueue!
+    var dbQueue: (any DatabaseWriter)!
     /// 实际打开的数据库文件（本地镜像）
     var databaseURL: URL?
     /// 当前数据库所在的 iCloud 容器目录（使用本地路径时为 nil）
@@ -28,7 +28,7 @@ class AppDatabase {
     private init() {}
     
     func setup(databaseURL: URL, icloudContainerURL: URL? = nil) throws {
-        dbQueue = try DatabaseQueue(path: databaseURL.path)
+        dbQueue = try Self.open(path: databaseURL.path)
         self.databaseURL = databaseURL
         self.icloudContainerURL = icloudContainerURL
         
@@ -172,6 +172,17 @@ class AppDatabase {
             _ = try AppDatabase.healSchemaGaps(db)
         }
 
+        // v12: NeoDB 同步用的本地标记表（已看 / 评分 / 评论），见 MediaMarkStore。
+        migrator.registerMigration("v12") { db in
+            try MediaMarkStore.createTable(db)
+        }
+
+        // v13: 标记表记下条目在 NeoDB 上的网页地址，弹窗里的跳转不用再查一次。
+        migrator.registerMigration("v13") { db in
+            try MediaMarkStore.createTable(db)
+            _ = try AppDatabase.healSchemaGaps(db)
+        }
+
         var migrationError: Error?
         do {
             try migrator.migrate(dbQueue)
@@ -198,6 +209,34 @@ class AppDatabase {
         // 而不是等扫描结束时才吐一句看不懂的外键失败。
         if !missing.isEmpty {
             throw AppDatabaseError.schemaIncomplete(missing)
+        }
+    }
+
+    /// 扫描会连续写库。单连接的 DatabaseQueue 把界面线程的读操作排在写事务后面，
+    /// 表现就是扫描一开始卡几秒；DatabasePool 用 WAL 开多个读连接，读写不再互相等。
+    /// 库文件落在不支持 WAL 的位置（网络盘之类）时退回单连接队列，功能一样。
+    private static func open(path: String) throws -> any DatabaseWriter {
+        do {
+            return try DatabasePool(path: path)
+        } catch {
+            print("⚠️ 媒体库无法以 WAL 模式打开（\(error.localizedDescription)），退回单连接模式")
+            return try DatabaseQueue(path: path)
+        }
+    }
+
+    /// 全量拷贝库文件前把 WAL 落盘：不然推上云端的副本会缺最近一段事务
+    func checkpointForCopy() {
+        guard let dbQueue else { return }
+        try? dbQueue.write { db in
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+        }
+    }
+
+    /// 库文件被整体替换（比如从 iCloud 拉取覆盖）后，残留的 WAL 会被 SQLite 当成
+    /// 未提交事务回放、盖掉新库，所以换文件时必须一起清掉
+    static func removeWALFiles(beside databaseURL: URL) {
+        for suffix in ["-wal", "-shm"] {
+            try? FileManager.default.removeItem(atPath: databaseURL.path + suffix)
         }
     }
 }
@@ -241,7 +280,8 @@ extension AppDatabase {
             """),
         ExpectedTable(name: "chineseNameCache", ddl: """
             CREATE TABLE IF NOT EXISTS "chineseNameCache"("key" TEXT PRIMARY KEY, "value" TEXT, "updatedAt" DOUBLE NOT NULL)
-            """)
+            """),
+        ExpectedTable(name: "mediaMark", ddl: MediaMarkStore.createTableSQL)
     ]
 
     nonisolated private static let expectedColumns: [ExpectedColumn] = [
@@ -252,7 +292,8 @@ extension AppDatabase {
         ExpectedColumn(table: "mediaSource", column: "disabledAt", ddl: "DOUBLE"),
         ExpectedColumn(table: "mediaSource", column: "addressConfig", ddl: "TEXT"),
         ExpectedColumn(table: "movie", column: "directors", ddl: "TEXT"),
-        ExpectedColumn(table: "movie", column: "casts", ddl: "TEXT")
+        ExpectedColumn(table: "movie", column: "casts", ddl: "TEXT"),
+        ExpectedColumn(table: "mediaMark", column: "remoteUrl", ddl: "TEXT")
     ]
 
     nonisolated private static let coreTables = ["mediaSource", "movie", "tvShow", "videoFile"]

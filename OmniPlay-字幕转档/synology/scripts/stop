@@ -1,0 +1,18 @@
+#!/bin/sh
+DIR=$(dirname "$0")
+. "${DIR}/common.sh"
+
+[ -f "${PID_FILE}" ] || exit 0
+PID=$(cat "${PID_FILE}")
+if kill -0 "${PID}" 2>/dev/null; then
+    kill "${PID}" 2>/dev/null
+    n=0
+    while kill -0 "${PID}" 2>/dev/null && [ ${n} -lt 20 ]; do
+        sleep 0.5
+        n=$((n + 1))
+    done
+    kill -9 "${PID}" 2>/dev/null
+    say "已停止（PID ${PID}）。半途而废的那条字幕会在下次接着跑。"
+fi
+rm -f "${PID_FILE}"
+exit 0

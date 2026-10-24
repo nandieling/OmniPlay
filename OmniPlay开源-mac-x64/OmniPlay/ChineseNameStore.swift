@@ -58,7 +58,7 @@ enum ChineseNameStore {
     static func localizeCredits(
         directors: [TMDBPersonInfo],
         casts: [TMDBPersonInfo],
-        dbQueue: DatabaseQueue? = nil
+        dbQueue: (any DatabaseWriter)? = nil
     ) async -> (directors: [TMDBPersonInfo], casts: [TMDBPersonInfo]) {
         let localizedDirectors = await localizePeople(directors, kind: "director", dbQueue: dbQueue)
         let localizedCasts = await localizePeople(casts, kind: "cast", dbQueue: dbQueue)
@@ -68,7 +68,7 @@ enum ChineseNameStore {
     private static func localizePeople(
         _ people: [TMDBPersonInfo],
         kind: String,
-        dbQueue: DatabaseQueue? = nil
+        dbQueue: (any DatabaseWriter)? = nil
     ) async -> [TMDBPersonInfo] {
         guard !people.isEmpty else { return people }
         // 1. 用户在分类文件夹里手动改过的名字优先，不需要网络
@@ -120,7 +120,7 @@ enum ChineseNameStore {
     private static func manualAliasNames(
         kind: String,
         names: [String],
-        dbQueue: DatabaseQueue? = nil
+        dbQueue: (any DatabaseWriter)? = nil
     ) async -> [String: String] {
         guard let dbQueue = dbQueue ?? AppDatabase.shared.dbQueue, !names.isEmpty else { return [:] }
         let keys = Set(names.map { aliasKey(kind: kind, name: $0) })
@@ -146,7 +146,7 @@ enum ChineseNameStore {
         kind: String,
         currentName: String,
         newName: String,
-        dbQueue: DatabaseQueue? = nil
+        dbQueue: (any DatabaseWriter)? = nil
     ) async -> Bool {
         guard let dbQueue = dbQueue ?? AppDatabase.shared.dbQueue else { return false }
         let target = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -246,6 +246,7 @@ enum ChineseNameStore {
         }) ?? []
 
         var changed = false
+        var renamed = 0
         for profile in profiles {
             guard !TMDBService.containsChinese(profile.name), let personId = profile.tmdbPersonId else { continue }
             let lookup = await resolveChineseNames(keys: [personKey(Int(personId))]) { key in
@@ -255,6 +256,13 @@ enum ChineseNameStore {
             if let chineseName = lookup.names[personKey(Int(personId))],
                await applyPersonRename(kind: profile.kind, oldName: profile.name, newName: chineseName) {
                 changed = true
+                renamed += 1
+                // 每改满 10 个人就刷新一遍海报墙，用户停留在分类视图里也能看到名字逐个变中文
+                if renamed % 10 == 0 {
+                    await MainActor.run {
+                        NotificationCenter.default.post(name: .libraryUpdated, object: nil)
+                    }
+                }
             }
             // 只在真的打了请求时留间歇，缓存命中时不拖慢补齐
             if !lookup.freshKeys.isEmpty {
@@ -297,7 +305,7 @@ enum ChineseNameStore {
         kind: String,
         oldName: String,
         newName: String,
-        dbQueue: DatabaseQueue? = nil
+        dbQueue: (any DatabaseWriter)? = nil
     ) async -> Bool {
         guard oldName != newName else { return false }
         guard let dbQueue = dbQueue ?? AppDatabase.shared.dbQueue else { return false }

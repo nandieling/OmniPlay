@@ -12,8 +12,12 @@
         android:name="android.hardware.touchscreen"
         android:required="false" />
 
+<!-- largeHeap：海报墙一轮要摆几百张图，扫描时又把整片目录清单读进内存，
+     默认堆在低配电视盒子上很容易被一次解码顶穿（v1.27 之前表现为扫到一半
+     被踢回电视主页）。 -->
     <application
         android:allowBackup="false"
+        android:largeHeap="true"
         android:banner="@drawable/app_banner"
         android:icon="@drawable/package_icon_256"
         android:label="@string/app_name"

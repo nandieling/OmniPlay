@@ -262,8 +262,18 @@ class TMDBService {
         guard proxyAPIBaseURL(customProxyURL: customProxyURL) != nil else {
             return TMDBConnectionCheckResult(isConnected: false, message: "TMDB 代理网关地址无效。")
         }
+        // 刚探测成功过就别再等一遍网络：连着点「扫描刮削」时，这一步原本是白等好几秒。
+        if let at = lastProbeSuccessAt, Date().timeIntervalSince(at) < probeReuseInterval {
+            let elapsed = Int(Date().timeIntervalSince(at))
+            return TMDBConnectionCheckResult(isConnected: true, message: "TMDB 连接正常（\(elapsed) 秒前已检测过）。")
+        }
         let urlString = "\(officialAPIBaseURL.absoluteString)/configuration"
-        guard let request = makeRequest(urlString: urlString, credential: credential, customProxyURL: customProxyURL) else {
+        guard let request = makeRequest(
+            urlString: urlString,
+            credential: credential,
+            customProxyURL: customProxyURL,
+            timeout: probeRequestTimeout
+        ) else {
             return TMDBConnectionCheckResult(isConnected: false, message: "TMDB 请求地址无效。")
         }
 
@@ -272,22 +282,34 @@ class TMDBService {
         do {
             let (_, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
+                lastProbeSuccessAt = nil
                 return TMDBConnectionCheckResult(isConnected: false, message: "TMDB 未返回有效响应。")
             }
             if http.statusCode == 200 {
+                lastProbeSuccessAt = Date()
                 return TMDBConnectionCheckResult(isConnected: true, message: "TMDB 连接正常。")
             }
+            lastProbeSuccessAt = nil
             return TMDBConnectionCheckResult(isConnected: false, message: "TMDB 返回 HTTP \(http.statusCode)。")
         } catch {
+            lastProbeSuccessAt = nil
             return TMDBConnectionCheckResult(isConnected: false, message: error.localizedDescription)
         }
     }
 
+    /// 探测结果只借用这么短时间：网络真断了最多一秒不差地多等一分钟，不会一直装成连得上。
+    /// 这里是刻意不加锁的，最坏情况只是多跑一次探测。
+    nonisolated private static let probeReuseInterval: TimeInterval = 60
+    nonisolated(unsafe) private static var lastProbeSuccessAt: Date?
+
     // 探测用独立配置：超时更短，网络异常时尽快返回，不拖长刮削前的等待窗口
+    // 请求级超时必须显式传，否则 makeRequest 里那个 10 秒会盖掉这里的配置。
+    nonisolated private static let probeRequestTimeout: TimeInterval = 6
+
     nonisolated private static func probeSessionConfiguration() -> URLSessionConfiguration {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 8
-        config.timeoutIntervalForResource = 10
+        config.timeoutIntervalForRequest = probeRequestTimeout
+        config.timeoutIntervalForResource = 8
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         config.urlCache = nil
         config.httpCookieStorage = nil
@@ -783,14 +805,15 @@ class TMDBService {
     nonisolated private static func makeRequest(
         urlString: String,
         credential: TMDBCredentialSource,
-        customProxyURL: String? = nil
+        customProxyURL: String? = nil,
+        timeout: TimeInterval = 10
     ) -> URLRequest? {
         guard let resolvedURL = resolvedAPIURL(for: urlString, customProxyURL: customProxyURL),
               let url = authenticatedURL(for: resolvedURL, credential: credential) else {
             return nil
         }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 10
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if case .customBearerToken(let token) = credential {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")

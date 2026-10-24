@@ -1,0 +1,43 @@
+# 关键区别：媒体库这一份挂载要可写。:ro 的话转出来的字幕没地方落盘。
+services:
+  sidecar:
+    build:
+      context: .
+      dockerfile: Dockerfile        # apk 源怎么都拉不动就换成 Dockerfile.noapk
+      args:
+        # apk 源。拉不到包（ERROR: unable to select packages）就换成下面这几个国内镜像站
+        ALPINE_MIRROR: https://mirrors.aliyun.com/alpine
+        # ALPINE_MIRROR: https://mirrors.ustc.edu.cn/alpine
+        # ALPINE_MIRROR: https://mirrors.tuna.tsinghua.edu.cn/alpine
+      # 构建阶段走宿主机网络。群晖默认 ip_forward=0，bridge 网络里的构建容器
+      # 根本出不去，apk 会五个源全报 temporary error。
+      network: host
+    image: omniplay-sidecar:latest
+    container_name: omniplay-sidecar
+    restart: unless-stopped
+
+    network_mode: host
+
+    environment:
+      TZ: Asia/Shanghai
+      SIDECAR_ROOTS: /media
+      SIDECAR_DB: /var/lib/sidecar/state.db
+      SIDECAR_LANGS: zh
+      SIDECAR_PORT: "45733"
+      SIDECAR_INTERVAL: "900"
+      # 默认容器起来先停着，等页面上点「开始转档」；想让它自启即干活就解开这行：
+      # SIDECAR_AUTOSTART: "1"
+      # 剩余空间低于 500 GB 就停手，改成 0 表示不限制：
+      # SIDECAR_MIN_FREE_GB: "500"
+      # 想只让家里设备用，就设一个令牌；电视端设置里填同一个值。
+      # SIDECAR_TOKEN: "换成你自己的字符串"
+
+    volumes:
+      - ./state:/var/lib/sidecar
+      # 注意这里没有 :ro
+      - /volume4/电影:/media
+      # 用 Dockerfile.noapk 时解开下面这行，把群晖 ffmpeg 套件挂进容器
+      # （没装过这个套件就先在套件中心装 ffmpeg，或者改挂 /var/packages/MediaServer/target/usr）：
+      # - /var/packages/ffmpeg/target:/opt/ffmpeg:ro
+
+    # 想让转档更让路就调大 SIDECAR_NICE（默认 10）；要硬限 CPU 可以加一行 cpus: "1.0"

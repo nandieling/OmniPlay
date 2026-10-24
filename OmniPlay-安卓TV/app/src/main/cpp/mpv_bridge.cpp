@@ -511,7 +511,14 @@ Java_com_omniplay_tv_player_MpvBridge_nativeInitialize(JNIEnv *, jclass, jlong h
         set_option(bridge, "target-prim", "bt.709");
         set_option(bridge, "target-trc", "bt.1886");
         set_option(bridge, "tone-mapping", "bt.2446a");
-        set_option(bridge, "hdr-compute-peak", "yes");
+        // 4K HDR 在电视 GPU 上最贵的是逐帧峰值探测与高位宽 FBO。文件自带 MaxCLL /
+        // mastering display 元数据时 auto 会直接用元数据，省掉逐帧回读；FBO 退到
+        // rgb10_a2、抖动按 8bit 算，字幕层也不再混进视频帧里多 blend 一次。
+        set_option(bridge, "hdr-compute-peak", "auto");
+        set_option(bridge, "fbo-format", "rgb10_a2");
+        set_option(bridge, "dither-depth", "8");
+        set_option(bridge, "blend-subtitles", "no");
+        set_option(bridge, "sub-gauss", "0");
     }
     set_option(bridge, "ao", "audiotrack");
     set_option(bridge, "osc", "no");
@@ -867,6 +874,11 @@ Java_com_omniplay_tv_player_MpvBridge_nativeDestroy(JNIEnv *env, jclass, jlong h
         return;
     }
 
+    // 先把声音闸掉再拆。直出模式下 terminate_destroy 要等解码线程收工，万一它卡住，
+    // 至少这一刻之后已经不会有声音了，不会出现「退出软件还在放声音」。
+    if (bridge->mpv != nullptr && bridge->mpv_set_property_string != nullptr) {
+        bridge->mpv_set_property_string(bridge->mpv, "pause", "yes");
+    }
     if (bridge->surface != nullptr) {
         if (bridge->mpv != nullptr) {
             set_wid(bridge, nullptr);
@@ -889,10 +901,9 @@ Java_com_omniplay_tv_player_MpvBridge_nativeDestroy(JNIEnv *env, jclass, jlong h
     if (previousListener != nullptr) {
         env->DeleteGlobalRef(previousListener);
     }
-    if (bridge->lib != nullptr) {
-        dlclose(bridge->lib);
-        bridge->lib = nullptr;
-    }
+    // 不 dlclose：libmpv 卸载时要收尾它自己起的线程，紧挨着 terminate_destroy 卸最容易
+    // 出事（切模式时表现为卡死），而且下一次换模式还得把整个库重新定位一遍，白等。
+    // 库跟着进程活到结束，代价只是一次映射。
 
     delete bridge;
 }

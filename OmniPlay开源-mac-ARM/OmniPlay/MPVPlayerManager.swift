@@ -4,6 +4,39 @@ import Combine
 import QuartzCore
 import Libmpv
 
+/// mpv 播完那一刻的属性并不可靠：keep-open 生效时还能读到结尾的 time-pos/duration，
+/// bd:// 等源会直接回到 idle、两个值都读成 0。把「已经播完」的判断收成一个纯类型，
+/// 让界面时间轴和退出时写库用的是同一个结论。
+nonisolated struct PlaybackEndTracker {
+    struct Observation {
+        let duration: Double
+        let timePos: Double
+        let eofReason: String?
+        let idleWithoutFile: Bool
+    }
+
+    private(set) var liveDuration: Double = 0
+    private(set) var liveTimePos: Double = 0
+    private(set) var endedDuration: Double = 0
+
+    mutating func reset() { self = PlaybackEndTracker() }
+
+    mutating func observe(_ observation: Observation) {
+        let duration = observation.duration
+        let timePos = observation.timePos
+        if duration.isFinite && duration > 0 {
+            liveDuration = duration
+            // 又播回中间了（停在结尾后按播放会重头来），结尾状态作废
+            if timePos.isFinite && timePos < duration - 1 { endedDuration = 0 }
+        }
+        if timePos.isFinite && timePos > 0 { liveTimePos = timePos }
+        guard endedDuration == 0, liveDuration > 0 else { return }
+        let reachedEnd = observation.eofReason == "eof"
+            || (observation.idleWithoutFile && liveTimePos >= liveDuration - 5)
+        if reachedEnd { endedDuration = liveDuration }
+    }
+}
+
 class MPVPlayerManager: ObservableObject {
     struct PlaybackEngineSnapshot {
         let playlistIndex: Int
@@ -43,6 +76,21 @@ class MPVPlayerManager: ObservableObject {
     private var pendingDrawablePointer: Int64?
     private var retainedDrawableLayer: CAMetalLayer?
     private var isStopping = false
+    private var isRebuildingVideoOutput = false
+    // 窗口尺寸切换（拖拽、进出全屏）期间的自动暂停：等视频输出按新尺寸重建完成再自动续播
+    private(set) var isRecoveringVideoGeometry = false
+    private var geometryRecoveryGeneration = 0
+    private var geometryRecoveryLoopRunning = false
+    private var geometryRecoveryResumePlay = false
+    private var geometryRecoveryReinitSeen = false
+    private var geometryRecoveryMatchStreak = 0
+    private var geometryRecoveryArmedAt = Date.distantPast
+    private var geometryRecoveryDeadline = Date.distantPast
+    // 图层还没绑上就先按「无视频轨」加载，图层就绪后靠它把视频轨恢复回来。
+    // 这两个都只在控制队列上读写：绑定和加载都在同一条串行队列上，判定才不会有先后 races。
+    private var isDrawableBoundOnControlQueue = false
+    private var pendingVideoTrackAfterDrawable: String?
+    private var loadIssuedAt: Date?
     private var playbackActivity: NSObjectProtocol?
     
     @Published var isPlaying = false {
@@ -91,6 +139,8 @@ class MPVPlayerManager: ObservableObject {
     // until the next poll observes the same engine state.
     private var pendingIsPlayingOverride: (value: Bool, until: Date)?
     var duration: Double = 0.0
+    // 只在 mpvControlQueue 上读写：播完时引擎属性会读成 0，需要它给出确定结论。
+    private var playbackEndTracker = PlaybackEndTracker()
     
     private func log(_ message: String) {
         print("[MPVPlayerManager] \(message)")
@@ -144,10 +194,17 @@ class MPVPlayerManager: ObservableObject {
             mpv_get_property(mpv, "duration", MPV_FORMAT_DOUBLE, &dur)
             mpv_get_property(mpv, "playlist-pos", MPV_FORMAT_INT64, &playlistPos)
             let filename = self.getMpvStringProperty("filename")
+            var resolvedTimePos = timePos
+            var resolvedDuration = dur
+            if resolvedDuration <= 0, self.playbackEndTracker.endedDuration > 0 {
+                // 引擎已经播完并清掉了当前文件，进度仍要算成「看到结尾」
+                resolvedDuration = self.playbackEndTracker.endedDuration
+                resolvedTimePos = self.playbackEndTracker.endedDuration
+            }
             return PlaybackEngineSnapshot(
                 playlistIndex: max(0, Int(playlistPos)),
-                timePos: timePos,
-                duration: dur,
+                timePos: resolvedTimePos,
+                duration: resolvedDuration,
                 filename: filename
             )
         }
@@ -354,6 +411,9 @@ class MPVPlayerManager: ObservableObject {
         mpvControlQueue.setSpecific(key: controlQueueKey, value: true)
         mpv_set_option_string(mpv, "hwdec", "videotoolbox")
         applyPlaybackQualityModeAsOption()
+        // 这套 libmpv 的 audio-buffer 默认只有 0.2 秒，暂停/恢复时音频输出来不及续上
+        // 就是一下破音；播放器不需要低延迟，多给点余量换边界干净
+        mpv_set_option_string(mpv, "audio-buffer", "0.5")
         mpv_set_option_string(mpv, "target-colorspace-hint", "yes")
         mpv_set_option_string(mpv, "vo", "gpu-next")
         mpv_set_option_string(mpv, "gpu-api", "metal")
@@ -422,6 +482,14 @@ class MPVPlayerManager: ObservableObject {
             var mutableWid = wid
             let result = mpv_set_property(mpv, "wid", MPV_FORMAT_INT64, &mutableWid)
             self.log("setDrawable wid=\(wid) result=\(result)")
+            if result >= 0 {
+                self.isDrawableBoundOnControlQueue = true
+                if self.pendingVideoTrackAfterDrawable != nil {
+                    self.pendingVideoTrackAfterDrawable = nil
+                    mpv_set_property_string(mpv, "vid", "auto")
+                    self.log("图层已绑定，补上视频轨")
+                }
+            }
             DispatchQueue.main.async {
                 if self.pendingDrawablePointer == wid {
                     self.pendingDrawablePointer = nil
@@ -434,6 +502,252 @@ class MPVPlayerManager: ObservableObject {
         }
     }
     
+    /// 全屏与窗口来回切时，gpu-next 在「只有一层 CAMetalLayer、没有真窗口」这条嵌入路径上
+    /// 只在视频输出初始化那一刻读一次图层尺寸：之后光改 drawableSize、甚至把同一个 wid 再设一遍
+    /// 它都不理，于是退出全屏后仍按全屏尺寸出画（画面只剩一角），从小窗进全屏又只画左上角。
+    /// 实测（libmpv 0.41 独立探针）只有让它真正经历一段「没有视频轨」的中间状态，重建时才会重新
+    /// 读尺寸：所以 vid=no 和恢复轨道之间必须隔开一段真实时间，挨在一起会被 mpv 合成线程
+    /// 当成「没变化」，等于什么都没做。
+    /// 这段间隔只能异步等：在控制队列上 sleep 会连带堵住主线程的同步读（engineSnapshot 走
+    /// mpvControlQueue.sync）和暂停命令，按空格就成了卡死。
+    func reinitVideoOutput(reason: String) {
+        reinitVideoOutput(reason: reason, attempt: 0)
+    }
+
+    private func reinitVideoOutput(reason: String, attempt: Int) {
+        guard !isStopping, !isRebuildingVideoOutput, let layer = retainedDrawableLayer else { return }
+        runOnControlQueue { [weak self] in
+            guard let self, let mpv = self.mpv else { return }
+            let expected = Self.drawablePixelSize(layer)
+            // mpv 还没画面（没加载、刚 eof）：没有需要纠偏的视频输出
+            guard let rendered = Self.renderedOutputSize(mpv) else {
+                self.log("重建视频输出 \(reason) 跳过：mpv 暂无输出尺寸")
+                return
+            }
+            // 尺寸本来就对（刚 loadfile 完、或上一次重建已生效）就别白折腾一次解码器重建
+            if abs(rendered.width - expected.width) <= 2, abs(rendered.height - expected.height) <= 2 {
+                self.log("重建视频输出 \(reason) 跳过：mpv 输出已是 \(Int(rendered.width))x\(Int(rendered.height))")
+                return
+            }
+            // 首次加载还没出画面时不重建：vid 写入是同步命令，会排在探测/解码后面把
+            // 控制队列占住，主线程读进度就跟着转圈。等出画面再说。
+            if Self.isStillLoading(mpv), attempt < 12 {
+                self.log("重建视频输出 \(reason) 延后：还在加载（第\(attempt + 1)次）")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    self.reinitVideoOutput(reason: reason, attempt: attempt + 1)
+                }
+                return
+            }
+            self.beginGeometryRecoveryForRebuild(mpv: mpv, reason: reason)
+            self.isRebuildingVideoOutput = true
+            // 多视频轨的片子（画中画等）要把当前选的轨原样还回去，不能一律退回 auto
+            let restore = Self.videoTrackSelectionValue(Self.currentVideoTrackProperty(mpv))
+            let closedAt = Date()
+            mpv_set_property_string(mpv, "vid", "no")
+            self.log("重建视频输出 reason=\(reason) 先关视频轨 restore=\(restore) 图层=\(Int(expected.width))x\(Int(expected.height)) "
+                + "mpv原输出=\(Int(rendered.width))x\(Int(rendered.height)) 关轨耗时=\(Int(Date().timeIntervalSince(closedAt) * 1000))ms")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                self.finishVideoOutputReinit(reason: reason, restore: restore, layer: layer, attempt: 1)
+            }
+        }
+    }
+
+    /// 重建的后半程：主线程坐实图层尺寸 → 控制队列确认 mpv 真的落到「无视频轨」再恢复轨道。
+    /// 没落到就再等一拍，最多三次，避免两次写又被挤成一次「没变化」。
+    private func finishVideoOutputReinit(reason: String, restore: String, layer: CAMetalLayer, attempt: Int) {
+        DispatchQueue.main.async {
+            guard !self.isStopping else {
+                self.isRebuildingVideoOutput = false
+                return
+            }
+            // 恢复轨道前重写一次图层尺寸：系统会在 resize 过程中把 drawableSize 短暂写成很小的值
+            Self.reassertLayerGeometry(layer)
+            self.runOnControlQueue {
+                guard let mpv = self.mpv, !self.isStopping else {
+                    self.isRebuildingVideoOutput = false
+                    return
+                }
+                let observed = Self.currentVideoTrackProperty(mpv) == "no"
+                if !observed && attempt < 3 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                        self.finishVideoOutputReinit(reason: reason, restore: restore, layer: layer, attempt: attempt + 1)
+                    }
+                    return
+                }
+                let restoredAt = Date()
+                let result = mpv_set_property_string(mpv, "vid", restore)
+                self.log("重建视频输出 reason=\(reason) 恢复 observed=\(observed) attempt=\(attempt) result=\(result) "
+                    + "恢复耗时=\(Int(Date().timeIntervalSince(restoredAt) * 1000))ms "
+                    + "即时输出=\(Self.stringProperty(mpv, "osd-dimensions") ?? "<nil>")（重建是异步的，这一项稍后才更新）")
+                self.isRebuildingVideoOutput = false
+            }
+        }
+    }
+
+    /// 窗口尺寸要变了（拖拽改大小、进出全屏）：正在播就先暂停，交给重建完成后自动续播。
+    /// 原来是固定延时 0.5 秒就续播，比重建本身还早，等于先把错比例的画面放出来。
+    func pauseForGeometryChange(reason: String) {
+        guard !isStopping else { return }
+        runOnControlQueue { [weak self] in
+            guard let self, let mpv = self.mpv else { return }
+            if self.isRecoveringVideoGeometry {
+                self.geometryRecoveryDeadline = Date().addingTimeInterval(4)
+                return
+            }
+            self.armGeometryRecovery(mpv: mpv, reason: reason)
+        }
+    }
+
+    /// 重建已经确定要做：先补一次暂停，再进入「等输出尺寸对上图层」的轮询
+    private func beginGeometryRecoveryForRebuild(mpv: OpaquePointer, reason: String) {
+        if !isRecoveringVideoGeometry {
+            armGeometryRecovery(mpv: mpv, reason: reason)
+        }
+        geometryRecoveryReinitSeen = true
+        geometryRecoveryMatchStreak = 0
+        geometryRecoveryDeadline = Date().addingTimeInterval(4)
+    }
+
+    /// 只能在控制队列上调用
+    private func armGeometryRecovery(mpv: OpaquePointer, reason: String) {
+        let wasPlaying = Self.stringProperty(mpv, "pause") != "yes"
+        geometryRecoveryGeneration += 1
+        geometryRecoveryResumePlay = wasPlaying
+        geometryRecoveryReinitSeen = false
+        geometryRecoveryMatchStreak = 0
+        geometryRecoveryArmedAt = Date()
+        geometryRecoveryDeadline = Date().addingTimeInterval(4)
+        isRecoveringVideoGeometry = true
+        if wasPlaying {
+            mpv_set_property_string(mpv, "pause", "yes")
+            DispatchQueue.main.async {
+                self.pendingIsPlayingOverride = (false, Date().addingTimeInterval(2))
+                self.isPlaying = false
+            }
+        }
+        log("尺寸切换 \(reason)：先暂停，等视频输出按新尺寸重建完成后续播")
+        guard !geometryRecoveryLoopRunning else { return }
+        geometryRecoveryLoopRunning = true
+        runGeometryRecoveryTick(generation: geometryRecoveryGeneration)
+    }
+
+    /// 每 0.15 秒问一次 mpv 的输出尺寸；连续两次对上图层尺寸才续播，最长等 4 秒
+    private func runGeometryRecoveryTick(generation: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            guard !self.isStopping, self.isRecoveringVideoGeometry, generation == self.geometryRecoveryGeneration else {
+                self.geometryRecoveryLoopRunning = false
+                return
+            }
+            self.runOnControlQueue {
+                guard let mpv = self.mpv, !self.isStopping else {
+                    self.geometryRecoveryLoopRunning = false
+                    self.finishGeometryRecovery(note: "播放器已停止")
+                    return
+                }
+                let elapsed = Date().timeIntervalSince(self.geometryRecoveryArmedAt)
+                let rendered = Self.renderedOutputSize(mpv)
+                if self.isRebuildingVideoOutput {
+                    self.geometryRecoveryMatchStreak = 0
+                } else if let layer = self.retainedDrawableLayer, let rendered {
+                    let expected = Self.drawablePixelSize(layer)
+                    let matched = abs(rendered.width - expected.width) <= 2 && abs(rendered.height - expected.height) <= 2
+                    self.geometryRecoveryMatchStreak = matched ? self.geometryRecoveryMatchStreak + 1 : 0
+                } else {
+                    self.geometryRecoveryMatchStreak = 0
+                }
+                let settled = elapsed >= 0.6 && self.geometryRecoveryMatchStreak >= 2
+                let nothingToFix = elapsed >= 1.2 && !self.geometryRecoveryReinitSeen
+                    && !self.isRebuildingVideoOutput && rendered == nil
+                let timedOut = Date() >= self.geometryRecoveryDeadline
+                if settled || nothingToFix || timedOut {
+                    let note = settled ? "输出尺寸已跟上图层" : (nothingToFix ? "没有需要纠偏的画面" : "等待超时")
+                    self.log("尺寸切换续播：\(note)，暂停了 \(Int(elapsed * 1000))ms")
+                    self.geometryRecoveryLoopRunning = false
+                    self.finishGeometryRecovery(note: note)
+                    return
+                }
+                self.runGeometryRecoveryTick(generation: generation)
+            }
+        }
+    }
+
+    /// 只有「暂停是我们按的、期间用户没自己动过播放键」才自动续播
+    private func finishGeometryRecovery(note: String) {
+        guard isRecoveringVideoGeometry else { return }
+        isRecoveringVideoGeometry = false
+        let didRebuild = geometryRecoveryReinitSeen
+        geometryRecoveryReinitSeen = false
+        geometryRecoveryMatchStreak = 0
+        guard geometryRecoveryResumePlay else { return }
+        geometryRecoveryResumePlay = false
+        if let mpv {
+            // 重建过视频输出的，音频管线里还压着旧尺寸那段时间的音频，直接续播会音画错位。
+            // 停在原地做一次精确 seek，把音视频两条管线一起冲干净（位置不变，实测可接受）。
+            if didRebuild, let raw = Self.stringProperty(mpv, "playback-time"),
+               let position = Double(raw) {
+                let rc = mpv_command_string(mpv, "seek \(position) absolute+exact")
+                if rc != 0 {
+                    log("尺寸切换续播：原地 seek 未执行（\(String(cString: mpv_error_string(rc)))），音画可能短暂错位")
+                }
+            }
+            mpv_set_property_string(mpv, "pause", "no")
+        }
+        DispatchQueue.main.async {
+            self.pendingIsPlayingOverride = (true, Date().addingTimeInterval(0.75))
+            self.isPlaying = true
+        }
+    }
+
+    private static func drawablePixelSize(_ layer: CAMetalLayer) -> CGSize {
+        CGSize(width: layer.drawableSize.width.rounded(), height: layer.drawableSize.height.rounded())
+    }
+
+    /// mpv 当前视频输出的像素尺寸（osd-dimensions 里的 w/h）
+    private static func renderedOutputSize(_ mpv: OpaquePointer?) -> CGSize? {
+        guard let json = stringProperty(mpv, "osd-dimensions"),
+              let data = json.data(using: .utf8),
+              let node = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let width = node["w"] as? Int, let height = node["h"] as? Int,
+              width > 1, height > 1 else { return nil }
+        return CGSize(width: width, height: height)
+    }
+
+    /// 已经 loadfile 但还没出第一帧：time-pos 读不到，而播放器又不是空闲状态
+    private static func isStillLoading(_ mpv: OpaquePointer?) -> Bool {
+        guard stringProperty(mpv, "idle-active") != "yes" else { return false }
+        return stringProperty(mpv, "time-pos") == nil
+    }
+
+    /// 用图层当前 bounds 重算并写回 drawableSize（主线程调用）
+    private static func reassertLayerGeometry(_ layer: CAMetalLayer) {
+        let size = layer.bounds.size
+        guard size.width > 1, size.height > 1 else { return }
+        let scale = layer.contentsScale > 0 ? layer.contentsScale : (NSScreen.main?.backingScaleFactor ?? 2)
+        layer.drawableSize = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+    }
+
+    private static func drawableSizeString(_ layer: CAMetalLayer) -> String {
+        "\(Int(layer.drawableSize.width))x\(Int(layer.drawableSize.height))"
+    }
+
+    /// 读 mpv 的字符串属性，内部负责释放返回的 C 字符串
+    private static func currentVideoTrackProperty(_ mpv: OpaquePointer?) -> String? {
+        stringProperty(mpv, "vid")
+    }
+
+    static func stringProperty(_ mpv: OpaquePointer?, _ name: String) -> String? {
+        guard let raw = mpv_get_property_string(mpv, name) else { return nil }
+        let value = String(cString: raw)
+        mpv_free(UnsafeMutableRawPointer(raw))
+        return value
+    }
+
+    /// vid 的取值是 "auto"/"no" 或轨道 ID：只有正数 ID 值得原样恢复，其余一律回 auto
+    static func videoTrackSelectionValue(_ raw: String?) -> String {
+        guard let raw, let id = Int64(raw), id > 0 else { return "auto" }
+        return String(id)
+    }
+
     func loadFiles(
         urls: [URL],
         startPosition: Double = 0.0,
@@ -448,7 +762,8 @@ class MPVPlayerManager: ObservableObject {
                 self?.updatePlaybackState()
             }
         }
-        log("loadFiles urls=\(urls.count) first=\(mpvLogArgument(for: urls[0])) start=\(startPosition) isBluRay=\(isBluRay) blurayRoot=\(blurayRootPath.map { mpvLogArgument(for: $0) } ?? "nil")")
+        let hasDrawable = drawableBindVersion > 0
+        log("loadFiles urls=\(urls.count) first=\(mpvLogArgument(for: urls[0])) start=\(startPosition) isBluRay=\(isBluRay) blurayRoot=\(blurayRootPath.map { mpvLogArgument(for: $0) } ?? "nil") drawable=\(hasDrawable)")
         hasAppliedDefaultSubtitleForCurrentLoad = false
         hasUserSelectedSubtitleTrack = false
         currentTrackPreferenceKey = trackPreferenceKey
@@ -466,6 +781,14 @@ class MPVPlayerManager: ObservableObject {
             || firstName.contains("profile 5")
         runOnControlQueue { [weak self] in
             guard let self else { return }
+            self.playbackEndTracker.reset()
+            // 单文件播放才让 mpv 停在结尾（保住最后一帧和结尾的 time-pos）；
+            // 多文件播放表和蓝光标题要照常自动切下一个，不能被 keep-open 拦下。
+            let keepOpen = (urls.count == 1 && !isBluRay) ? "yes" : "no"
+            let keepOpenResult = mpv_set_property_string(self.mpv, "options/keep-open", keepOpen)
+            if keepOpenResult < 0 {
+                self.log("设置 options/keep-open=" + keepOpen + " 失败：" + String(cString: mpv_error_string(keepOpenResult)))
+            }
             self.applyPlaybackQualityModeAtRuntime()
             mpv_set_property_string(self.mpv, "vd-lavc-o", isDolbyVisionLike ? "enable_dovi=0" : "")
             mpv_set_property_string(self.mpv, "hwdec", "videotoolbox")
@@ -481,7 +804,16 @@ class MPVPlayerManager: ObservableObject {
                 ? Date().addingTimeInterval(self.initialSeekTimeout)
                 : nil
             mpv_set_property_string(self.mpv, "start", "0")
-            
+            if self.isDrawableBoundOnControlQueue {
+                self.pendingVideoTrackAfterDrawable = nil
+            } else {
+                // 图层还没绑上：先按「没有视频轨」打开，容器探测和音频缓冲就能跟
+                // 建窗口、绑图层并行；setDrawable 成功后立刻把视频轨放回来。
+                self.pendingVideoTrackAfterDrawable = "auto"
+                mpv_set_property_string(self.mpv, "vid", "no")
+            }
+            self.loadIssuedAt = Date()
+
             if isBluRay, let rootPath = blurayRootPath {
                 let rootArgument = self.mpvStringArgument(rootPath, stripUserInfo: shouldStripUserInfo)
                 mpv_set_property_string(self.mpv, "bluray-device", rootArgument)
@@ -549,6 +881,7 @@ class MPVPlayerManager: ObservableObject {
         // a toggle from it may issue the wrong transition and make the button
         // flicker when the next poll arrives.
         let targetIsPlaying = !isPlaying
+        geometryRecoveryResumePlay = false
         pendingIsPlayingOverride = (targetIsPlaying, Date().addingTimeInterval(0.75))
         isPlaying = targetIsPlaying
         runOnControlQueue { [weak self] in
@@ -559,6 +892,7 @@ class MPVPlayerManager: ObservableObject {
 
     func setPaused(_ paused: Bool) {
         guard !isStopping else { return }
+        geometryRecoveryResumePlay = false
         DispatchQueue.main.async {
             self.pendingIsPlayingOverride = (!paused, Date().addingTimeInterval(0.75))
             self.isPlaying = !paused
@@ -588,6 +922,8 @@ class MPVPlayerManager: ObservableObject {
 
         DispatchQueue.main.async {
             self.pendingIsPlayingOverride = nil
+            self.isRecoveringVideoGeometry = false
+            self.geometryRecoveryResumePlay = false
             self.lastDrawablePointer = nil
             self.pendingDrawablePointer = nil
             self.retainedDrawableLayer = nil
@@ -653,6 +989,8 @@ class MPVPlayerManager: ObservableObject {
     }
 
     private func clearPendingInitialSeek() {
+        pendingVideoTrackAfterDrawable = nil
+        loadIssuedAt = nil
         pendingInitialSeekPosition = nil
         pendingInitialSeekFilename = nil
         pendingInitialSeekAttempts = 0
@@ -761,6 +1099,17 @@ class MPVPlayerManager: ObservableObject {
             mpv_get_property(mpv, "pause", MPV_FORMAT_FLAG, &isPaused)
             mpv_get_property(mpv, "idle-active", MPV_FORMAT_FLAG, &isIdleActive)
             let filename = self.getMpvStringProperty("filename")
+            let eofReason = self.getMpvStringProperty("eof-reason")
+            self.playbackEndTracker.observe(PlaybackEndTracker.Observation(
+                duration: dur,
+                timePos: timePos,
+                eofReason: eofReason,
+                idleWithoutFile: isIdleActive == 1 && (filename?.isEmpty ?? true)
+            ))
+            if let startedAt = self.loadIssuedAt, dur.isFinite, dur > 0 {
+                self.loadIssuedAt = nil
+                self.log(String(format: "起播计时：loadfile→拿到时长 %.0fms", Date().timeIntervalSince(startedAt) * 1000))
+            }
             self.applyPendingInitialSeekIfNeeded(timePos: timePos, duration: dur, playlistPos: playlistPos, filename: filename)
 
             DispatchQueue.main.async {
@@ -792,6 +1141,13 @@ class MPVPlayerManager: ObservableObject {
                     self.position = Float(min(max(validTimePos / validDuration, 0), 1))
                     self.currentTime = self.formatTime(validTimePos)
                     self.remainingTime = "-" + self.formatTime(max(0, validDuration - validTimePos))
+                } else if self.playbackEndTracker.endedDuration > 0 {
+                    // 引擎已经丢掉当前文件：UI 钉在结尾，别让时间轴停在半路
+                    let endedDuration = self.playbackEndTracker.endedDuration
+                    self.duration = endedDuration
+                    self.position = 1
+                    self.currentTime = self.formatTime(endedDuration)
+                    self.remainingTime = "-00:00"
                 }
                 if let name = filename, name != self.currentFilename {
                     self.currentFilename = name

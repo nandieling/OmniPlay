@@ -7,8 +7,6 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>觅影需要访问局域网设备（如 NAS、WebDAV、Plex、Emby、Jellyfin）以连接并播放你的媒体文件。</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_smb._tcp</string>
@@ -19,6 +17,30 @@
 		<string>_plexmediasvr._tcp</string>
 		<string>_jellyfin._tcp</string>
 		<string>_emby._tcp</string>
+	</array>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>视频文件</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.movie</string>
+				<string>public.audiovisual-content</string>
+				<string>public.iso-image</string>
+				<string>org.matroska.mkv</string>
+				<string>com.real.realmedia-vbr</string>
+				<string>com.adobe.flash.video</string>
+				<string>org.webmproject.webm</string>
+				<string>public.avchd-mpeg-2-transport-stream</string>
+				<string>public.mpeg-2-transport-stream</string>
+				<string>com.microsoft.windows-media-wmv</string>
+			</array>
+		</dict>
 	</array>
 </dict>
 </plist>

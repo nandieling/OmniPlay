@@ -1,6 +1,7 @@
 package com.omniplay.tv;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
@@ -43,6 +44,7 @@ import android.widget.FrameLayout;
 import android.widget.GridLayout;
 import android.widget.ImageButton;
 import android.widget.ImageView;
+import android.widget.Toast;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -55,7 +57,9 @@ import com.omniplay.tv.data.Models;
 import com.omniplay.tv.data.LocalPlayApi;
 import com.omniplay.tv.iso.RemoteIsoStreamServer;
 import com.omniplay.tv.local.LanDiscovery;
+import com.omniplay.tv.local.DoubanClient;
 import com.omniplay.tv.local.LocalEngine;
+import com.omniplay.tv.local.LocalMediaNameParser;
 import com.omniplay.tv.local.PhoneInputServer;
 import com.omniplay.tv.local.QrCode;
 import com.omniplay.tv.local.BrowseEntry;
@@ -71,6 +75,7 @@ import com.omniplay.tv.player.MpvVideoView;
 import com.omniplay.tv.subtitle.PgsSubtitleCue;
 import com.omniplay.tv.subtitle.PgsSubtitleParser;
 import com.omniplay.tv.subtitle.PgsSubtitleView;
+import com.omniplay.tv.ui.Icons;
 import com.omniplay.tv.ui.ImageLoader;
 import com.omniplay.tv.ui.FocusGrid;
 import com.omniplay.tv.ui.KindIcons;
@@ -213,6 +218,8 @@ public final class MainActivity extends Activity {
     private TextView playerCurrentTime;
     private TextView playerTotalTime;
     private TextView playerStatusText;
+    private Button playerModeButton;
+    private Button playerAspectButton;
     private TextView playerSubtitleOverlay;
     private PgsSubtitleView playerPgsSubtitleOverlay;
     private ImageButton playerPlayPauseButton;
@@ -241,12 +248,17 @@ public final class MainActivity extends Activity {
     // Persistent home chrome: rebuilt once, so sort / search toggles never tear the page down.
     private LinearLayout homeControls;
     private LinearLayout homeBody;
-    private Button homeSearchToggle;
-    private Button homeSortToggle;
-    private Button homeDirectionToggle;
-    private Button homeScanToggle;
-    private Button homeSourcesToggle;
-    private Button homeSettingsToggle;
+    private ImageView homeSearchToggle;
+    private ImageView homeSortToggle;
+    private ImageView homeDirectionToggle;
+    private ImageView homeScanToggle;
+    private ImageView homeSourcesToggle;
+    private ImageView homeSettingsToggle;
+    /** 左上角那行扫描刮削进度：转圈 + 一句状态，只在干活时出现（mac 版同一位置）。 */
+    private LinearLayout homeProgressRow;
+    private ImageView homeProgressView;
+    private android.animation.ObjectAnimator homeProgressSpin;
+    private android.animation.ObjectAnimator scanSpin;
     private EditText homeSearchInput;
     private boolean advancingPlaybackPart;
     private Screen screen = Screen.SETUP;
@@ -268,7 +280,19 @@ public final class MainActivity extends Activity {
     private TextView homeStatusView;
     /** 在屏海报卡片，按条目 id 索引；刮削过程中就地刷新用。 */
     private final Map<String, List<PosterViews>> homePosterViews = new HashMap<>();
-    private boolean libraryPatchInFlight;
+    /** 刮削期间多久重读一次媒体库：进度回调本身已经限到 250ms，这里再低就只是白跑查询。 */
+    private static final long WALL_PATCH_INTERVAL_MS = 700;
+    /**
+     * 每次发起「重读媒体库」都 +1，落地时只对最新那一次认账。以前用 in-flight 标记把并发读取
+     * 直接丢掉，结果移除媒体源之后那次新鲜的读取被丢掉、旧的那次反而后落地，墙上就多出一张
+     * 已经不该存在的卡片。
+     */
+    private long libraryFetchSeq;
+    private boolean libraryFetchInFlight;
+    private boolean libraryFetchQueued;
+    private boolean libraryFetchInPlace;
+    private boolean libraryFetchShowError;
+    private TextView homeLibraryCountView;
     private long lastLibraryPatchAt;
     private boolean startupSyncStarted;
     private final Set<String> episodeMetaAttempts = ConcurrentHashMap.newKeySet();
@@ -284,10 +308,6 @@ public final class MainActivity extends Activity {
     private final Object lanLock = new Object();
     private boolean lanDiscovering;
     private final List<LanDiscovery.LanDevice> lanDevices = new ArrayList<>();
-    /** 海报下的观看状态：○ 未看、◐ 未看完、✓ 已看，只有图形没有文字。 */
-    private static final String WATCHED_GLYPH_NONE = "\u25CB";
-    private static final String WATCHED_GLYPH_PART = "\u25D0";
-    private static final String WATCHED_GLYPH_DONE = "\u2713";
     private int lanScanToken = 0;
     /** 扫描结果往哪儿摆：首屏设置页，还是媒体源弹窗。 */
     private static final int LAN_SETUP = 0;
@@ -333,6 +353,7 @@ public final class MainActivity extends Activity {
     private boolean playerSeekLongPressActive;
     private int playerHorizontalKeyCode;
     private int playerSeekDirection;
+    private long playerSeekHoldStartedAtMs;
     private int selectedAudioTrackOrdinal = -1;
     private int selectedEmbeddedSubtitleOrdinal = -1;
     private String selectedRuntimeAudioId;
@@ -378,6 +399,7 @@ public final class MainActivity extends Activity {
         root.setClipChildren(false);
         root.setClipToPadding(false);
         overlays = new Overlays(root, theme, widgets, focusGrid);
+        overlays.onStackChanged = this::afterOverlayStackChanged;
         applyAppBackground();
         setContentView(root);
 
@@ -386,7 +408,7 @@ public final class MainActivity extends Activity {
         showHome();
         String crash = CrashLog.take(this);
         if (!crash.isEmpty()) {
-            showToast("上次异常退出：" + crash.replace('\n', ' ').trim());
+            showToast("上次运行异常退出（已记入日志）");
         }
     }
 
@@ -422,6 +444,16 @@ public final class MainActivity extends Activity {
         long pixels = (long) mode.getPhysicalWidth() * (long) mode.getPhysicalHeight();
         long refresh = Math.round(mode.getRefreshRate());
         return pixels * 1000L + refresh;
+    }
+
+    @Override
+    protected void onPause() {
+        // 离开播放页（按 Home、回主页、切去别的软件）声音就得停。onStop 也会兜一次，
+        // 但 onPause 才是「用户已经不看这个画面了」的第一个确定信号。
+        if (screen == Screen.PLAYER) {
+            closePlayer();
+        }
+        super.onPause();
     }
 
     @Override
@@ -668,8 +700,8 @@ public final class MainActivity extends Activity {
             button.setTextColor(hasFocus ? COLOR_FOCUS : (selected ? COLOR_TEXT : COLOR_MUTED));
             int restFill = selected ? COLOR_FOCUS_SOFT : COLOR_SURFACE;
             focusedView.setBackground(rounded(
-                    hasFocus ? Theme.darker(restFill, Theme.FOCUS_DARKEN) : restFill,
-                    hasFocus || selected ? COLOR_FOCUS : COLOR_BORDER,
+                    hasFocus ? Theme.focusFill(restFill) : restFill,
+                    selected ? COLOR_FOCUS : COLOR_BORDER,
                     dp(1), dp(10)));
             focusedView.setElevation(hasFocus ? dp(6) : 0);
         });
@@ -1220,7 +1252,9 @@ public final class MainActivity extends Activity {
         browserPathText = widgets.caption(displayPathForBrowser(current), COLOR_SUBTLE);
         browserPathText.setMaxLines(2);
         browserPathText.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-        panel.addView(browserPathText, margin(matchWidth(), 0, 0, 0, sdp(10)));
+        panel.addView(browserPathText, margin(matchWidth(), 0, 0, 0, sdp(6)));
+        panel.addView(widgets.caption("点文件夹进入下一级，点右侧星标直接挂载这一级。", COLOR_SUBTLE),
+                margin(matchWidth(), 0, 0, 0, sdp(8)));
 
         ScrollView listScroll = new ScrollView(this);
         listScroll.setBackground(rounded(COLOR_SURFACE_ALT, COLOR_BORDER, dp(1), dp(10)));
@@ -1264,8 +1298,10 @@ public final class MainActivity extends Activity {
         if (browserMountButton != null) {
             rows.add(Arrays.asList(browserMountButton, browserBackButton, browserCancelButton));
         }
-        for (Button item : browserItemButtons) {
-            rows.add(Collections.singletonList(item));
+        for (int index = 0; index < browserItemButtons.size(); index++) {
+            Button open = browserItemButtons.get(index);
+            ImageView star = index < browserStarButtons.size() ? browserStarButtons.get(index) : null;
+            rows.add(star == null ? Collections.singletonList(open) : Arrays.asList(open, star));
         }
         return rows;
     }
@@ -1364,6 +1400,7 @@ public final class MainActivity extends Activity {
         }
         browserListContainer.removeAllViews();
         browserItemButtons.clear();
+        browserStarButtons.clear();
         if (browserPathText != null) {
             browserPathText.setText(displayPathForBrowser(browserCurrent));
         }
@@ -1375,10 +1412,28 @@ public final class MainActivity extends Activity {
             browserItemButtons.add(up);
         }
         for (BrowseEntry item : browserItems) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setClipChildren(false);
+            row.setClipToPadding(false);
+
             Button button = browserItemButton(item.name);
             button.setOnClickListener(view -> browserNavigateInto(item));
-            browserListContainer.addView(button, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, sdp(56)));
+            row.addView(button, new LinearLayout.LayoutParams(0, sdp(56), 1f));
+
+            // 星标 = 直接挂载这一级（mac 版目录列表上那颗 star/star.fill）。以前要先进目录
+            // 再点「选择此目录」，想挂的是父目录就得进进出出，遥控器上好几步。
+            boolean mounted = isBrowserEntryMounted(item);
+            ImageView star = widgets.iconButton(Icons.of(mounted ? Icons.Kind.STAR_FILL : Icons.Kind.STAR,
+                    sdp(21), mounted ? COLOR_ACCENT : COLOR_MUTED, dp(1.7f)),
+                    (mounted ? "已挂载 · " : "挂载这个目录 · ") + item.name, mounted);
+            star.setOnClickListener(view -> mountBrowserEntry(item));
+            row.addView(star, margin(new LinearLayout.LayoutParams(sdp(64), sdp(56)), sdp(6), 0, 0, 0));
+
+            browserListContainer.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, sdp(56)));
             browserItemButtons.add(button);
+            browserStarButtons.add(star);
         }
         if (browserItems.isEmpty()) {
             String currentMessage = browserMessage.getText().toString();
@@ -1417,6 +1472,33 @@ public final class MainActivity extends Activity {
         if (browserOverlay != null) {
             browserOverlay.redeclare(browserFocusRows());
         }
+    }
+
+    private final List<ImageView> browserStarButtons = new ArrayList<>();
+
+    /** 这个目录是不是已经挂上了：挂过的星标画成实心，免得同一级挂两次。 */
+    private boolean isBrowserEntryMounted(BrowseEntry entry) {
+        String path = browserKind.equals("local") ? entry.url : trimTrailingSlash(entry.url);
+        for (LocalEngine.Source source : api.engine().sources()) {
+            if (browserKind.equals(source.kind) && path.equals(trimTrailingSlash(source.path))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 点星标：不进去，直接把这一级挂成媒体源，随后后台扫描刮削。 */
+    private void mountBrowserEntry(BrowseEntry entry) {
+        String path = browserKind.equals("local") ? entry.url : trimTrailingSlash(entry.url);
+        if (path.isEmpty()) {
+            return;
+        }
+        String kind = browserKind;
+        String username = browserUser;
+        String password = browserPass;
+        String label = entry.name;
+        closeFolderBrowser();
+        mountMediaSource(kind, path, username, password, label);
     }
 
     /** Enter a listed folder; the entry already carries the exact URL to list next. */
@@ -1548,10 +1630,11 @@ public final class MainActivity extends Activity {
             savedConnections.recordMount(kind, path, label, username, password);
         }
         if (sourcesOverlay != null) {
-            // 弹窗里挂载：不跳页，新源立刻出现在列表里，扫描刮削就在弹窗里跑起来。
+            // 弹窗里挂载：不跳页，新源立刻出现在列表里，扫描刮削就在后台跑起来。
+            // 进度只写首页左上角那一行——弹窗里再放一条，同一件事就有两个进度条了。
             renderSourcesOverlay();
             refreshHomeLibrary(false);
-            startScanAndScrape(sourcesOverlay == null ? null : sourcesOverlay.statusLine());
+            startScanAndScrape(null);
             return;
         }
         // 全屏 loading 挡在海报墙前面：几百个文件的 WebDAV 能挂在那儿几分钟，一张海报都看不到。
@@ -1566,7 +1649,11 @@ public final class MainActivity extends Activity {
         boolean returningFromDetail = currentDetail != null;
         currentDetail = null;
         selectedSeasonId = "";
-        homeScrollY = 0;
+        if (!returningFromDetail) {
+            homeScrollY = 0;
+            pendingHomeScrollRestore = -1;
+            pendingHomeFocusId = null;
+        }
         destroyPlayer();
         boolean hasVisibleLibrary = !libraryItems.isEmpty();
         if (!hasVisibleLibrary) {
@@ -1583,30 +1670,93 @@ public final class MainActivity extends Activity {
             showLoading("正在加载媒体库");
         }
 
-        if (!returningFromDetail || !hasVisibleLibrary) {
-            refreshHomeLibrary(!hasVisibleLibrary);
+        // 一次只让一条读取活着（libraryFetchSeq 后发先至）。两条都发出去的话，后发的
+        // 「就地补丁」会赢，而它只往已有的卡片上刷，库是空的就什么都不做——首页就永远
+        // 停在「正在加载媒体库」上。所以首屏交给整页读取，只有墙上已经有卡片时才补丁。
+        if (hasVisibleLibrary) {
+            // 刮削是在后台推进的：从详情页或播放器回到首页时，手上这份名单可能已经是刮削前那一版，
+            // 不重读的话卡片就一直停在占位字母上（详情页每次现查数据库，所以它看起来是「已刮削」）。
+            refreshLibraryInPlace();
+        } else {
+            refreshHomeLibrary(true);
         }
-        // 刮削是在后台推进的：从详情页或播放器回到首页时，手上这份名单可能已经是刮削前那一版，
-        // 不重读的话卡片就一直停在占位字母上（详情页每次现查数据库，所以它看起来是「已刮削」）。
-        refreshLibraryInPlace();
         startStartupSync();
     }
 
     private void refreshHomeLibrary(boolean showErrorScreen) {
-        runAsync(
-                () -> api.getLibraryItems(),
-                items -> {
-                    if (screen != Screen.HOME) {
-                        return;
-                    }
+        requestLibraryFetch(false, showErrorScreen);
+    }
+
+    /**
+     * 重读媒体库的唯一入口：同一时刻只让一条读取在飞，期间再来的请求先记账，等这条落地后补一次。
+     *
+     * <p>上一版是「后发先至，先发的结果作废」。扫描期间进度每 0.7 秒就催一次重读，而媒体库越大
+     * 整库重读越慢：一旦慢过催促间隔，每条结果都会在落地前被下一条顶掉，一个都不认账——于是
+     * 「已发现 N 个文件」一直在涨，首页那个「N 部」和海报墙却彻底不动。合并成一条在飞 + 落地后
+     * 按账补读，既不会互相顶掉，也不会漏掉最后那次变更。
+     */
+    private void requestLibraryFetch(boolean inPlace, boolean showErrorScreen) {
+        if (libraryFetchInFlight) {
+            libraryFetchQueued = true;
+            libraryFetchInPlace = inPlace;
+            libraryFetchShowError = showErrorScreen;
+            return;
+        }
+        libraryFetchInFlight = true;
+        libraryFetchQueued = false;
+        runAsync(() -> api.getLibraryItems(), items -> {
+            libraryFetchInFlight = false;
+            boolean trailing = libraryFetchQueued;
+            boolean nextInPlace = libraryFetchInPlace;
+            boolean nextShowError = libraryFetchShowError;
+            libraryFetchQueued = false;
+            if (screen != Screen.HOME) {
+                return;
+            }
+            updateLibraryCountLabel();
+            if (items != null) {
+                if (inPlace) {
+                    applyLibraryPatch(items);
+                } else {
                     libraryItems = new ArrayList<>(items);
                     renderHomeContent();
-                },
-                error -> {
-                    if (showErrorScreen) {
-                        showSetup(error.getMessage());
-                    }
-                });
+                }
+            }
+            if (trailing && screen == Screen.HOME) {
+                requestLibraryFetch(nextInPlace, nextShowError);
+            }
+        }, error -> {
+            libraryFetchInFlight = false;
+            libraryFetchQueued = false;
+            if (showErrorScreen && screen != Screen.HOME) {
+                showSetup(error.getMessage());
+            } else if (showErrorScreen && libraryItems.isEmpty()) {
+                showSetup(error.getMessage());
+            }
+        });
+    }
+
+    /** 「所有影视 N 部」：走一条 COUNT，不为了一个数字把整库重读一遍。 */
+    private void updateLibraryCountLabel() {
+        if (homeLibraryCountView == null) {
+            return;
+        }
+        int count = api.engine().libraryItemCount();
+        homeLibraryCountView.setText(count + " 部");
+    }
+
+    /** 就地补卡片：条目增减了就重建整面墙，否则只重绑已有卡片。 */
+    private void applyLibraryPatch(List<Models.LibraryItem> items) {
+        if (items.isEmpty()) {
+            // 移除最后一个媒体源、清空索引之后就是这种局面：没有卡片可以就地更新，
+            // 得让整页重建一次，否则首页会一直挂着上一个源的旧海报。
+            if (!libraryItems.isEmpty()) {
+                libraryItems = new ArrayList<>(items);
+                scheduleWallRebuild();
+            }
+            return;
+        }
+        patchLibraryViews(new ArrayList<>(items));
     }
 
     /**
@@ -1676,16 +1826,37 @@ public final class MainActivity extends Activity {
         toolbar.setClipToPadding(false);
         toolbar.setPadding(headerInset, 0, headerInset, 0);
         page.addView(toolbar, margin(matchWidth(), 0, sdp(4), 0, sdp(14)));
-        TextView brand = widgets.text("觅影 OmniPlay", theme.ssp(Widgets.TEXT_TITLE), Typeface.BOLD, COLOR_TEXT);
-        toolbar.addView(brand, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        // 左上角不再放品牌字：mac 版那个位置是扫描刮削进度（小转圈 + 一行状态），照它做。
+        if (homeProgressSpin != null) {
+            homeProgressSpin.cancel();
+            homeProgressSpin = null;
+        }
+        homeProgressRow = new LinearLayout(this);
+        homeProgressRow.setOrientation(LinearLayout.HORIZONTAL);
+        homeProgressRow.setGravity(Gravity.CENTER_VERTICAL);
+        homeProgressRow.setClipChildren(false);
+        homeProgressRow.setClipToPadding(false);
+        homeProgressView = new ImageView(this);
+        homeProgressView.setImageDrawable(Icons.of(Icons.Kind.SPINNER, sdp(17), COLOR_ACCENT, dp(2f)));
+        homeProgressRow.addView(homeProgressView, new LinearLayout.LayoutParams(sdp(19), sdp(19)));
+        homeStatusView = widgets.caption("", Theme.withAlpha(COLOR_TEXT, 219));
+        homeStatusView.setMaxLines(1);
+        homeStatusView.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        statusParams.leftMargin = sdp(10);
+        homeProgressRow.addView(homeStatusView, statusParams);
+        toolbar.addView(homeProgressRow, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        homeProgressRow.setVisibility(View.INVISIBLE);
 
-        homeSearchToggle = widgets.toolbarButton("搜索");
-        toolbar.addView(homeSearchToggle, new LinearLayout.LayoutParams(sdp(112), sdp(Widgets.HEIGHT_COMPACT)));
+        homeSearchToggle = widgets.iconButton(homeToolbarIcon(Icons.Kind.SEARCH), "搜索", isSearchOpen);
+        toolbar.addView(homeSearchToggle, new LinearLayout.LayoutParams(sdp(56), sdp(Widgets.HEIGHT_COMPACT)));
         homeSearchToggle.setOnClickListener(view -> {
             isSearchOpen = !isSearchOpen;
             if (!isSearchOpen) {
                 searchText = "";
             }
+            widgets.iconButtonActive(homeSearchToggle, isSearchOpen);
             refreshHomeControls();
             refreshHomeBody();
             if (isSearchOpen && homeSearchInput != null) {
@@ -1695,40 +1866,37 @@ public final class MainActivity extends Activity {
             }
         });
 
-        homeSortToggle = widgets.toolbarButton("排序");
-        toolbar.addView(homeSortToggle, margin(new LinearLayout.LayoutParams(sdp(96), sdp(Widgets.HEIGHT_COMPACT)), sdp(9), 0, 0, 0));
+        homeSortToggle = widgets.iconButton(homeToolbarIcon(Icons.Kind.SORT_MENU), "排序", isSortOpen);
+        toolbar.addView(homeSortToggle, margin(new LinearLayout.LayoutParams(sdp(56), sdp(Widgets.HEIGHT_COMPACT)), sdp(8), 0, 0, 0));
         homeSortToggle.setOnClickListener(view -> {
             isSortOpen = !isSortOpen;
+            widgets.iconButtonActive(homeSortToggle, isSortOpen);
             refreshHomeControls();
             homeSortToggle.requestFocus();
         });
 
-        homeDirectionToggle = widgets.toolbarButton(sortDescending ? "降序" : "升序");
-        toolbar.addView(homeDirectionToggle, margin(new LinearLayout.LayoutParams(sdp(96), sdp(Widgets.HEIGHT_COMPACT)), sdp(9), 0, 0, 0));
+        homeDirectionToggle = widgets.iconButton(directionIcon(), sortDescending ? "降序" : "升序", false);
+        toolbar.addView(homeDirectionToggle, margin(new LinearLayout.LayoutParams(sdp(56), sdp(Widgets.HEIGHT_COMPACT)), sdp(8), 0, 0, 0));
         homeDirectionToggle.setOnClickListener(view -> {
             sortDescending = !sortDescending;
-            homeDirectionToggle.setText(sortDescending ? "降序" : "升序");
+            homeDirectionToggle.setImageDrawable(directionIcon());
+            homeDirectionToggle.setTooltipText(sortDescending ? "降序" : "升序");
+            homeDirectionToggle.setContentDescription(sortDescending ? "降序" : "升序");
             refreshHomeBody();
         });
 
-        homeScanToggle = widgets.toolbarButton(scanButtonLabel());
-        toolbar.addView(homeScanToggle, margin(new LinearLayout.LayoutParams(sdp(112), sdp(Widgets.HEIGHT_COMPACT)), sdp(9), 0, 0, 0));
+        homeScanToggle = widgets.iconButton(homeToolbarIcon(Icons.Kind.SYNC), scanButtonLabel(), false);
+        toolbar.addView(homeScanToggle, margin(new LinearLayout.LayoutParams(sdp(56), sdp(Widgets.HEIGHT_COMPACT)), sdp(8), 0, 0, 0));
         homeScanToggle.setOnClickListener(view -> startScanAndScrape(null));
 
-        homeSourcesToggle = widgets.toolbarButton("媒体源");
-        toolbar.addView(homeSourcesToggle, margin(new LinearLayout.LayoutParams(sdp(104), sdp(Widgets.HEIGHT_COMPACT)), sdp(9), 0, 0, 0));
+        homeSourcesToggle = widgets.iconButton(homeToolbarIcon(Icons.Kind.FOLDER_PLUS), "媒体源", false);
+        toolbar.addView(homeSourcesToggle, margin(new LinearLayout.LayoutParams(sdp(56), sdp(Widgets.HEIGHT_COMPACT)), sdp(8), 0, 0, 0));
         homeSourcesToggle.setOnClickListener(view -> openSourcesOverlay());
 
-        homeSettingsToggle = widgets.toolbarButton("设置");
-        toolbar.addView(homeSettingsToggle, margin(new LinearLayout.LayoutParams(sdp(96), sdp(Widgets.HEIGHT_COMPACT)), sdp(9), 0, 0, 0));
+        homeSettingsToggle = widgets.iconButton(homeToolbarIcon(Icons.Kind.GEAR), "设置", false);
+        toolbar.addView(homeSettingsToggle, margin(new LinearLayout.LayoutParams(sdp(56), sdp(Widgets.HEIGHT_COMPACT)), sdp(8), 0, 0, 0));
         homeSettingsToggle.setOnClickListener(view -> openSettingsOverlay());
 
-        homeStatusView = widgets.caption("", COLOR_SUBTLE);
-        homeStatusView.setMaxLines(2);
-        homeStatusView.setEllipsize(TextUtils.TruncateAt.END);
-        homeStatusView.setPadding(headerInset, 0, headerInset, 0);
-        page.addView(homeStatusView, margin(matchWidth(), 0, 0, 0, sdp(8)));
-        homeStatusView.setVisibility(View.GONE);
         refreshHomeStatusText();
 
         homeControls = new LinearLayout(this);
@@ -1821,6 +1989,15 @@ public final class MainActivity extends Activity {
         }
         int scrollY = homeScrollView == null ? 0 : homeScrollView.getScrollY();
         String focusedItemId = focusedPosterItemId();
+        if (pendingHomeScrollRestore >= 0) {
+            // 刚从详情页回来：视图树是新的，滚动位置只能照记下来的那份还原。
+            // 这里不清账——新建的 ScrollView 在第一次布局前会吞掉 scrollTo()，
+            // 等落地的 post 跑完再清，中间插进来的重绘才会继续用同一个位置。
+            scrollY = pendingHomeScrollRestore;
+            if (focusedItemId == null) {
+                focusedItemId = pendingHomeFocusId;
+            }
+        }
         homeBody.removeAllViews();
         homePosterViews.clear();
         refreshHomeStatusText();
@@ -1876,9 +2053,11 @@ public final class MainActivity extends Activity {
         libraryTitle.setPadding(0, 0, 0, 0);
         libraryHeader.addView(libraryTitle, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        libraryHeader.addView(widgets.caption(libraryItems.size() + " 部", COLOR_SUBTLE),
+        homeLibraryCountView = widgets.caption("", COLOR_SUBTLE);
+        libraryHeader.addView(homeLibraryCountView,
                 margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT), sdp(12), sdp(4), 0, 0));
+        updateLibraryCountLabel();
 
         List<Models.LibraryItem> items = displayedItems();
         GridLayout grid = posterGrid();
@@ -1887,28 +2066,54 @@ public final class MainActivity extends Activity {
             grid.addView(posterCard(item, false));
         }
         if (items.isEmpty()) {
-            homeBody.addView(api.engine().sources().isEmpty()
+            // 一个源都没有、或所有源都停用了，都要给一个能按下去的入口：空屏上一个可聚焦
+            // 控件都没有，遥控器开屏就不知道往哪儿走。
+            homeBody.addView(api.engine().enabledSourceIds().isEmpty()
                     ? emptySourceCallToAction()
                     : emptyText(libraryItems.isEmpty() ? "媒体库为空" : "没有匹配结果"));
         }
 
+        homeScrollY = scrollY;
         if (homeScrollView != null) {
             homeScrollView.scrollTo(0, scrollY);
+            restorePosterFocus(focusedItemId);
+            final int wantedScroll = scrollY;
+            final String wantedFocus = focusedItemId;
+            homeScrollView.post(() -> {
+                if (homeScrollView != null) {
+                    homeScrollView.scrollTo(0, wantedScroll);
+                }
+                restorePosterFocus(wantedFocus);
+                if (pendingHomeScrollRestore == wantedScroll) {
+                    pendingHomeScrollRestore = -1;
+                    pendingHomeFocusId = null;
+                }
+            });
+        } else {
+            restorePosterFocus(focusedItemId);
         }
-        restorePosterFocus(focusedItemId);
     }
 
     /** 重建之后焦点从名单里补回来，别让刷新把用户丢回页面顶上。 */
     private void restorePosterFocus(String itemId) {
-        View focused = getCurrentFocus();
-        if (itemId == null || (focused != null && focused.isAttachedToWindow())) {
+        if (itemId == null) {
             return;
         }
         List<PosterViews> holders = homePosterViews.get(itemId);
         if (holders == null || holders.isEmpty()) {
             return;
         }
-        FocusGrid.grab(holders.get(0).card);
+        View target = holders.get(0).card;
+        // 只要焦点还没落在这张卡上就补：上一版只看「有没有东西带着焦点」，
+        // 重建后系统会把默认焦点丢给第一个可聚焦控件，于是每次刷新都被它挡回去。
+        for (View view = getCurrentFocus(); view != null; ) {
+            if (view == target) {
+                return;
+            }
+            ViewParent parent = view.getParent();
+            view = parent instanceof View ? (View) parent : null;
+        }
+        FocusGrid.grab(target);
     }
 
     private void addSortButton(LinearLayout row, String label, SortKey key) {
@@ -2013,7 +2218,7 @@ public final class MainActivity extends Activity {
         isSettingsOpen = true;
         LinearLayout panel = settingsOverlay.body;
         TvSettings prefs = api.engine().settings();
-        String versionName = "1.22";
+        String versionName = "1.30";
         try {
             versionName = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
         } catch (Exception ignored) {
@@ -2079,7 +2284,8 @@ public final class MainActivity extends Activity {
                     ? themePill(variants.get(start + 1), prefs) : spacerPill();
             widgets.addCardRow(themeCard, widgets.cardButtonRow(left, right));
         }
-        panel.addView(widgets.caption("浅色主题与 macOS 版一致；深色主题适合关灯观影，切换后立即生效。",
+        panel.addView(widgets.caption("配色沿用 macOS 版色板，并按三米观看距离重新调过明暗；"
+                        + "深色主题适合关灯观影，切换后立即生效。",
                         COLOR_SUBTLE), margin(matchWidth(), sdp(4), sdp(4), 0, sdp(2)));
 
         // ---------------------------------------------------------------- 刮削与播放偏好
@@ -2152,19 +2358,8 @@ public final class MainActivity extends Activity {
         });
         widgets.addCardRow(basicCard, realPath.view);
 
-        // ---------------------------------------------------------------- 4K DV/HDR
-        panel.addView(widgets.sectionCaption("4K DV/HDR 播放模式"),
-                margin(matchWidth(), 0, 0, 0, 0));
-        LinearLayout playbackCard = widgets.settingsCard();
-        panel.addView(playbackCard, margin(matchWidth(), 0, 0, 0, 0));
-        Widgets.Segment playbackMode = widgets.segment(
-                Arrays.asList("兼容字幕播放", "高性能直出"),
-                highPerformanceDirectPlayback ? 1 : 0,
-                index -> update4kDvHdrPlaybackMode(index == 1));
-        widgets.addCardRow(playbackCard, playbackMode.view);
-        panel.addView(widgets.caption("兼容字幕播放的字幕兼容性更好但更吃性能，卡顿就换高性能直出；"
-                        + "高性能直出资源要求低，但可能无法直接烧录字幕。", COLOR_SUBTLE),
-                margin(matchWidth(), sdp(4), sdp(4), 0, sdp(2)));
+        // 播放模式挪进了播放页那颗「播放模式」按钮：它只对正在放的这条片子有意义，
+        // 在设置里改完还得回播放器试，不如就地换、就地看效果。
 
         // ---------------------------------------------------------------- 关于与更新
         panel.addView(widgets.sectionCaption("关于与更新"), margin(matchWidth(), 0, 0, 0, 0));
@@ -2330,7 +2525,6 @@ public final class MainActivity extends Activity {
         }
         Overlays.Options options = new Overlays.Options();
         options.title = "媒体源管理";
-        options.subtitle = "停用后该目录不再扫描入库；移除只清理索引与进度，不会改动共享文件。";
         options.widthDp = 470;
         options.sideSheet = true;
         options.restoreFocus = sourcesRestoreFocus;
@@ -2392,12 +2586,21 @@ public final class MainActivity extends Activity {
             toggle.setOnClickListener(view -> {
                 api.engine().setSourceEnabled(source.id, !source.enabled);
                 renderSourcesOverlay();
+                // 停用 = 从首页收起来（与 mac 一样，媒体库查询只认启用的源）；重新启用则
+                // 原样回来，不用重新扫描。文件行留在库里，两者都得立刻反映到墙上。
+                refreshHomeLibrary(false);
+                refreshHomeStatusText();
             });
-            rename.setOnClickListener(view -> openRenameSourceDialog(source, panel, status));
+            rename.setOnClickListener(view -> openRenameSourceEditor(source, row, status));
             remove.setOnClickListener(view -> {
+                // 先叫停再删源：这一轮的扫描线程会在下一个文件处抛出 ScanAborted，
+                // 刮削循环也在批与批之间看到标记就收手，横幅跟着这句话一起停下。
+                api.engine().cancelScanAndScrape();
                 api.engine().removeSource(source.id);
                 renderSourcesOverlay();
                 refreshHomeLibrary(false);
+                showHomeStatusLine("已停止扫描刮削。");
+                refreshHomeStatusText();
             });
             if (initialFocus == null) {
                 initialFocus = toggle;
@@ -2488,23 +2691,53 @@ public final class MainActivity extends Activity {
                 error -> {
                     scanRunning = false;
                     setScanButtonRunning(false);
+                    String reason = "扫描失败：" + CrashLog.summarize(error);
                     if (status != null && status.isAttachedToWindow()) {
-                        status.setText("扫描失败：" + error.getMessage());
+                        status.setText(reason);
                     }
-                    showToast("扫描失败：" + error.getMessage());
+                    showToast(reason);
                     refreshHomeStatusText();
                 });
     }
 
     /** 工具条那颗按钮的字：扫描进行中写「扫描中」，有没有在跑一眼看得出来。 */
     private String scanButtonLabel() {
-        return scanRunning ? "扫描中" : "扫描刮削";
+        return scanRunning ? "扫描刮削（进行中）" : "扫描刮削";
     }
 
     private void setScanButtonRunning(boolean running) {
-        if (homeScanToggle != null) {
-            homeScanToggle.setText(running ? "扫描中" : "扫描刮削");
+        if (homeScanToggle == null) {
+            return;
         }
+        String label = scanButtonLabel();
+        homeScanToggle.setTooltipText(label);
+        homeScanToggle.setContentDescription(label);
+        // 图标按钮没有文字可换，扫描期间让那对环形箭头自己转起来。
+        if (running) {
+            if (scanSpin == null) {
+                scanSpin = android.animation.ObjectAnimator.ofFloat(homeScanToggle, View.ROTATION, 0f, 360f);
+                scanSpin.setDuration(1400);
+                scanSpin.setRepeatCount(android.animation.ValueAnimator.INFINITE);
+                scanSpin.setInterpolator(new android.view.animation.LinearInterpolator());
+            }
+            scanSpin.start();
+            return;
+        }
+        if (scanSpin != null) {
+            scanSpin.cancel();
+        }
+        homeScanToggle.setRotation(0f);
+    }
+
+    /** 工具栏图标：统一尺寸与线宽，颜色走主题的弱化文字色，聚焦时由焦点语言染成强调色。 */
+    private android.graphics.drawable.Drawable homeToolbarIcon(Icons.Kind kind) {
+        // mac 版这排图标是 textPrimary 78% + medium 字重，不是弱化文字色：
+        // 三米外看电视，图标再暗就只剩一个个模糊的方块了。
+        return Icons.of(kind, sdp(21), Theme.withAlpha(COLOR_TEXT, 199), dp(1.8f));
+    }
+
+    private android.graphics.drawable.Drawable directionIcon() {
+        return homeToolbarIcon(sortDescending ? Icons.Kind.ARROW_DOWN : Icons.Kind.ARROW_UP);
     }
 
     /** 往首页横幅上直接写一行（不等引擎的进度回调），写完照常参与去重与自动收起。 */
@@ -2523,7 +2756,10 @@ public final class MainActivity extends Activity {
         block.setOrientation(LinearLayout.VERTICAL);
         block.setClipChildren(false);
         block.setClipToPadding(false);
-        block.addView(emptyText("还没有媒体源。添加本地目录、WebDAV 或 SMB 后会自动扫描刮削。"),
+        boolean allDisabled = !api.engine().sources().isEmpty();
+        block.addView(emptyText(allDisabled
+                ? "媒体源都已停用，海报先收起来了。启用任意一个就会重新出现，不用重新扫描。"
+                : "还没有媒体源。添加本地目录、WebDAV 或 SMB 后会自动扫描刮削。"),
                 new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT));
         Button open = button("添加媒体源");
@@ -2538,15 +2774,32 @@ public final class MainActivity extends Activity {
     }
 
     /** Inline rename field for one source row. */
-    private void openRenameSourceDialog(LocalEngine.Source source, LinearLayout panel, TextView status) {
+    /**
+     * 重命名的输入框就地展开在源卡片里（紧挨停用 / 重命名 / 移除那一行下面），
+     * 以前它是追加到面板尾部的——卡片一多，按下「重命名」后输入框跑到看不见的地方，
+     * 用户只看到按钮被按了一下，别的什么都没发生。
+     */
+    private void openRenameSourceEditor(LocalEngine.Source source, LinearLayout row, TextView status) {
+        if (row.findViewById(RENAMEDITOR_ID) != null) {
+            return;
+        }
+        LinearLayout editor = new LinearLayout(this);
+        editor.setId(RENAMEDITOR_ID);
+        editor.setOrientation(LinearLayout.HORIZONTAL);
+        editor.setClipChildren(false);
+        editor.setClipToPadding(false);
         EditText field = input("媒体源名称", source.name);
-        panel.addView(field, margin(matchWidth(), 0, dp(6), 0, dp(6)));
-        Button save = compactButton("保存名称");
-        panel.addView(save, margin(matchWidth(), 0, 0, 0, dp(6)));
+        editor.addView(field, margin(new LinearLayout.LayoutParams(0, sdp(Widgets.HEIGHT_INPUT), 1f),
+                0, sdp(10), 0, 0));
+        Button save = compactButton("保存");
+        editor.addView(save, margin(new LinearLayout.LayoutParams(sdp(96), sdp(Widgets.HEIGHT_BUTTON)),
+                sdp(8), 0, 0, 0));
+        row.addView(editor, margin(matchWidth(), 0, sdp(10), 0, 0));
         save.setOnClickListener(view -> {
             String value = field.getText().toString().trim();
             if (value.isEmpty()) {
                 status.setText("名称不能为空。");
+                FocusGrid.grab(field);
                 return;
             }
             api.engine().renameSource(source.id, value);
@@ -2554,9 +2807,9 @@ public final class MainActivity extends Activity {
         });
         if (sourcesOverlay != null) {
             Overlays.Overlay opened = sourcesOverlay;
-            FocusGrid.afterLayout(panel, () -> {
+            FocusGrid.afterLayout(row, () -> {
                 if (sourcesOverlay == opened) {
-                    opened.redeclare(FocusGrid.rowsFrom(panel));
+                    opened.redeclare(FocusGrid.rowsFrom(opened.body));
                     FocusGrid.grab(field);
                     FocusGrid.scrollToVisible(field);
                 }
@@ -2564,29 +2817,77 @@ public final class MainActivity extends Activity {
         }
     }
 
+    /** 就地展开的重命名输入区，用它判断那一行是否已经摊开。 */
+    private static final int RENAMEDITOR_ID = 0x7f0e0001;
+
     // ------------------------------------------------------------ 首页状态条
 
     private void refreshHomeStatusText() {
         if (homeStatusView == null) {
             return;
         }
+        // 扫描期间这条是唯一被反复调用的入口，计数就顺手在这儿更新：整库重读可能还在飞，
+        // 但「N 部」只花一条 COUNT，没必要跟着一起等。
+        updateLibraryCountLabel();
+        int queued = api.engine().scrapeQueueCount();
+        // mac 版那一行的显示条件是 isProcessing || 海报进度非空：只要还有活没干完，这一行就
+        // 必须在。以前收尾停 8 秒就收起，用户过一会儿回头只看得到一面不动的墙。
+        boolean alive = scanRunning || api.engine().isScraping() || queued > 0;
         String message = api.engine().scrapeStatus();
         String text = message == null ? "" : message.trim();
-        if (text.isEmpty() && api.engine().scrapeQueueCount() > 0
-                && !api.engine().tmdbConfigured()) {
+        if (queued > 0 && !api.engine().tmdbConfigured()) {
             // mac 版这时候说的是「TMDB 连不上」，不是干挂一个待刮削数字。
-            text = "检测到有待刮削的影视，但 TMDB 暂时无法连接。请在设置里检查 API Key 或反代地址。";
+            text = "检测到 " + queued + " 个待刮削条目，但 TMDB 暂时无法连接。请在设置里检查 API Key 或反代地址。";
+        } else if (alive && text.isEmpty()) {
+            text = "正在扫描媒体源...";
+        } else if (text.isEmpty() && queued > 0) {
+            text = "待刮削 " + queued + " 个条目，点右上角「扫描刮削」开始。";
         }
         if (text.equals(homeStatusText)) {
+            // 文案没变也要按当前状态校正一次转圈，否则跑完那一轮会留下个空转的动画。
+            setHomeStatusVisible(alive || (!text.isEmpty() && !text.equals(homeStatusHiddenMessage)));
             return;
         }
         homeStatusText = text;
-        if (text.isEmpty() || text.equals(homeStatusHiddenMessage)) {
-            homeStatusView.setVisibility(View.GONE);
+        if (text.isEmpty() || (!alive && text.equals(homeStatusHiddenMessage))) {
+            setHomeStatusVisible(false);
             return;
         }
         homeStatusView.setText(text);
-        homeStatusView.setVisibility(View.VISIBLE);
+        setHomeStatusVisible(true);
+    }
+
+    /**
+     * 横幅只在扫描与刮削期间出现，转圈跟着它一起显示、一起停下：
+     * 收起之后还留着一个无限循环的属性动画，等于给静息的首页白挂一个每帧重绘。
+     */
+    private void setHomeStatusVisible(boolean visible) {
+        if (homeProgressRow == null) {
+            return;
+        }
+        // 用 INVISIBLE 不是 GONE：这一行占了工具条左边的整条空位，
+        // 收成 GONE 会让六颗按钮整体左移，横幅一收焦点就跳到别的按钮上。
+        homeProgressRow.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
+        // 转圈只在真有事做的时候转：跑完那一行的收尾文案还要挂 8 秒，
+        // 让它一直转就等于告诉用户「还没完」，反而看不懂。
+        boolean working = visible && scanRunning;
+        homeProgressView.setVisibility(working ? View.VISIBLE : View.GONE);
+        if (working) {
+            if (homeProgressSpin == null) {
+                homeProgressSpin = android.animation.ObjectAnimator.ofFloat(
+                        homeProgressView, View.ROTATION, 0f, 360f);
+                homeProgressSpin.setDuration(1200);
+                homeProgressSpin.setRepeatCount(android.animation.ValueAnimator.INFINITE);
+                homeProgressSpin.setInterpolator(new android.view.animation.LinearInterpolator());
+            }
+            if (!homeProgressSpin.isRunning()) {
+                // 进度回调每 250ms 就来一次，重复 start 会把动画按回零点，看着像卡住。
+                homeProgressSpin.start();
+            }
+        } else if (homeProgressSpin != null) {
+            homeProgressSpin.cancel();
+            homeProgressView.setRotation(0f);
+        }
     }
 
     /** 跑完一轮就把那句收尾的话收起来：mac 版的横幅平时不占位置。 */
@@ -2858,6 +3159,8 @@ public final class MainActivity extends Activity {
         TextView name = text("", ssp(16), Typeface.BOLD, COLOR_TEXT);
         name.setMaxLines(2);
         name.setEllipsize(TextUtils.TruncateAt.END);
+        // mac 版卡片标题是居中的（multilineTextAlignment(.center)），两行的时候左右都齐。
+        name.setGravity(Gravity.CENTER_HORIZONTAL);
         card.addView(name, margin(matchWidth(), 0, sdp(11), 0, 0));
         views.name = name;
 
@@ -2867,16 +3170,15 @@ public final class MainActivity extends Activity {
         TextView year = text("", ssp(13), Typeface.NORMAL, COLOR_SUBTLE);
         yearRow.addView(year, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         views.year = year;
-        TextView watched = text("", ssp(13), Typeface.BOLD, COLOR_SUBTLE);
-        watched.setGravity(Gravity.CENTER);
-        watched.setPadding(sdp(8), 0, sdp(8), 0);
-        watched.setMinHeight(sdp(28));
+        // 观看状态是一个画出来的圆（mac 版用 checkmark.circle.fill / circle），不是文字符号。
+        ImageView watched = new ImageView(this);
+        watched.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        watched.setPadding(sdp(5), sdp(3), sdp(5), sdp(3));
         watched.setFocusable(true);
         watched.setClickable(true);
         watched.setBackgroundColor(Color.TRANSPARENT);
         watched.setOnClickListener(view -> toggleLibraryItemWatched(views.item));
-        applyWatchedIconFocus(watched, COLOR_SUBTLE);
-        yearRow.addView(watched, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, sdp(30)));
+        yearRow.addView(watched, new LinearLayout.LayoutParams(sdp(28), sdp(28)));
         views.watched = watched;
 
         card.setOnClickListener(view -> showDetail(views.item.id));
@@ -2909,12 +3211,11 @@ public final class MainActivity extends Activity {
         views.name.setText(prettyTitle);
         views.year.setText(year == null ? "" : year);
         boolean partlyWatched = !item.isWatched && watchedPercent > 0 && watchedPercent < 95;
-        views.watched.setText(item.isWatched ? WATCHED_GLYPH_DONE
-                : partlyWatched ? WATCHED_GLYPH_PART : WATCHED_GLYPH_NONE);
-        views.watched.setTooltipText(item.isWatched ? "已看" : partlyWatched ? "未看完" : "未看");
-        int watchedColor = item.isWatched ? COLOR_FOCUS : partlyWatched ? COLOR_ACCENT : COLOR_SUBTLE;
-        views.watched.setTextColor(watchedColor);
-        applyWatchedIconFocus(views.watched, watchedColor);
+        setWatchedIcon(views.watched,
+                item.isWatched ? Icons.Kind.WATCH_DONE
+                        : partlyWatched ? Icons.Kind.WATCH_PART : Icons.Kind.WATCH_NONE,
+                item.isWatched ? COLOR_FOCUS : partlyWatched ? COLOR_ACCENT : COLOR_SUBTLE,
+                item.isWatched ? "已看" : partlyWatched ? "未看完" : "未看");
         views.badges.removeAllViews();
         if (rating != null) {
             views.badges.addView(badge(rating, Theme.RATING));
@@ -2948,7 +3249,7 @@ public final class MainActivity extends Activity {
         /** 这张卡上一次渲染的内容签名，用于跳过没变化的重绘。 */
         String renderedSignature;
         TextView year;
-        TextView watched;
+        ImageView watched;
         FrameLayout progress;
         Models.LibraryItem item;
 
@@ -3014,7 +3315,9 @@ public final class MainActivity extends Activity {
     }
 
     private void scheduleScrapePosterRefresh() {
-        if (android.os.SystemClock.elapsedRealtime() - lastLibraryPatchAt < 2000) {
+        // 两秒的节流是当年为了躲整墙重排；就地补卡不重排之后，间隔贴着进度走，
+        // 海报才真是一张张冒出来，而不是等一轮跑完才一起变。
+        if (android.os.SystemClock.elapsedRealtime() - lastLibraryPatchAt < WALL_PATCH_INTERVAL_MS) {
             return;
         }
         refreshLibraryInPlace();
@@ -3022,18 +3325,8 @@ public final class MainActivity extends Activity {
 
     /** 重读媒体库并就地补卡片；条目增减了才重建整面墙。 */
     private void refreshLibraryInPlace() {
-        if (libraryPatchInFlight) {
-            return;
-        }
         lastLibraryPatchAt = android.os.SystemClock.elapsedRealtime();
-        libraryPatchInFlight = true;
-        runAsync(() -> api.getLibraryItems(), items -> {
-            libraryPatchInFlight = false;
-            if (screen != Screen.HOME || items == null || items.isEmpty()) {
-                return;
-            }
-            patchLibraryViews(new ArrayList<>(items));
-        }, error -> libraryPatchInFlight = false);
+        requestLibraryFetch(true, false);
     }
 
     private void patchLibraryViews(List<Models.LibraryItem> items) {
@@ -3072,8 +3365,30 @@ public final class MainActivity extends Activity {
 
     private void showDetail(String itemId) {
         selectedSeasonId = "";
+        rememberHomeWallPosition();
         loadDetail(itemId);
     }
+
+    /**
+     * 进详情前记下首页墙的滚动位置和选中的那张海报。详情页会把整个视图树换掉，
+     * 不记的话返回时只能从顶上重新开始，看完一部片就得往下翻十分钟。
+     */
+    private void rememberHomeWallPosition() {
+        if (screen != Screen.HOME) {
+            return;
+        }
+        if (homeScrollView != null) {
+            homeScrollY = homeScrollView.getScrollY();
+        }
+        pendingHomeScrollRestore = homeScrollY;
+        String focused = focusedPosterItemId();
+        if (focused != null) {
+            pendingHomeFocusId = focused;
+        }
+    }
+
+    private int pendingHomeScrollRestore = -1;
+    private String pendingHomeFocusId;
 
     private void loadDetail(String itemId) {
         screen = Screen.DETAIL;
@@ -3099,9 +3414,17 @@ public final class MainActivity extends Activity {
                     }
                     detailCache.put(itemId, detail);
                     refreshPlaybackSettingsForDetail(detail);
-                    if (screen == Screen.DETAIL && itemId.equals(requestedDetailItemId)) {
-                        renderDetail(detail);
+                    if (screen != Screen.DETAIL || !itemId.equals(requestedDetailItemId)) {
+                        return;
                     }
+                    if (overlays.hasOpen()) {
+                        // 详情页一重建就把覆盖层连视图树一起拆了：手动匹配弹层刚打开就被
+                        // 这条异步回来的重绘关掉，看上去像「点了自己弹回去」。先记下，等弹层关了再补。
+                        currentDetail = detail;
+                        pendingDetailRerender = true;
+                        return;
+                    }
+                    renderDetail(detail);
                 },
                 error -> {
                     if (showErrors) {
@@ -3110,6 +3433,20 @@ public final class MainActivity extends Activity {
                 });
     }
 
+    /** 弹层全关干净之后，把欠详情页的那一次重绘补上。 */
+    private void afterOverlayStackChanged() {
+        if (!pendingDetailRerender || screen != Screen.DETAIL || currentDetail == null) {
+            return;
+        }
+        if (overlays.hasOpen()) {
+            return;
+        }
+        pendingDetailRerender = false;
+        renderDetail(currentDetail);
+    }
+
+    private boolean pendingDetailRerender;
+
     private void refreshPlaybackSettingsForDetail(Models.LibraryDetail detail) {
         runAsync(
                 () -> api.getSettings(),
@@ -3117,9 +3454,15 @@ public final class MainActivity extends Activity {
                     boolean nextShowEpisodeDetails = settings == null || settings.playback == null || settings.playback.showEpisodeDetails;
                     if (showEpisodeDetails != nextShowEpisodeDetails) {
                         showEpisodeDetails = nextShowEpisodeDetails;
-                        if (screen == Screen.DETAIL && currentDetail != null && currentDetail.id.equals(detail.id)) {
-                            renderDetail(currentDetail);
+                        if (screen != Screen.DETAIL || currentDetail == null
+                                || !currentDetail.id.equals(detail.id)) {
+                            return;
                         }
+                        if (overlays.hasOpen()) {
+                            pendingDetailRerender = true;
+                            return;
+                        }
+                        renderDetail(currentDetail);
                     }
                 },
                 error -> {
@@ -3159,6 +3502,7 @@ public final class MainActivity extends Activity {
         screen = Screen.DETAIL;
         applyImmersiveMode(false);
         currentDetail = detail;
+        pendingDetailRerender = false;
         closeAllOverlays();
         root.removeAllViews();
         applyAppBackground();
@@ -3252,18 +3596,10 @@ public final class MainActivity extends Activity {
         TextView overview = text(overviewText.isEmpty() ? "\u6682\u65e0\u7b80\u4ecb" : overviewText,
                 ssp(16), Typeface.NORMAL, overviewText.isEmpty() ? COLOR_SUBTLE : COLOR_TEXT);
         overview.setLineSpacing(sdp(4), 1f);
-        overview.setMaxLines(5);
-        overview.setEllipsize(TextUtils.TruncateAt.END);
+        // 简介整段摊开，不给「展开」这颗按钮：详情页本来就能滚，遥控器上多点一次不如
+        // 一眼看完，mac 版也是一整段摆在这里，只是字数上限收在一段读完的程度上。
+        overview.setMaxLines(24);
         info.addView(overview, margin(matchWidth(), 0, sdp(16), 0, 0));
-        if (overviewText.length() > 96) {
-            Button toggleOverview = compactButton("\u5c55\u5f00\u7b80\u4ecb");
-            toggleOverview.setOnClickListener(view -> {
-                boolean expanded = overview.getMaxLines() == Integer.MAX_VALUE;
-                overview.setMaxLines(expanded ? 5 : Integer.MAX_VALUE);
-                toggleOverview.setText(expanded ? "\u5c55\u5f00\u7b80\u4ecb" : "\u6536\u8d77\u7b80\u4ecb");
-            });
-            info.addView(toggleOverview, margin(new LinearLayout.LayoutParams(sdp(160), sdp(48)), 0, sdp(10), 0, 0));
-        }
 
         Models.VideoFile mainFile = resolveMainFile(detail);
         Button playButton = null;
@@ -3286,33 +3622,39 @@ public final class MainActivity extends Activity {
             });
             play.requestFocus();
 
-            Button watchStatus = button(watchedStatusLabel(mainFile), isEffectivelyWatched(mainFile));
-            actions.addView(watchStatus, margin(new LinearLayout.LayoutParams(sdp(150), sdp(52)), sdp(12), 0, 0, 0));
+            // 已看 / 未看完 / 未看：mac 用的是 checkmark.circle.fill、circle.lefthalf.filled、
+            // circle 三个符号，这里同样只留图标，状态名进 tooltip，不再占一颗带文字的按钮。
+            boolean watchedNow = isEffectivelyWatched(mainFile);
+            ImageView watchStatus = widgets.iconButton(Icons.of(watchStateOf(mainFile), sdp(23),
+                    watchedNow ? COLOR_FOCUS : COLOR_MUTED, dp(1.8f)),
+                    watchedStatusLabel(mainFile), watchedNow);
+            actions.addView(watchStatus, margin(new LinearLayout.LayoutParams(sdp(64), sdp(52)), sdp(12), 0, 0, 0));
             watchStatus.setOnClickListener(view -> toggleVideoWatched(mainFile));
 
-            // 匹配与资料改在第二行：多一颗按钮就不进第一行了，遥控器左右走位也更短。
-            LinearLayout metadataActions = new LinearLayout(this);
-            metadataActions.setGravity(Gravity.CENTER_VERTICAL);
-            metadataActions.setClipChildren(false);
-            metadataActions.setClipToPadding(false);
-            info.addView(metadataActions, margin(matchWidth(), 0, sdp(12), 0, 0));
+            // 已播时长 / 总时长：从按钮下面移到图标右边，第一行一眼看完「能不能播、看到哪儿了」。
+            actions.addView(timeline(detail, mainFile),
+                    margin(new LinearLayout.LayoutParams(0, sdp(40), 1f), sdp(22), 0, 0, 0));
 
-            Button manualMatch = button("手动匹配");
-            metadataActions.addView(manualMatch, new LinearLayout.LayoutParams(sdp(150), sdp(52)));
-            manualMatch.setOnClickListener(view -> openManualMatchOverlay(detail, mainFile));
-
-            Button edit = button("自定义编辑");
-            metadataActions.addView(edit, margin(new LinearLayout.LayoutParams(sdp(150), sdp(52)), sdp(12), 0, 0, 0));
-            edit.setOnClickListener(view -> openDetailCustomEditOverlay(detail));
-
-            // \u5df2\u64ad\u65f6\u957f / \u603b\u65f6\u957f\uff1amac \u7248\u628a\u5b83\u653e\u5728\u6309\u94ae\u4e0b\u65b9\uff0c\u8fd9\u91cc\u540c\u4e00\u4f4d\u7f6e\u3002
-            LinearLayout timelineColumn = new LinearLayout(this);
-            timelineColumn.setOrientation(LinearLayout.VERTICAL);
-            timelineColumn.setClipChildren(false);
-            timelineColumn.setClipToPadding(false);
-            info.addView(timelineColumn, margin(matchWidth(), 0, sdp(16), 0, 0));
-            timelineColumn.addView(timeline(detail, mainFile),
-                    new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, sdp(40)));
+            // 手动匹配与自定义编辑：详情页右上角两颗贴角图标，方向键往右上两步就到。
+            LinearLayout detailTools = new LinearLayout(this);
+            detailTools.setOrientation(LinearLayout.HORIZONTAL);
+            detailTools.setGravity(Gravity.CENTER_VERTICAL);
+            detailTools.setClipChildren(false);
+            detailTools.setClipToPadding(false);
+            ImageView toolMatch = widgets.iconButton(Icons.of(Icons.Kind.MATCH, sdp(22),
+                    COLOR_MUTED, dp(1.7f)), "手动匹配", false);
+            ImageView toolEdit = widgets.iconButton(Icons.of(Icons.Kind.PENCIL, sdp(22),
+                    COLOR_MUTED, dp(1.7f)), "自定义编辑", false);
+            toolMatch.setOnClickListener(view -> openManualMatchOverlay(detail, mainFile));
+            toolEdit.setOnClickListener(view -> openDetailCustomEditOverlay(detail));
+            detailTools.addView(toolMatch,
+                    margin(new LinearLayout.LayoutParams(sdp(56), sdp(48)), 0, 0, sdp(4), 0));
+            detailTools.addView(toolEdit, new LinearLayout.LayoutParams(sdp(56), sdp(48)));
+            FrameLayout.LayoutParams toolParams = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP | Gravity.RIGHT);
+            toolParams.setMargins(0, sdp(2), sdp(4), 0);
+            heroFrame.addView(detailTools, toolParams);
 
             refreshSubtitleCacheStatus(detail, mainFile);
 
@@ -3323,7 +3665,7 @@ public final class MainActivity extends Activity {
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         sdp(34),
                         Gravity.TOP | Gravity.RIGHT);
-                subtitleParams.setMargins(0, sdp(2), sdp(4), 0);
+                subtitleParams.setMargins(0, sdp(58), sdp(4), 0);
                 heroFrame.addView(subtitleStatus, subtitleParams);
             }
         }
@@ -3337,7 +3679,9 @@ public final class MainActivity extends Activity {
 
     private void renderMovieVersions(LinearLayout content, Models.LibraryDetail detail) {
         ArrayList<Models.VideoFile> files = moviePlaybackFiles(detail);
-        if (files.isEmpty()) {
+        // 与 mac 同一条件（videoFiles.count > 1）：只有一部片时这一节叫「版本 / 文件（1）」，
+        // 除了把整条文件名再摆一遍什么都没说明，扫到同一个电影下的多个文件才值得列出来。
+        if (files.size() <= 1) {
             return;
         }
 
@@ -3588,7 +3932,12 @@ public final class MainActivity extends Activity {
 
             phoneInputCloseButton = button("关闭");
             phoneInputCloseButton.setOnClickListener(view -> closePhoneInputOverlay());
-            panel.addView(phoneInputCloseButton, margin(matchWidth(), 0, sdp(2), 0, 0));
+            // 铺满整行的一颗「关闭」有四分之一屏宽，按起来反而找不到；收窄居中，并给够按压高度。
+            LinearLayout.LayoutParams closeParams = new LinearLayout.LayoutParams(
+                    sdp(216), sdp(Widgets.HEIGHT_BUTTON + 10));
+            closeParams.gravity = Gravity.CENTER_HORIZONTAL;
+            closeParams.topMargin = sdp(4);
+            panel.addView(phoneInputCloseButton, closeParams);
 
             phoneInputOverlay.focus(phoneInputCloseButton);
         }
@@ -3711,9 +4060,12 @@ public final class MainActivity extends Activity {
     private Overlays.Overlay manualMatchOverlay;
     private EditText manualMatchQuery;
     private EditText manualMatchYear;
+    private EditText manualMatchDouban;
     private TextView manualMatchStatus;
-    private LinearLayout manualMatchResults;
-    private boolean manualMatchRunning;
+    private TextView manualMatchTmdbCaption;
+    private LinearLayout manualMatchTmdbRows;
+    private TextView manualMatchDoubanCaption;
+    private LinearLayout manualMatchDoubanRows;
 
     private Overlays.Overlay customEditOverlay;
     private EditText customEditTitle;
@@ -3727,18 +4079,18 @@ public final class MainActivity extends Activity {
     /**
      * 详情页「手动匹配」：mac 版那个手动匹配弹层的遥控器版——源文件路径 + 关键词 + 年份 +
      * 候选清单，点一行就关联。弹层一打开就按当前片名搜一次，遥控器上少一步打字。
+     *
+     * <p>候选有两个来源：TMDB（要 Key）与豆瓣（不要 Key）。1.38 起这里不再有「没填 Key 就不
+     * 给开弹层」的门槛，否则豆瓣那条兜底路永远走不到。</p>
      */
     private void openManualMatchOverlay(Models.LibraryDetail detail, Models.VideoFile mainFile) {
-        if (!api.engine().tmdbConfigured()) {
-            showToast("先在设置里填写 TMDB API Key 或反代地址，才能手动搜索。");
-            return;
-        }
+        // 没填 TMDB Key 也得开得起这个弹窗：豆瓣那一路本来就不需要 Key。
         if (manualMatchOverlay != null) {
             return;
         }
         Overlays.Options options = new Overlays.Options();
         options.title = "手动匹配";
-        options.subtitle = "点中正确的那条即可关联；关联后这条记录会被锁定，自动刮削不再覆盖它。";
+        options.subtitle = "点中正确的那条即可关联（没填 TMDB Key 就从豆瓣候选里选）；关联后这条记录会被锁定，自动刮削不再覆盖它。";
         options.widthDp = 620;
         options.restoreFocus = getCurrentFocus();
         Overlays.Overlay overlay = overlays.open(options);
@@ -3748,9 +4100,12 @@ public final class MainActivity extends Activity {
             }
             manualMatchQuery = null;
             manualMatchYear = null;
+            manualMatchDouban = null;
             manualMatchStatus = null;
-            manualMatchResults = null;
-            manualMatchRunning = false;
+            manualMatchTmdbCaption = null;
+            manualMatchTmdbRows = null;
+            manualMatchDoubanCaption = null;
+            manualMatchDoubanRows = null;
         };
         manualMatchOverlay = overlay;
         LinearLayout panel = overlay.body;
@@ -3761,17 +4116,15 @@ public final class MainActivity extends Activity {
             panel.addView(widgets.caption("源文件：" + source, COLOR_SUBTLE),
                     margin(matchWidth(), 0, 0, 0, sdp(6)));
         }
-        manualMatchQuery = input("影视名称关键词", detail.title == null ? "" : detail.title);
+        String[] hint = scrapeHint(detail);
+        manualMatchQuery = input("影视名称关键词", hint[0] != null ? hint[0]
+                : (detail.title == null ? "" : detail.title));
         panel.addView(manualMatchQuery, margin(matchWidth(), 0, 0, 0, sdp(4)));
-        manualMatchYear = input("年份（可选）", fourDigitYear(detail.releaseDate));
+        manualMatchYear = input("年份（可选）", hint[1] != null ? hint[1]
+                : fourDigitYear(detail.releaseDate));
         panel.addView(manualMatchYear, matchWidth());
+        addDoubanRow(panel, detail);
         manualMatchStatus = overlay.statusLine();
-        manualMatchResults = new LinearLayout(this);
-        manualMatchResults.setOrientation(LinearLayout.VERTICAL);
-        manualMatchResults.setClipChildren(false);
-        manualMatchResults.setClipToPadding(false);
-        panel.addView(manualMatchResults, margin(matchWidth(), 0, 0, 0, 0));
-
         Button close = button("关闭");
         close.setOnClickListener(view -> overlay.close());
         Button phone = button("手机输入");
@@ -3779,65 +4132,277 @@ public final class MainActivity extends Activity {
                 "只填需要改的项，留空的项不会被改动。",
                 Arrays.asList(
                         boundField("query", "影视名称关键词", () -> manualMatchQuery, false),
-                        boundField("year", "年份（可选）", () -> manualMatchYear, false)),
+                        boundField("year", "年份（可选）", () -> manualMatchYear, false),
+                        boundField("douban", "豆瓣条目链接（可不填）", () -> manualMatchDouban, false)),
                 true));
         Button search = button("搜索");
         search.setOnClickListener(view -> runManualMatchSearch(detail));
-        overlays.footer(panel, close, phone, search);
+        Button bindDouban = button(detail.douban == null ? "绑定豆瓣" : "重新抓取豆瓣");
+        bindDouban.setOnClickListener(view -> bindDoubanFromManualMatch(detail));
+        overlays.footer(panel, close, phone, bindDouban, search);
+
+        // 候选清单是这一屏唯一会长的一坨：按钮行放在它上面，遥控器不必每次先穿过十几行候选
+        // 再去按「搜索」或「关闭」。分 TMDB / 豆瓣两栏，谁先回来先摆谁，没填 Key 的那栏只剩一句话。
+        manualMatchTmdbCaption = widgets.caption("TMDB 候选", COLOR_MUTED);
+        panel.addView(manualMatchTmdbCaption, margin(matchWidth(), 0, sdp(12), 0, sdp(4)));
+        manualMatchTmdbRows = candidateRows();
+        panel.addView(manualMatchTmdbRows, margin(matchWidth(), 0, 0, 0, 0));
+        manualMatchDoubanCaption = widgets.caption("豆瓣候选", COLOR_MUTED);
+        panel.addView(manualMatchDoubanCaption, margin(matchWidth(), 0, sdp(12), 0, sdp(4)));
+        manualMatchDoubanRows = candidateRows();
+        panel.addView(manualMatchDoubanRows, margin(matchWidth(), 0, 0, 0, 0));
 
         declarePanelRows(overlay, panel, manualMatchQuery);
         runManualMatchSearch(detail);
     }
 
-    /** 手动匹配的搜索：候选清单按匹配分排序，与自动刮削同一套打分。 */
+    /**
+     * 手动匹配弹窗里的豆瓣那一行：贴一条条目链接（或编号）就能绑上豆瓣评分与资料。
+     * 遥控器上敲长串链接太苦，所以同一行右边那颗「手机输入」会把链接一并带上。
+     */
+    private void addDoubanRow(LinearLayout panel, Models.LibraryDetail detail) {
+        Models.DoubanMetadata bound = detail.douban;
+        panel.addView(widgets.caption(bound == null
+                ? "豆瓣（可选）：贴一条条目链接绑定豆瓣评分与资料，TMDB 搜不到的片子用它兜底。"
+                : "已绑定豆瓣：" + bound.title
+                        + (bound.rating == null ? "" : " · 豆瓣 " + ratingText(bound.rating))
+                        + (bound.year == null || bound.year.isEmpty() ? "" : " · " + bound.year),
+                bound == null ? COLOR_SUBTLE : COLOR_MUTED),
+                margin(matchWidth(), 0, sdp(10), 0, sdp(4)));
+        manualMatchDouban = input("豆瓣条目链接或编号", bound == null ? "" : bound.subjectUrl);
+        panel.addView(manualMatchDouban, matchWidth());
+        if (bound == null) {
+            return;
+        }
+        Button unbind = button("解除豆瓣绑定");
+        unbind.setTextColor(COLOR_DANGER);
+        unbind.setOnClickListener(view -> {
+            api.engine().unbindDouban(detail.itemKind, entityIdOf(detail.id));
+            detailCache.remove(detail.id);
+            showToast("已解除豆瓣绑定。");
+            Overlays.Overlay closing = manualMatchOverlay;
+            manualMatchOverlay = null;
+            if (closing != null) {
+                closing.close();
+            }
+            // 原地重画这一页：showDetail 会先把「正在进入详情」那块整屏盖上来，
+            // 条目 id 又没变，看着就是点了之后卡一下。
+            refreshDetail(detail.id, true);
+            refreshHomeLibrary(false);
+        });
+        LinearLayout.LayoutParams unbindParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, sdp(Widgets.HEIGHT_BUTTON + 10));
+        unbindParams.topMargin = sdp(6);
+        panel.addView(unbind, unbindParams);
+    }
+
+    /** 抓豆瓣并绑定：抓失败把原因写在状态行上，弹窗不关，用户可以换个链接再来。 */
+    private void bindDoubanFromManualMatch(Models.LibraryDetail detail) {
+        if (manualMatchDouban == null || manualMatchStatus == null) {
+            return;
+        }
+        String value = manualMatchDouban.getText().toString().trim();
+        if (value.isEmpty()) {
+            manualMatchStatus.setText("先贴一条豆瓣条目链接，或者用「手机输入」从手机推过来。");
+            manualMatchStatus.setVisibility(View.VISIBLE);
+            return;
+        }
+        manualMatchStatus.setText("正在抓取豆瓣条目...");
+        manualMatchStatus.setVisibility(View.VISIBLE);
+        String mediaType = detail.itemKind;
+        long entityId = entityIdOf(detail.id);
+        runAsync(() -> api.engine().bindDouban(mediaType, entityId, value),
+                meta -> {
+                    detailCache.remove(detail.id);
+                    showToast(meta.rating == null
+                            ? "已绑定豆瓣《" + meta.title + "》（这条还没有评分）"
+                            : "已绑定豆瓣《" + meta.title + "》，豆瓣 " + ratingText(meta.rating));
+                    Overlays.Overlay closing = manualMatchOverlay;
+                    manualMatchOverlay = null;
+                    if (closing != null) {
+                        closing.close();
+                    }
+                    // 原地重画：条目 id 没变，走 showDetail 会先整屏盖一次
+                    // 「正在进入详情」，绑定那一下就成了「卡一下」。
+                    refreshDetail(detail.id, true);
+                    refreshHomeLibrary(false);
+                },
+                error -> {
+                    if (manualMatchStatus != null) {
+                        manualMatchStatus.setText("豆瓣抓取失败：" + error.getMessage());
+                        manualMatchStatus.setVisibility(View.VISIBLE);
+                    }
+                });
+    }
+
+    /**
+     * 手动匹配的搜索：TMDB 与豆瓣各走一路，互不等待。TMDB 的候选按匹配分排序，与自动刮削
+     * 同一套打分；豆瓣那一路不吃 API Key，没填 Key 的时候它就是唯一的候选来源。
+     */
     private void runManualMatchSearch(Models.LibraryDetail detail) {
-        if (manualMatchOverlay == null || manualMatchRunning || manualMatchQuery == null) {
+        if (manualMatchOverlay == null || manualMatchQuery == null) {
             return;
         }
         String query = manualMatchQuery.getText().toString().trim();
         if (query.isEmpty()) {
             manualMatchStatus.setText("请先填写影视名称关键词。");
+            manualMatchStatus.setVisibility(View.VISIBLE);
             return;
         }
         String year = manualMatchYear.getText().toString().trim();
         String mediaType = detail.itemKind;
-        manualMatchRunning = true;
-        manualMatchStatus.setText("正在向 TMDB 请求数据...");
-        runAsync(() -> api.engine().searchCandidates(query, year, mediaType),
-                results -> {
-                    manualMatchRunning = false;
-                    if (manualMatchOverlay == null || manualMatchResults == null) {
-                        return;
-                    }
-                    manualMatchResults.removeAllViews();
-                    if (results.isEmpty()) {
-                        manualMatchStatus.setText("未找到与「" + query + "」相关的影视。");
-                    } else {
-                        manualMatchStatus.setText("找到 " + results.size() + " 条结果，点一行关联到这条影视。");
-                        for (TmdbClient.Result result : results) {
-                            manualMatchResults.addView(manualMatchRow(detail, result), listItemParams());
+        manualMatchStatus.setVisibility(View.GONE);
+        manualMatchTmdbRows.removeAllViews();
+        manualMatchDoubanRows.removeAllViews();
+
+        if (api.engine().tmdbConfigured()) {
+            setTextOrSkip(manualMatchTmdbCaption, "TMDB 候选：正在搜索...");
+            runAsync(() -> api.engine().searchCandidates(query, year, mediaType),
+                    results -> {
+                        if (manualMatchTmdbRows != null) {
+                            manualMatchTmdbRows.removeAllViews();
+                            for (TmdbClient.Result result : results) {
+                                manualMatchTmdbRows.addView(manualMatchRow(detail, result),
+                                        margin(matchWidth(), 0, 0, 0, sdp(8)));
+                            }
+                        }
+                        setTextOrSkip(manualMatchTmdbCaption, results.isEmpty()
+                                ? "TMDB 候选：没有匹配「" + query + "」的结果"
+                                : "TMDB 候选：" + results.size() + " 条，点中正确的那条即可关联");
+                        redclarManualMatchRows();
+                    },
+                    error -> {
+                        setTextOrSkip(manualMatchTmdbCaption, "TMDB 搜索失败：" + error.getMessage());
+                        redclarManualMatchRows();
+                    });
+        } else {
+            setTextOrSkip(manualMatchTmdbCaption,
+                    "TMDB 候选：没填 API Key，跳过。直接从下面的豆瓣候选里选。");
+        }
+
+        setTextOrSkip(manualMatchDoubanCaption, "豆瓣候选：正在搜索...");
+        runAsync(() -> api.engine().searchDoubanCandidates(query),
+                hits -> {
+                    if (manualMatchDoubanRows != null) {
+                        manualMatchDoubanRows.removeAllViews();
+                        for (DoubanClient.Hit hit : hits) {
+                            manualMatchDoubanRows.addView(doubanMatchRow(detail, hit),
+                                    margin(matchWidth(), 0, 0, 0, sdp(8)));
                         }
                     }
-                    manualMatchOverlay.redeclare(FocusGrid.rowsFrom(manualMatchOverlay.body));
+                    setTextOrSkip(manualMatchDoubanCaption, hits.isEmpty()
+                            ? "豆瓣候选：没有匹配「" + query + "」的结果"
+                            : "豆瓣候选：" + hits.size() + " 条，点中正确的那条即可绑定");
+                    redclarManualMatchRows();
                 },
                 error -> {
-                    manualMatchRunning = false;
-                    if (manualMatchStatus != null) {
-                        manualMatchStatus.setText("搜索失败：" + error.getMessage());
-                    }
+                    setTextOrSkip(manualMatchDoubanCaption, "豆瓣搜索失败：" + error.getMessage());
+                    redclarManualMatchRows();
                 });
     }
 
-    private Button manualMatchRow(Models.LibraryDetail detail, TmdbClient.Result result) {
+    private LinearLayout candidateRows() {
+        LinearLayout rows = new LinearLayout(this);
+        rows.setOrientation(LinearLayout.VERTICAL);
+        rows.setClipChildren(false);
+        rows.setClipToPadding(false);
+        return rows;
+    }
+
+    private void setTextOrSkip(TextView caption, String value) {
+        if (caption != null) {
+            caption.setText(value);
+        }
+    }
+
+    /** 候选行是异步插进来的：每回来一路就重排一次遥控器走焦，不等另一路。 */
+    private void redclarManualMatchRows() {
+        if (manualMatchOverlay != null) {
+            manualMatchOverlay.redeclare(FocusGrid.rowsFrom(manualMatchOverlay.body));
+        }
+    }
+
+    /** 豆瓣候选行：点一下就是绑这条豆瓣条目，与手动贴链接走同一条路。 */
+    private View doubanMatchRow(Models.LibraryDetail detail, DoubanClient.Hit hit) {
+        StringBuilder sub = new StringBuilder();
+        if (!hit.year.isEmpty()) {
+            sub.append(hit.year).append(" · ");
+        }
+        sub.append("tv".equals(hit.mediaType) ? "剧集" : "电影");
+        if (hit.rating > 0) {
+            sub.append(" · 豆瓣 ").append(ratingText(hit.rating));
+        }
+        String blurb = hit.summary;
+        if (blurb.length() > 46) {
+            blurb = blurb.substring(0, 46) + "...";
+        }
+        if (!blurb.isEmpty()) {
+            sub.append(" · ").append(blurb);
+        }
+        return posterRow(hit.title, sub.toString(), hit.posterUrl, () -> {
+            if (manualMatchDouban != null) {
+                manualMatchDouban.setText(hit.subjectUrl);
+            }
+            bindDoubanFromManualMatch(detail);
+        });
+    }
+
+    private View manualMatchRow(Models.LibraryDetail detail, TmdbClient.Result result) {
         String year = fourDigitYear(result.releaseDate);
         String kind = "tv".equals(result.mediaType) ? "剧集" : "电影";
         String blurb = result.overview == null ? "" : result.overview.trim().replace('\n', ' ');
         if (blurb.length() > 46) {
             blurb = blurb.substring(0, 46) + "...";
         }
-        Button row = listRowButton(result.title,
-                (year.isEmpty() ? kind : year + " · " + kind) + (blurb.isEmpty() ? "" : " · " + blurb));
-        row.setOnClickListener(view -> bindManualMatch(detail, result));
+        // 候选带海报：同名作品、续集、翻拍光靠一行字加年份分不开，遥控器上选错一次就要重来。
+        return posterRow(result.title,
+                (year.isEmpty() ? kind : year + " · " + kind) + (blurb.isEmpty() ? "" : " · " + blurb),
+                result.basePosterUrl(), () -> bindManualMatch(detail, result));
+    }
+
+    /**
+     * 「小海报 + 标题 + 副标题」的可聚焦行，手动匹配与选海报共用。
+     * 用 Button 塞不进去：异步下来的图只能挂到 ImageView 上，而整行又要能聚焦能按。
+     */
+    private View posterRow(String title, String detail, String posterUrl, Runnable onClick) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setFocusable(true);
+        row.setClickable(true);
+        row.setPadding(dp(14), dp(10), dp(14), dp(10));
+        row.setBackground(rounded(COLOR_SURFACE_ALT, COLOR_BORDER, dp(1), dp(10)));
+        row.setMinimumHeight(sdp(Widgets.HEIGHT_ROW));
+
+        ImageView poster = new ImageView(this);
+        poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        poster.setClipToOutline(true);
+        poster.setBackground(rounded(COLOR_SURFACE_ALT, COLOR_BORDER, dp(1), dp(6)));
+        row.addView(poster, margin(new LinearLayout.LayoutParams(sdp(46), sdp(68)), 0, 0, sdp(14), 0));
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        texts.setClipChildren(false);
+        texts.setClipToPadding(false);
+        TextView name = text(title, ssp(15), Typeface.BOLD, COLOR_TEXT);
+        name.setMaxLines(1);
+        name.setEllipsize(TextUtils.TruncateAt.END);
+        texts.addView(name, matchWidth());
+        if (detail != null && !detail.isEmpty()) {
+            TextView sub = widgets.caption(detail, COLOR_SUBTLE);
+            sub.setMaxLines(2);
+            sub.setEllipsize(TextUtils.TruncateAt.END);
+            texts.addView(sub, margin(matchWidth(), 0, sdp(2), 0, 0));
+        }
+        row.addView(texts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        row.setOnClickListener(view -> onClick.run());
+        row.setOnFocusChangeListener((focusedView, hasFocus) -> {
+            animateFocusScale(focusedView, hasFocus);
+            row.setBackground(rounded(hasFocus ? Theme.withAlpha(COLOR_FOCUS, 46) : COLOR_SURFACE_ALT,
+                    hasFocus ? COLOR_FOCUS : COLOR_BORDER, dp(hasFocus ? 2 : 1), dp(10)));
+        });
+        loadPoster(poster, posterUrl == null ? "" : posterUrl, sdp(46), sdp(68));
         return row;
     }
 
@@ -3858,8 +4423,14 @@ public final class MainActivity extends Activity {
                     }
                     detailCache.clear();
                     showToast("已关联《" + result.title + "》");
-                    // 跨类型改绑（电影 ↔ 剧集）会换一张表重建实体，条目 id 跟着变，只能整页重开。
-                    showDetail(result.mediaType + ":" + targetId);
+                    String reopened = result.mediaType + ":" + targetId;
+                    // 跨类型改绑（电影 ↔ 剧集）会换一张表重建实体，条目 id 跟着变，只能整页重开；
+                    // 同类型原地刷新就行，否则每次关联完都闪一次「正在进入详情」。
+                    if (reopened.equals(detail.id)) {
+                        refreshDetail(reopened, true);
+                    } else {
+                        showDetail(reopened);
+                    }
                     refreshHomeLibrary(false);
                 },
                 error -> {
@@ -3914,6 +4485,43 @@ public final class MainActivity extends Activity {
         customEditCasts = input("主演", joinByComma(detail.casts));
         panel.addView(customEditCasts, matchWidth());
 
+        // 海报：先看当前那张，再决定是手机推一张上来还是从 TMDB 候选里挑。
+        ImageView currentPoster = new ImageView(this);
+        currentPoster.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        currentPoster.setClipToOutline(true);
+        currentPoster.setBackground(rounded(COLOR_SURFACE_ALT, COLOR_BORDER, dp(1), dp(8)));
+        panel.addView(currentPoster, margin(new LinearLayout.LayoutParams(sdp(64), sdp(96)), 0, sdp(12), 0, 0));
+        loadPoster(currentPoster, detail.posterAssetId, sdp(64), sdp(96));
+
+        LinearLayout posterActions = new LinearLayout(this);
+        posterActions.setClipChildren(false);
+        posterActions.setClipToPadding(false);
+        panel.addView(posterActions, margin(matchWidth(), 0, sdp(10), 0, 0));
+        Button pushPoster = compactButton("手机推送海报");
+        posterActions.addView(pushPoster, margin(new LinearLayout.LayoutParams(0, sdp(Widgets.HEIGHT_BUTTON), 1f), 0, 0, sdp(6), 0));
+        Button pickPoster = compactButton("从 TMDB 选海报");
+        posterActions.addView(pickPoster, margin(new LinearLayout.LayoutParams(0, sdp(Widgets.HEIGHT_BUTTON), 1f), 0, 0, sdp(6), 0));
+        Button restorePoster = compactButton("恢复自动海报");
+        posterActions.addView(restorePoster, new LinearLayout.LayoutParams(0, sdp(Widgets.HEIGHT_BUTTON), 1f));
+
+        LinearLayout posterChoices = new LinearLayout(this);
+        posterChoices.setOrientation(LinearLayout.VERTICAL);
+        posterChoices.setClipChildren(false);
+        posterChoices.setClipToPadding(false);
+        panel.addView(posterChoices, margin(matchWidth(), 0, sdp(6), 0, 0));
+
+        pushPoster.setOnClickListener(view -> openPhoneInputOverlay("推送海报",
+                "在手机浏览器里粘贴一张图片地址，提交后电视立刻换上海报。",
+                java.util.Collections.singletonList(new PhoneInputServer.Field("poster", "海报图片地址",
+                        detail.posterAssetId == null ? "" : detail.posterAssetId, false, value -> {
+                            applyCustomPoster(detail, value, currentPoster);
+                        })), false));
+        pickPoster.setOnClickListener(view -> loadPosterChoices(detail, posterChoices, currentPoster));
+        restorePoster.setOnClickListener(view -> {
+            posterChoices.removeAllViews();
+            applyCustomPoster(detail, "", currentPoster);
+        });
+
         Button cancel = button("取消");
         cancel.setOnClickListener(view -> overlay.close());
         Button phone = button("手机输入");
@@ -3931,6 +4539,74 @@ public final class MainActivity extends Activity {
         save.setOnClickListener(view -> saveCustomEdit(detail));
         overlays.footer(panel, cancel, phone, save);
         declarePanelRows(overlay, panel, customEditTitle);
+    }
+
+    /** 换海报：写进实体并锁定，首页与详情页立刻重画。传空串等于清除自定义海报。 */
+    private void applyCustomPoster(Models.LibraryDetail detail, String posterUrl, ImageView thumbnail) {
+        String url = posterUrl == null ? "" : posterUrl.trim();
+        runAsync(() -> {
+            api.engine().library().setPosterOverride(detail.itemKind, entityIdOf(detail.id), url);
+            return Boolean.TRUE;
+        }, ignored -> {
+            detailCache.clear();
+            if (thumbnail != null && thumbnail.isAttachedToWindow()) {
+                loadPoster(thumbnail, url, sdp(64), sdp(96));
+            }
+            if (screen == Screen.DETAIL) {
+                refreshDetail(detail.id, false);
+            }
+            refreshHomeLibrary(false);
+            showToast(url.isEmpty() ? "已恢复自动海报" : "海报已更新");
+        }, error -> showToast("海报保存失败"));
+    }
+
+    /** 从 TMDB 按当前片名再搜一次，把候选海报列出来挑一张。 */
+    private void loadPosterChoices(Models.LibraryDetail detail, LinearLayout container, ImageView thumbnail) {
+        if (!api.engine().tmdbConfigured()) {
+            showToast("先设置 TMDB，才能挑候选海报。");
+            return;
+        }
+        if (container.getChildCount() > 0) {
+            container.removeAllViews();
+            return;
+        }
+        container.addView(widgets.caption("正在取候选海报...", COLOR_SUBTLE), margin(matchWidth(), 0, 0, 0, 0));
+        String[] hint = scrapeHint(detail);
+        String query = hint[0] != null ? hint[0] : (detail.title == null ? "" : detail.title);
+        String year = hint[1] != null ? hint[1] : fourDigitYear(detail.releaseDate);
+        String kind = detail.itemKind;
+        runAsync(() -> api.engine().searchCandidates(query, year, kind),
+                results -> {
+                    if (!container.isAttachedToWindow()) {
+                        return;
+                    }
+                    container.removeAllViews();
+                    if (results.isEmpty()) {
+                        container.addView(widgets.caption("没有取到候选海报。", COLOR_SUBTLE), margin(matchWidth(), 0, 0, 0, 0));
+                        return;
+                    }
+                    container.addView(widgets.caption("点一张海报换上来（换完记得保存资料）：", COLOR_SUBTLE),
+                            margin(matchWidth(), 0, 0, 0, sdp(4)));
+                    int shown = 0;
+                    for (TmdbClient.Result result : results) {
+                        if (result.posterPath == null || result.posterPath.isEmpty() || shown >= 6) {
+                            continue;
+                        }
+                        shown++;
+                        container.addView(posterRow(result.title,
+                                fourDigitYear(result.releaseDate) + " · 点这张当海报",
+                                result.basePosterUrl(),
+                                () -> applyCustomPoster(detail, result.basePosterUrl(), thumbnail)),
+                                margin(matchWidth(), 0, sdp(6), 0, 0));
+                    }
+                    if (container.getParent() != null && customEditOverlay != null) {
+                        customEditOverlay.redeclare(FocusGrid.rowsFrom(customEditOverlay.body));
+                    }
+                },
+                error -> {
+                    container.removeAllViews();
+                    container.addView(widgets.caption("候选海报取失败了。", COLOR_SUBTLE), margin(matchWidth(), 0, 0, 0, 0));
+                });
     }
 
     private void saveCustomEdit(Models.LibraryDetail detail) {
@@ -3971,6 +4647,27 @@ public final class MainActivity extends Activity {
     }
 
     /** 日期或年份字符串里取那四位年份，取不到就留空。 */
+    /**
+     * 按源文件名现算出建议的关键词与年份（与自动刮前同一口径）。刮错过的条目重打开弹层
+     * 时，里面填的就不该是那个错误答案的名字和年份。
+     *
+     * @return {@code {关键词, 年份}}，取不到的一项为 {@code null}
+     */
+    private String[] scrapeHint(Models.LibraryDetail detail) {
+        if (detail != null) {
+            for (Models.VideoFile file : detail.videoFiles) {
+                LocalMediaNameParser.SearchMetadata meta = LocalMediaNameParser
+                        .combinedSearchMetadata(file.relativePath, file.fileName);
+                String title = meta.chineseTitle != null ? meta.chineseTitle
+                        : meta.parentChineseTitle != null ? meta.parentChineseTitle
+                        : meta.foreignTitle;
+                return new String[]{title == null || title.trim().isEmpty() ? null : title.trim(),
+                        meta.year};
+            }
+        }
+        return new String[]{null, null};
+    }
+
     private static String fourDigitYear(String value) {
         String text = value == null ? "" : value.trim();
         if (text.length() < 4) {
@@ -4094,35 +4791,14 @@ public final class MainActivity extends Activity {
             card.setOnClickListener(view -> playFile(playbackFile));
         }
 
-        if (playbackFile != null) {
-            LinearLayout episodeActions = new LinearLayout(this);
-            episodeActions.setClipChildren(false);
-            episodeActions.setClipToPadding(false);
-            card.addView(episodeActions, margin(matchWidth(), 0, sdp(6), 0, 0));
-            Button episodeSubtitle = compactButton("改副标题");
-            episodeActions.addView(episodeSubtitle, new LinearLayout.LayoutParams(0, sdp(44), 1f));
-            episodeSubtitle.setOnClickListener(view -> openTextInputOverlay("分集副标题（留空则显示 TMDB 集名）",
-                    episode.subtitleOverride == null ? "" : episode.subtitleOverride, value -> {
-                        runAsync(() -> {
-                            api.engine().library().setEpisodeSubtitle(playbackFile.id, value);
-                            return Boolean.TRUE;
-                        }, ignored -> {
-                            if (currentDetail != null && screen == Screen.DETAIL) {
-                                detailCache.remove(currentDetail.id);
-                                refreshDetail(currentDetail.id, false);
-                            }
-                        }, error -> {
-                        });
-                    }));
-        }
-
         List<Models.VideoFile> versions = episodeVideoFiles(episode);
         if (versions.size() > 1) {
-            TextView versionHeading = text("版本 / 文件（" + versions.size() + "）", ssp(12), Typeface.BOLD, COLOR_SUBTLE);
+            // 剧集没有「版本」这一说：同一季同一集的多个文件就是这一集的几份拷贝，平铺在剧照下面。
+            TextView versionHeading = text("文件（" + versions.size() + "）", ssp(12), Typeface.BOLD, COLOR_SUBTLE);
             card.addView(versionHeading, margin(matchWidth(), 0, sdp(4), 0, sdp(8)));
             for (int index = 0; index < versions.size(); index++) {
                 Models.VideoFile versionFile = versions.get(index);
-                Button versionButton = compactButton("版本 " + (index + 1) + " · " + versionFile.fileName);
+                Button versionButton = compactButton(versionFile.fileName);
                 versionButton.setAllCaps(false);
                 versionButton.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
                 versionButton.setTag(versionFile.withEpisodeLabel(episodeDisplayLabel(episode.seasonNumber, episode.episodeNumber)));
@@ -4148,6 +4824,14 @@ public final class MainActivity extends Activity {
     private void playFile(Models.VideoFile file, List<Models.VideoFile> queue, int queueIndex) {
         screen = Screen.PLAYER;
         closeAllOverlays();
+        // 换片、换播放模式都从这条路走：旧播放必须先收干净，再建新视图。少这一步，上一个
+        // libmpv 就成了没人认领的孤儿——继续解码、继续占着硬解、继续出声，画面上是两层
+        // 画面叠在一起，新片因为抢不到解码器卡住，退出软件后声音还在循环。
+        if (playerView != null) {
+            releasePlaybackState();
+        } else {
+            stopPlaybackLoops();
+        }
         root.removeAllViews();
         root.setBackgroundColor(Color.BLACK);
         root.setFocusable(true);
@@ -4173,7 +4857,9 @@ public final class MainActivity extends Activity {
         subtitleLoadStartedAtMs = 0;
         lastKnownPlaybackPositionSeconds = 0;
         lastKnownPlaybackDurationSeconds = 0;
-        playerView = new MpvVideoView(this, activeDirectPlayback);
+        playerView = new MpvVideoView(this, activeDirectPlayback, useSurfaceViewPlayback(file));
+        playerView.setStretchToFill(api.engine().settings().playerStretchToFill());
+        playerView.setOnAspectChanged(this::relayoutPlayerSubtitleOverlays);
         root.addView(playerView, match());
         playerView.setOnKeyListener((view, keyCode, event) ->
                 event.getAction() == KeyEvent.ACTION_DOWN &&
@@ -4186,8 +4872,8 @@ public final class MainActivity extends Activity {
         overlay.setOrientation(LinearLayout.VERTICAL);
         overlay.setPadding(sdp(46), sdp(34), sdp(46), sdp(30));
         overlay.setBackgroundColor(Color.argb(108, 0, 0, 0));
-        overlay.addView(text(file.label(), ssp(22), Typeface.BOLD, COLOR_PLAYER_TEXT));
-        String summary = file.mediaSummary();
+        overlay.addView(text(playerHeadingFor(file), ssp(22), Typeface.BOLD, COLOR_PLAYER_TEXT));
+        String summary = playerSummaryFor(file);
         if (!summary.isEmpty()) {
             overlay.addView(text(summary, ssp(14), Typeface.NORMAL, COLOR_PLAYER_MUTED));
         }
@@ -4260,12 +4946,17 @@ public final class MainActivity extends Activity {
             settings = Models.AppSettings.defaults();
         }
         Models.PlaybackFileStreams streams = null;
-        boolean iso = isIsoFile(file);
         String finalUrl = playbackUrl;
         if (playbackUrl.startsWith("smb://")) {
             finalUrl = SmbStreamServer.shared().prepare(api.engine().smbClientForUrl(playbackUrl), playbackUrl);
         }
-        return new ResolvedPlayback(finalUrl, "", "", settings, streams, "", "", iso && playbackUrl.startsWith("file://"));
+        if (isIsoFile(file)) {
+            // 打包进来的 libmpv 没链 libbluray，bd:// 这条协议在这台机器上根本不存在，
+            // 直接扔给 mpv 只会得到「no audio or video data played」。改成客户端读 UDF：
+            // 挑 BDMV/STREAM 里最大的那条流，用本机 range 代理当普通 MPEG-TS 播。
+            finalUrl = resolveIsoPlaybackUrl(finalUrl, "");
+        }
+        return new ResolvedPlayback(finalUrl, "", "", settings, streams, "", "", false);
     }
 
     private String resolveIsoPlaybackUrl(String streamUrl, String cookieHeader) throws IOException {
@@ -4303,7 +4994,7 @@ public final class MainActivity extends Activity {
         replaceActivePlaybackQueueFile(playbackFile);
         boolean resolvedDirectPlayback = shouldUseDirectPlayback(playbackFile);
         if (resolvedDirectPlayback != activeDirectPlayback) {
-            replacePlayerViewForPlaybackMode(resolvedDirectPlayback);
+            replacePlayerViewForPlaybackMode(resolvedDirectPlayback, playbackFile);
         }
         status.setText("正在开始播放");
         activePlaybackTicket = playback.ticket;
@@ -4321,6 +5012,7 @@ public final class MainActivity extends Activity {
 
                 didStart = true;
                 refreshRuntimeTracks();
+                prefindSidecars(playbackFile);
                 scheduleResumeSeek(playbackFile);
                 status.setText(playbackStatusText(playbackFile, playback));
                 applyDefaultPlaybackTracks(playbackFile, playback.settings);
@@ -4345,18 +5037,15 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void replacePlayerViewForPlaybackMode(boolean directPlaybackMode) {
-        if (playerView == null) {
-            activeDirectPlayback = directPlaybackMode;
-            playerView = new MpvVideoView(this, activeDirectPlayback);
-            root.addView(playerView, 0, match());
-        } else {
-            root.removeView(playerView);
-            playerView.destroyPlayer();
-            activeDirectPlayback = directPlaybackMode;
-            playerView = new MpvVideoView(this, activeDirectPlayback);
-            root.addView(playerView, 0, match());
-        }
+    private void replacePlayerViewForPlaybackMode(boolean directPlaybackMode, Models.VideoFile file) {
+        boolean useSurfaceView = useSurfaceViewPlayback(file) || directPlaybackMode;
+        releasePlayerView();
+        activeDirectPlayback = directPlaybackMode;
+        playerView = new MpvVideoView(this, activeDirectPlayback, useSurfaceView);
+        playerView.setStretchToFill(api.engine().settings().playerStretchToFill());
+        playerView.setOnAspectChanged(this::relayoutPlayerSubtitleOverlays);
+        // 插在 0 号位：顶部信息条、字幕层、控制条都是后进来的，得盖在画面上面。
+        root.addView(playerView, 0, match());
         playerView.setOnKeyListener((view, keyCode, event) ->
                 event.getAction() == KeyEvent.ACTION_DOWN &&
                         screen == Screen.PLAYER &&
@@ -4397,6 +5086,33 @@ public final class MainActivity extends Activity {
             }
         }
         activePlaybackQueue = queue;
+    }
+
+    /** 播放器左上角写刮削到的片名，不写 S01E02 这种内部编号。 */
+    private String playerHeadingFor(Models.VideoFile file) {
+        Models.LibraryDetail detail = currentDetail;
+        String kind = file.episodeNumber != null ? "tv" : "movie";
+        if (detail != null && detail.title != null && !detail.title.isEmpty()
+                && kind.equals(detail.itemKind)) {
+            return detail.title;
+        }
+        return file.label();
+    }
+
+    /** 第二行写分集信息与封装 / 编码：编号只作为分集标签出现在这里。 */
+    private String playerSummaryFor(Models.VideoFile file) {
+        ArrayList<String> parts = new ArrayList<>();
+        if (file.seasonNumber != null && file.episodeNumber != null) {
+            parts.add(episodeDisplayLabel(file.seasonNumber, file.episodeNumber));
+            if (file.episodeTitle != null && !file.episodeTitle.isEmpty()) {
+                parts.add(file.episodeTitle);
+            }
+        }
+        String media = file.mediaSummary();
+        if (!media.isEmpty()) {
+            parts.add(media);
+        }
+        return TextUtils.join(" · ", parts);
     }
 
     private void scheduleResumeSeek(Models.VideoFile file) {
@@ -4463,10 +5179,33 @@ public final class MainActivity extends Activity {
         tools.addView(subtitle, margin(new LinearLayout.LayoutParams(sdp(66), sdp(50)), sdp(9), 0, 0, 0));
         subtitle.setOnClickListener(view -> showSubtitleMenu(activePlaybackFile == null ? file : activePlaybackFile, subtitle));
 
+        // 播放模式：写当前模式的那颗字按钮，点开就是两选一，换完立刻按新模式重开这一条。
+        playerModeButton = playerButton(activePlaybackStatusText(file));
+        playerModeButton.setId(View.generateViewId());
+        playerModeButton.setContentDescription("播放模式");
+        tools.addView(playerModeButton,
+                margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, sdp(50)),
+                        sdp(9), 0, 0, 0));
+        playerModeButton.setOnClickListener(view -> showPlaybackModeMenu(playerModeButton));
+
+        // 画面比例：右下角最后一颗，写当前那一档，点开两选一。黑边还是变形，电视与片源
+        // 组合太多，这个只能让用户自己挑，但得让他当场挑得动。
+        playerAspectButton = playerButton(playerAspectLabel());
+        playerAspectButton.setId(View.generateViewId());
+        playerAspectButton.setContentDescription("画面比例");
+        tools.addView(playerAspectButton,
+                margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, sdp(50)),
+                        sdp(9), 0, 0, 0));
+        playerAspectButton.setOnClickListener(view -> showAspectModeMenu(playerAspectButton));
+
         pause.setNextFocusRightId(audio.getId());
         audio.setNextFocusLeftId(pause.getId());
         audio.setNextFocusRightId(subtitle.getId());
         subtitle.setNextFocusLeftId(audio.getId());
+        subtitle.setNextFocusRightId(playerModeButton.getId());
+        playerModeButton.setNextFocusLeftId(subtitle.getId());
+        playerModeButton.setNextFocusRightId(playerAspectButton.getId());
+        playerAspectButton.setNextFocusLeftId(playerModeButton.getId());
 
         LinearLayout progressRow = new LinearLayout(this);
         progressRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -4666,17 +5405,7 @@ public final class MainActivity extends Activity {
     }
 
     private void transitionToPlaybackPart(Models.VideoFile nextFile, List<Models.VideoFile> queue, int nextIndex) {
-        stopPlayerUiUpdates();
-        stopProgressUpdates();
-        stopSubtitleOverlayUpdates();
-        stopSmoothPlayerSeek();
-        closePlayerMenu(null);
-        stopActiveHlsSession();
-        activePlaybackFile = null;
-        if (playerView != null) {
-            playerView.destroyPlayer();
-            playerView = null;
-        }
+        releasePlaybackState();
         playFile(nextFile, queue, nextIndex);
     }
 
@@ -4746,11 +5475,119 @@ public final class MainActivity extends Activity {
             boolean selected = isExternalSubtitleSelected(track);
             options.add(new PlayerMenuOption(formatExternalSubtitle(track), selected, () -> selectExternalSubtitle(track)));
         }
+        for (LocalEngine.Sidecar sidecar : api.engine().sidecarsFor(file.id)) {
+            if (!sidecar.usable()) {
+                continue;
+            }
+            options.add(new PlayerMenuOption(sidecarMenuLabel(sidecar),
+                    sidecarMenuKey(sidecar).equals(selectedSidecarKey),
+                    () -> selectSubtitleSidecar(file, sidecar)));
+        }
+        // 现成的外挂字幕在片子刚播起来时就自动认过一遍了（prefindSidecars），这里只留个手动重找。
+        options.add(new PlayerMenuOption("再找一遍媒体源里的外挂字幕", false, () -> lookForSidecars(file, returnFocus)));
+        options.add(new PlayerMenuOption("后台转档这条的内封字幕", false, () -> transcodeSidecarNow(file)));
+        boolean hasSubtitleTracks = !file.subtitleStreams.isEmpty()
+                || !activeRuntimeSubtitleTracks.isEmpty() || !activeExternalSubtitles.isEmpty();
+        if (activeDirectPlayback && hasSubtitleTracks) {
+            // 直出时视频直接进解码器，mpv 的字幕渲染根本不参与——这不是 bug，是这条链路的代价。
+            options.add(new PlayerMenuOption("直出不渲染内封字幕 · 改用兼容字幕播放", false,
+                    () -> switchPlaybackModeDuringPlayback(false)));
+        }
         if (options.isEmpty()) {
             options.add(new PlayerMenuOption("暂无可切换字幕", false, () -> {
             }));
         }
         showPlayerMenu("字幕", options, returnFocus);
+    }
+
+    private void showPlaybackModeMenu(View returnFocus) {
+        ArrayList<PlayerMenuOption> options = new ArrayList<>();
+        options.add(new PlayerMenuOption("兼容字幕播放 · 字幕由播放器画", !activeDirectPlayback,
+                () -> switchPlaybackModeDuringPlayback(false)));
+        options.add(new PlayerMenuOption("高性能直出 · 视频直接进解码器", activeDirectPlayback,
+                () -> switchPlaybackModeDuringPlayback(true)));
+        showPlayerMenu("播放模式", options, returnFocus);
+    }
+
+    /**
+     * 画面比例一变，两层字幕都得跟着挪：文字层抬高一个黑边高度，PGS 层直接缩到画面那块
+     * （它按字幕平面的比例自绘，视图与画面对齐了字才落在画上而不是黑边里）。
+     * 这个回调可能正好落在布局过程中，所以排到下一轮再改布局。
+     */
+    private void relayoutPlayerSubtitleOverlays() {
+        main.post(() -> {
+            if (playerView == null) {
+                return;
+            }
+            int inset = playerView.letterboxInset();
+            if (playerSubtitleOverlay != null
+                    && playerSubtitleOverlay.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+                FrameLayout.LayoutParams params
+                        = (FrameLayout.LayoutParams) playerSubtitleOverlay.getLayoutParams();
+                int wanted = sdp(154) + inset;
+                if (params.bottomMargin != wanted) {
+                    params.bottomMargin = wanted;
+                    playerSubtitleOverlay.setLayoutParams(params);
+                }
+            }
+            if (playerPgsSubtitleOverlay != null
+                    && playerPgsSubtitleOverlay.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+                FrameLayout.LayoutParams params
+                        = (FrameLayout.LayoutParams) playerPgsSubtitleOverlay.getLayoutParams();
+                int frameHeight = playerView.videoFrameHeight();
+                int wanted = frameHeight > 0 && frameHeight < playerView.getHeight()
+                        ? frameHeight : ViewGroup.LayoutParams.MATCH_PARENT;
+                if (params.height != wanted || params.gravity != Gravity.CENTER) {
+                    params.height = wanted;
+                    params.gravity = Gravity.CENTER;
+                    playerPgsSubtitleOverlay.setLayoutParams(params);
+                }
+            }
+        });
+    }
+
+    private String playerAspectLabel() {
+        return api.engine().settings().playerStretchToFill() ? "拉伸" : "保持比例";
+    }
+
+    private void showAspectModeMenu(View returnFocus) {
+        boolean stretch = api.engine().settings().playerStretchToFill();
+        ArrayList<PlayerMenuOption> options = new ArrayList<>();
+        options.add(new PlayerMenuOption("保持比例 · 按影片比例留黑边", !stretch,
+                () -> setPlayerAspectMode(false)));
+        options.add(new PlayerMenuOption("拉伸填满 · 铺满全屏但会变形", stretch,
+                () -> setPlayerAspectMode(true)));
+        showPlayerMenu("画面比例", options, returnFocus);
+    }
+
+    /** 就地改比例：不重开播放器，黑边或变形当场生效，偏好写下来给下一条用。 */
+    private void setPlayerAspectMode(boolean stretchToFill) {
+        api.engine().settings().setPlayerStretchToFill(stretchToFill);
+        if (playerView != null) {
+            playerView.setStretchToFill(stretchToFill);
+        }
+        if (playerAspectButton != null) {
+            playerAspectButton.setText(playerAspectLabel());
+        }
+    }
+
+    /**
+     * 播放中换模式：写偏好、把当前进度记回库，再按新模式重开这一条。解码链路整条换掉，
+     * libmpv 没有就地换 vo 的说法，重开是唯一干净的做法；进度靠 rememberPlaybackPosition 接回去。
+     */
+    private void switchPlaybackModeDuringPlayback(boolean highPerformanceDirect) {
+        update4kDvHdrPlaybackMode(highPerformanceDirect);
+        Models.VideoFile file = activePlaybackFile;
+        if (file == null) {
+            showToast(highPerformanceDirect ? "已选择高性能直出。" : "已选择兼容字幕播放。");
+            return;
+        }
+        postPlaybackProgress(file);
+        List<Models.VideoFile> queue = playbackQueueFor(file);
+        playFile(file, queue, Math.max(0, indexOfVideoFile(queue, file.id)));
+        showToast(highPerformanceDirect
+                ? "已换高性能直出：视频直接进解码器，内封字幕要看得换回兼容字幕播放。"
+                : "已换兼容字幕播放：字幕由播放器画，性能开销更高。");
     }
 
     private void showPlayerMenu(String title, List<PlayerMenuOption> options, View returnFocus) {
@@ -4762,15 +5599,22 @@ public final class MainActivity extends Activity {
         panel.setPadding(0, 0, 0, 0);
         panel.setClipChildren(false);
         panel.setClipToPadding(false);
-        TextView menuTitle = text(title, ssp(18), Typeface.BOLD, COLOR_PLAYER_TEXT);
+        TextView menuTitle = text(playerMenuHeading(title, options), ssp(18),
+                Typeface.BOLD, COLOR_PLAYER_TEXT);
         menuTitle.setShadowLayer(sdp(2), 0, sdp(1), Color.BLACK);
         panel.addView(menuTitle, margin(matchWidth(), 0, 0, 0, sdp(12)));
 
+        // 蓝光常带十几条字幕轨，一屏摆不下：行装进限高滚动区，方向键焦点走到哪一行，
+        // Android 自己把那一行滚进视野，不然下面的轨道根本够不着。
+        LinearLayout rows = new LinearLayout(this);
+        rows.setOrientation(LinearLayout.VERTICAL);
+        rows.setClipChildren(false);
+        rows.setClipToPadding(false);
         Button first = null;
         Button selectedButton = null;
         for (PlayerMenuOption option : options) {
             Button button = playerMenuButton(option.displayLabel(), option.selected);
-            panel.addView(button, margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, sdp(48)), 0, sdp(7), 0, 0));
+            rows.addView(button, margin(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, sdp(48)), 0, sdp(7), 0, 0));
             button.setOnClickListener(view -> {
                 option.action.run();
                 closePlayerMenu(returnFocus);
@@ -4783,6 +5627,14 @@ public final class MainActivity extends Activity {
                 selectedButton = button;
             }
         }
+        PlayerMenuScroll scroll = new PlayerMenuScroll(this);
+        scroll.setClipChildren(false);
+        scroll.setClipToPadding(false);
+        scroll.setPadding(0, 0, sdp(6), 0);
+        scroll.addView(rows, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        panel.addView(scroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(sdp(340), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.RIGHT | Gravity.BOTTOM);
         params.setMargins(0, 0, sdp(58), sdp(248));
@@ -5110,6 +5962,14 @@ public final class MainActivity extends Activity {
     private List<SubtitleCue> parseSubtitleCues(String text) {
         ArrayList<SubtitleCue> cues = new ArrayList<>();
         if (text == null || text.isEmpty()) {
+            return cues;
+        }
+        if (com.omniplay.tv.subtitle.AssSubtitle.looksLikeAss(text)) {
+            // 转档出来的 .ass 之前按 SRT 读，一行都认不出来，于是覆盖层什么都不画。
+            for (com.omniplay.tv.subtitle.AssSubtitle.Cue cue
+                    : com.omniplay.tv.subtitle.AssSubtitle.parse(text)) {
+                cues.add(new SubtitleCue(cue.startSeconds, cue.endSeconds, cue.text));
+            }
             return cues;
         }
 
@@ -5912,10 +6772,43 @@ public final class MainActivity extends Activity {
 
     /** Short-lived message for actions taken from the detail page (cache queue errors). */
     private void showToast(String message) {
-        if (message == null || message.isEmpty()) {
+        String brief = briefMessage(message);
+        if (brief.isEmpty()) {
             return;
         }
-        main.post(() -> android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show());
+        main.post(() -> android.widget.Toast.makeText(this, brief, Toast.LENGTH_SHORT).show());
+    }
+
+    /**
+     * 屏幕上只允许出现一行、一眼的短句。
+     *
+     * <p>以前底层异常（WebDAV 返回的整段 XML、HTTP 状态行）会原样塞进提示里，
+     * 电视上就变成中间糊一大段运行日志、几秒后才消失。这里统一压掉换行、
+     * 折行空白并截断，宁可少说也不刷屏——完整堆栈留在日志和 CrashLog 里。
+     */
+    private static String briefMessage(String message) {
+        if (message == null) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder(message.length());
+        boolean space = false;
+        for (int index = 0; index < message.length(); index++) {
+            char c = message.charAt(index);
+            if (c == '\n' || c == '\r' || c == '\t' || c == ' ') {
+                space = builder.length() > 0;
+                continue;
+            }
+            if (space) {
+                builder.append(' ');
+                space = false;
+            }
+            builder.append(c);
+            if (builder.length() >= 96) {
+                builder.append("…");
+                break;
+            }
+        }
+        return builder.toString();
     }
 
     private void renderError(String message, Runnable backAction) {
@@ -5937,6 +6830,10 @@ public final class MainActivity extends Activity {
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         if (screen == Screen.PLAYER && playerView != null && handlePlayerKeyEvent(event)) {
+            return true;
+        }
+        // 输入框拿到焦点时，左右键先给光标：光标还在中间就不动焦点，走到头了才交给焦点网格。
+        if (moveCaretInFocusedField(event)) {
             return true;
         }
         // Whatever screen or panel declared a grid owns the arrow keys, including EditTexts,
@@ -6081,6 +6978,41 @@ public final class MainActivity extends Activity {
         }
     }
 
+    /**
+     * 遥控器在输入框里改一位数字：左右键挪光标，光标到最左 / 最右之后才让焦点网格把焦点挪走。
+     * 没有这一步，光标永远停在整串文字最前面，删不掉前面的字符，只能整串重打。
+     */
+    private boolean moveCaretInFocusedField(KeyEvent event) {
+        int keyCode = event.getKeyCode();
+        if (event.getAction() != KeyEvent.ACTION_DOWN
+                || (keyCode != KeyEvent.KEYCODE_DPAD_LEFT && keyCode != KeyEvent.KEYCODE_DPAD_RIGHT)) {
+            return false;
+        }
+        View focused = getCurrentFocus();
+        if (!(focused instanceof EditText)) {
+            return false;
+        }
+        EditText field = (EditText) focused;
+        int length = field.getText().length();
+        if (length == 0) {
+            return false;
+        }
+        int start = Math.max(0, Math.min(length, field.getSelectionStart()));
+        int end = Math.max(0, Math.min(length, field.getSelectionEnd()));
+        int direction = keyCode == KeyEvent.KEYCODE_DPAD_LEFT ? -1 : 1;
+        if (start != end) {
+            // 有选区：左右键先收拢到选区的一端，与系统输入框同一手感。
+            field.setSelection(direction < 0 ? start : end);
+            return true;
+        }
+        int next = start + direction;
+        if (next < 0 || next > length) {
+            return false;
+        }
+        field.setSelection(next);
+        return true;
+    }
+
     private int focusDirectionForKey(int keyCode) {
         if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
             return View.FOCUS_UP;
@@ -6208,6 +7140,7 @@ public final class MainActivity extends Activity {
             return;
         }
         playerSeekLongPressActive = true;
+        playerSeekHoldStartedAtMs = android.os.SystemClock.elapsedRealtime();
         playerSeekDirection = direction < 0 ? -1 : 1;
         if (playerSeekPreviewPosition < 0) {
             double duration = playerView.durationSeconds();
@@ -6227,8 +7160,11 @@ public final class MainActivity extends Activity {
         if (duration <= 0) {
             duration = activePlaybackFile.durationSeconds;
         }
-        double upperBound = duration > 0 ? duration : Math.max(0, playerSeekPreviewPosition + PLAYER_SEEK_STEP_SECONDS);
-        playerSeekPreviewPosition = Math.max(0, Math.min(upperBound, playerSeekPreviewPosition + playerSeekDirection * PLAYER_SEEK_STEP_SECONDS));
+        double step = playerSeekStepSeconds(
+                android.os.SystemClock.elapsedRealtime() - playerSeekHoldStartedAtMs);
+        double upperBound = duration > 0 ? duration : Math.max(0, playerSeekPreviewPosition + step);
+        playerSeekPreviewPosition = Math.max(0, Math.min(upperBound,
+                playerSeekPreviewPosition + playerSeekDirection * step));
         playerView.seekTo(playerSeekPreviewPosition);
         updatePlayerUi(activePlaybackFile);
         if (playerSeekRepeater != null) {
@@ -6236,6 +7172,23 @@ public final class MainActivity extends Activity {
         }
         playerSeekRepeater = this::runSmoothPlayerSeekStep;
         main.postDelayed(playerSeekRepeater, PLAYER_SEEK_REPEAT_MS);
+    }
+
+    /**
+     * 长按快进的步长随按住时间爬升：10×、30×、100×、250× 实时速度。以前一路 10×，
+     * 想跳过片头得按住小半分钟，抱怨的「快进较慢」就是这个。
+     */
+    private double playerSeekStepSeconds(long heldMs) {
+        if (heldMs < 700) {
+            return PLAYER_SEEK_STEP_SECONDS;
+        }
+        if (heldMs < 1800) {
+            return 2.4d;
+        }
+        if (heldMs < 3500) {
+            return 8d;
+        }
+        return 20d;
     }
 
     private void stopSmoothPlayerSeek() {
@@ -6310,7 +7263,17 @@ public final class MainActivity extends Activity {
         if (isIsoFile(file)) {
             return false;
         }
-        return highPerformanceDirectPlayback && (needsManagedColorPlayback(file) || isLikely4K(file));
+        // 选了直出就直出，不再只看 4K / HDR：遥控器上按「高性能直出」却还在色彩管理播放，
+        // 会被当成按钮没反应。
+        return highPerformanceDirectPlayback;
+    }
+
+    /**
+     * 兼容模式默认画在 TextureView 上；只有 4K 与 HDR 这类本来就在帧预算边缘的文件换到
+     * SurfaceView（与直出模式同一条路径，少一层合成）。1080p 的日常播放维持原载体。
+     */
+    private boolean useSurfaceViewPlayback(Models.VideoFile file) {
+        return shouldUseDirectPlayback(file) || isLikely4K(file) || needsManagedColorPlayback(file);
     }
 
     private String initialPlaybackStatus(Models.VideoFile file) {
@@ -6528,21 +7491,42 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void destroyPlayer() {
+    /** 停掉所有跟着播放页跑的轮询：换片、换模式、退出播放页都得先清一遍。 */
+    private void stopPlaybackLoops() {
         stopPlayerChromeHide();
         stopSubtitleOverlayUpdates();
         stopSmoothPlayerSeek();
+        stopPlayerUiUpdates();
+        stopProgressUpdates();
+    }
+
+    /**
+     * 收尾当前这一条播放：记住位置、停掉所有轮询、停本地代理、毁掉播放器。换片、换播放
+     * 模式、退出播放页都走这里，免得哪条路径只毁了一半，后台还剩个实例在出声。
+     */
+    private void releasePlaybackState() {
+        stopPlaybackLoops();
+        closePlayerMenu(null);
         stopActiveHlsSession();
+        flushPlaybackProgress();
         RemoteIsoStreamServer.shared().clear();
         SmbStreamServer.shared().clear();
-        if (playerView != null) {
-            closePlayerMenu(null);
-            stopPlayerUiUpdates();
-            stopProgressUpdates();
-            flushPlaybackProgress();
-            playerView.destroyPlayer();
-            playerView = null;
+        releasePlayerView();
+    }
+
+    /** 释放当前播放器视图，可重复调用：先从视图树里摘掉（顺带毁掉渲染面），再停解码。 */
+    private void releasePlayerView() {
+        if (playerView == null) {
+            return;
         }
+        MpvVideoView leaving = playerView;
+        playerView = null;
+        root.removeView(leaving);
+        leaving.destroyPlayer();
+    }
+
+    private void destroyPlayer() {
+        releasePlaybackState();
         playerCurrentTime = null;
         playerTotalTime = null;
         playerStatusText = null;
@@ -6551,6 +7535,7 @@ public final class MainActivity extends Activity {
         playerPlayPauseButton = null;
         playerAudioButton = null;
         playerSubtitleButton = null;
+        playerAspectButton = null;
         playerTopOverlay = null;
         playerControlsPanel = null;
         playerProgressFill = null;
@@ -6607,6 +7592,8 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         destroyPlayer();
+        // 名册兜底：哪条路径漏释放，实例就还挂在进程里，电视上就是退出软件还在出声。
+        MpvVideoView.releaseAllPlayers();
         io.shutdownNow();
         if (phoneInput != null) {
             phoneInput.stop();
@@ -6968,6 +7955,14 @@ public final class MainActivity extends Activity {
     }
 
     /** 三态文案，与 mac 版 PlaybackWatchState.statusLabel 一一对应。 */
+    /** 已看 / 未看完 / 未看三态对应的符号，与 mac 的 checkmark.circle.fill 等三个一一对应。 */
+    private Icons.Kind watchStateOf(Models.VideoFile file) {
+        if (isEffectivelyWatched(file)) {
+            return Icons.Kind.WATCH_DONE;
+        }
+        return fileProgressPercent(file) > 0 ? Icons.Kind.WATCH_PART : Icons.Kind.WATCH_NONE;
+    }
+
     private String watchedStatusLabel(Models.VideoFile file) {
         if (file == null) {
             return "未观看";
@@ -7006,6 +8001,12 @@ public final class MainActivity extends Activity {
                 if (season.seasonNumber == mainFile.seasonNumber) {
                     return season.id;
                 }
+            }
+        }
+        // 默认展开正季：特别篇排在最后，但不该因为排序以外的原因被当成默认那一节。
+        for (Models.Season season : detail.seasons) {
+            if (season.seasonNumber != 0) {
+                return season.id;
             }
         }
         return detail.seasons.isEmpty() ? "" : detail.seasons.get(0).id;
@@ -7943,7 +8944,13 @@ public final class MainActivity extends Activity {
                 ? Math.max(0, Math.min(100, (int) Math.round(Math.min(summary.positionSeconds, summary.durationSeconds) / summary.durationSeconds * 100)))
                 : fileProgressPercent(file);
         timeline.addView(progressBar(percent, sdp(308), sdp(6)), margin(new LinearLayout.LayoutParams(sdp(308), sdp(6)), sdp(10), 0, sdp(10), 0));
-        TextView total = text(summary.durationSeconds > 0 ? formatPlaybackTime(summary.durationSeconds) : "--:--", ssp(12), Typeface.BOLD, COLOR_MUTED);
+        // 左边已经写了看到哪儿，右边再写一遍总时长等于什么都没说：这里写还剩多少。
+        TextView total = text(summary.durationSeconds > 0
+                ? "-" + formatPlaybackTime(Math.max(0, summary.durationSeconds - summary.positionSeconds))
+                : "--:--", ssp(12), Typeface.BOLD, COLOR_MUTED);
+        total.setContentDescription("已播 " + formatPlaybackTime(summary.positionSeconds)
+                + " · 总时长 " + (summary.durationSeconds > 0
+                ? formatPlaybackTime(summary.durationSeconds) : "未知"));
         total.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
         timeline.addView(total, new LinearLayout.LayoutParams(sdp(78), ViewGroup.LayoutParams.MATCH_PARENT));
         return timeline;
@@ -8016,7 +9023,11 @@ public final class MainActivity extends Activity {
 
     private void loadPoster(ImageView image, String posterAssetId, int targetWidth, int targetHeight) {
         if (posterAssetId != null) {
-            imageLoader.load(image, api.posterUrl(posterAssetId), api.cookieHeader(), targetWidth, targetHeight);
+            String url = api.posterUrl(posterAssetId);
+            // 最后一个参数允许同步命中磁盘缩略图：已刮前的海报开软件那一下就该在屏上，
+            // 先插一块占位再等异步回来，看起来就是「先变白板再出图」。
+            imageLoader.load(image, url, api.cookieHeader(), targetWidth, targetHeight,
+                    api.posterFallbackUrl(url), true);
         } else {
             imageLoader.load(image, null, api.cookieHeader(), targetWidth, targetHeight);
         }
@@ -8045,8 +9056,10 @@ public final class MainActivity extends Activity {
                     }
                 } catch (Throwable callbackBroke) {
                     // A broken callback on the main thread is what a "闪退" usually is.
+                    // 只记账不弹条：这一句在屏幕中间糊一大段栈，几秒后自己消失，用户看到的
+                    // 是一屏乱码而不是一句能读懂的话。完整记录在崩溃文件与 logcat 里。
                     CrashLog.record(this, "界面回调", callbackBroke);
-                    showToast(CrashLog.summarize(callbackBroke));
+                    android.util.Log.w("OmniPlay", "界面回调异常", callbackBroke);
                 }
             });
         });
@@ -8057,18 +9070,29 @@ public final class MainActivity extends Activity {
     }
 
     /** The two-tone chip in front of a theme name: panel colour on the right, accent on the left. */
+    /** 主题胶囊左边的小色板：背景渐变 + 一张卡片 + 一条强调色，就是真机上那一屏的缩影。 */
     private Drawable themeSwatch(Theme.Variant variant) {
-        GradientDrawable base = new GradientDrawable();
-        base.setColor(variant.surface);
-        base.setCornerRadius(dp(3));
-        base.setStroke(dp(1), Theme.blend(variant.surface,
-                variant.dark ? Color.WHITE : Color.BLACK, 0.24f));
+        GradientDrawable base = new GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                new int[]{
+                        Theme.blend(variant.background, variant.wash, 0.6f),
+                        variant.background,
+                        Theme.blend(variant.wash, variant.accent,
+                                variant.dark ? 0.34f : 0.26f)
+                });
+        base.setCornerRadius(dp(4));
+        base.setStroke(dp(1), Theme.blend(variant.background,
+                variant.dark ? Color.WHITE : Color.BLACK, variant.dark ? 0.22f : 0.16f));
+        GradientDrawable card = new GradientDrawable();
+        card.setColor(variant.surface);
+        card.setCornerRadius(dp(2));
         GradientDrawable accent = new GradientDrawable();
         accent.setColor(variant.accent);
-        accent.setCornerRadius(dp(2));
-        LayerDrawable layer = new LayerDrawable(new Drawable[]{base, accent});
-        layer.setLayerInset(1, dp(3), dp(3), Math.round(dp(30) * 0.55f), dp(3));
-        layer.setBounds(0, 0, dp(30), dp(18));
+        accent.setCornerRadius(dp(1));
+        LayerDrawable layer = new LayerDrawable(new Drawable[]{base, card, accent});
+        layer.setLayerInset(1, dp(3), dp(3), dp(3), dp(6));
+        layer.setLayerInset(2, dp(5), dp(5), dp(16), dp(9));
+        layer.setBounds(0, 0, dp(34), dp(20));
         return layer;
     }
 
@@ -8134,10 +9158,44 @@ public final class MainActivity extends Activity {
         button.setStateListAnimator(null);
         button.setClipToOutline(true);
         button.setBackground(rounded(Color.argb(selected ? 44 : 18, 255, 255, 255), Color.argb(112, 255, 255, 255), FOCUS_STROKE_PX, sdp(10)));
+        if (selected) {
+            // 播放菜单叠在画面上，只靠底板提亮根本看不出哪条是当前的：再加一个勾。
+            Drawable check = getDrawable(R.drawable.ic_menu_check);
+            if (check != null) {
+                check.setTint(COLOR_ACCENT);
+                check.setBounds(0, 0, sdp(18), sdp(18));
+                button.setCompoundDrawablesRelativeWithIntrinsicBounds(check, null, null, null);
+                button.setCompoundDrawablePadding(sdp(10));
+            }
+        }
         button.setFocusable(true);
         button.setFocusableInTouchMode(false);
         theme.stylePlayerMenuFocus(button, selected);
         return button;
+    }
+
+    /** 菜单标题顺带把当前选中的那条念一遍，退出菜单前就知道自己选了哪轨。 */
+    private String playerMenuHeading(String title, List<PlayerMenuOption> options) {
+        for (PlayerMenuOption option : options) {
+            if (option.selected) {
+                return title + " · 已选 " + option.displayLabel();
+            }
+        }
+        return title;
+    }
+
+    /** 播放菜单的行容器：最多占屏高六成，轨道再多也能用方向键翻到。 */
+    private static final class PlayerMenuScroll extends ScrollView {
+        PlayerMenuScroll(Context context) {
+            super(context);
+        }
+
+        @Override
+        protected void onMeasure(int widthSpec, int heightSpec) {
+            int cap = Math.round(getResources().getDisplayMetrics().heightPixels * 0.6f);
+            super.onMeasure(widthSpec, View.MeasureSpec.makeMeasureSpec(
+                    cap, View.MeasureSpec.AT_MOST));
+        }
     }
 
     // ---- shared controls: every button/label in this app comes from ui/Widgets ----
@@ -8203,12 +9261,19 @@ public final class MainActivity extends Activity {
     }
 
     /** 观看状态那颗图标：静止时用自己的颜色，拿到焦点只抬高并染主题色。 */
-    private void applyWatchedIconFocus(TextView icon, int restColor) {
+    /**
+     * 海报下的观看状态图标：已看是实心圆里挖一个勾，未看完是半个实心，未看是一个空心圆，
+     * 全部按 mac 版那几个 SF Symbols 自己画；焦点时染成强调色，仍然是纯图形没有文字。
+     */
+    private void setWatchedIcon(ImageView icon, Icons.Kind glyph, int restColor, String label) {
+        icon.setImageDrawable(Icons.of(glyph, sdp(19), restColor, dp(1.7f)));
+        icon.setContentDescription(label);
+        icon.setTooltipText(label);
         icon.setBackgroundColor(Color.TRANSPARENT);
-        icon.setTextColor(restColor);
         icon.setOnFocusChangeListener((focusedView, hasFocus) -> {
             animateFocusScale(focusedView, hasFocus);
-            icon.setTextColor(hasFocus ? COLOR_FOCUS : restColor);
+            icon.setImageDrawable(Icons.of(glyph, sdp(19),
+                    hasFocus ? COLOR_FOCUS : restColor, dp(1.7f)));
         });
     }
 
@@ -8469,4 +9534,181 @@ public final class MainActivity extends Activity {
     private interface Failure {
         void accept(Throwable error);
     }
+
+    // ---- 字幕 sidecar（1.34）----------------------------------------------------------
+
+    private String selectedSidecarKey;
+    private LocalEngine.Sidecar activeSidecar;
+
+    private static String sidecarMenuKey(LocalEngine.Sidecar sidecar) {
+        return sidecar.videoFileId + "#" + sidecar.trackNumber;
+    }
+
+    /**
+     * 播起来就悄悄认一遍媒体源里现成的外挂字幕：NAS 那台转档服务写的就是同一套命名，
+     * 用户不该为了用它们先去字幕菜单点一次「查找」。直出模式下内封字幕根本不上屏，
+     * 找到现成的就顺手用上。
+     */
+    private void prefindSidecars(Models.VideoFile file) {
+        if (file == null) {
+            return;
+        }
+        runAsync(() -> api.engine().discoverSidecars(file.id, file.relativePath, file.subtitleStreams),
+                found -> {
+                    if (found != null && found > 0) {
+                        maybeAutoUseSidecar(file);
+                    }
+                },
+                ignored -> {
+                });
+    }
+
+    /** 直出模式 + 用户还没自己挑过字幕时，把最合适的现成字幕直接挂上。 */
+    private void maybeAutoUseSidecar(Models.VideoFile file) {
+        if (!activeDirectPlayback || screen != Screen.PLAYER || playerView == null
+                || activePlaybackFile != file || selectedSidecarKey != null
+                || selectedEmbeddedSubtitleOrdinal >= 0 || selectedRuntimeSubtitleId != null) {
+            return;
+        }
+        ArrayList<LocalEngine.Sidecar> usable = new ArrayList<>();
+        for (LocalEngine.Sidecar sidecar : api.engine().sidecarsFor(file.id)) {
+            if (sidecar.usable()) {
+                usable.add(sidecar);
+            }
+        }
+        if (usable.isEmpty()) {
+            return;
+        }
+        String preferred = com.omniplay.tv.subtitle.MatroskaSubtitleExtractor
+                .normalizeLanguage(api.engine().settings().defaultSubtitleLanguage());
+        LocalEngine.Sidecar best = null;
+        for (LocalEngine.Sidecar sidecar : usable) {
+            if (preferred != null && preferred.equals(sidecar.language)) {
+                best = sidecar;
+                break;
+            }
+        }
+        selectSubtitleSidecar(file, best != null ? best : usable.get(0));
+    }
+
+    private void lookForSidecars(Models.VideoFile file, View returnFocus) {
+        if (file == null) {
+            return;
+        }
+        runAsync(() -> api.engine().discoverSidecars(file.id, file.relativePath, file.subtitleStreams),
+                found -> {
+                    showPlayerMenuSubtitleHint(found > 0
+                            ? "找到 " + found + " 条现成的外挂字幕，已经收进字幕菜单。"
+                            : "媒体源里没有这条的外挂字幕，可以先后台转档这条。");
+                    showSubtitleMenu(file, returnFocus);
+                },
+                ignored -> showPlayerMenuSubtitleHint("找外挂字幕失败了。"));
+    }
+
+    private String sidecarMenuLabel(LocalEngine.Sidecar sidecar) {
+        if (sidecar.external) {
+            return "媒体源外挂字幕 · " + sidecarLanguageName(sidecar.language) + "（"
+                    + sidecar.format.toUpperCase(java.util.Locale.ROOT) + "）";
+        }
+        return "已存媒体源 · " + sidecarLanguageName(sidecar.language) + "（"
+                + sidecar.format.toUpperCase(java.util.Locale.ROOT) + " · " + sidecar.cueCount + " 条"
+                + ("partial".equals(sidecar.status) ? " · 还在后台转" : "") + "）";
+    }
+
+    private static String sidecarLanguageName(String code) {
+        switch (code == null ? "" : code) {
+            case "zh":
+                return "中文";
+            case "en":
+                return "英语";
+            case "ja":
+                return "日语";
+            case "ko":
+                return "韩语";
+            default:
+                return code == null || code.isEmpty() ? "未标注" : code;
+        }
+    }
+
+    private void transcodeSidecarNow(Models.VideoFile file) {
+        if (file == null) {
+            return;
+        }
+        showToast("开始后台转档这条的内封字幕。");
+        runAsync(() -> api.engine().transcodeSidecar(file.id, file.relativePath),
+                report -> {
+                    if (report != null) {
+                        showToast(report.message);
+                    }
+                },
+                ignored -> showToast("字幕转档失败。"));
+    }
+
+    /**
+     * 用转档出来的字幕：读进来交给覆盖层，并把 mpv 那条内封轨关掉，免得兼容模式下画两遍。
+     */
+    private void selectSubtitleSidecar(Models.VideoFile file, LocalEngine.Sidecar sidecar) {
+        showPlayerChromeTemporarily();
+        clearSubtitleSelection();
+        selectedSidecarKey = sidecarMenuKey(sidecar);
+        activeSidecar = sidecar;
+        int loadGeneration = beginSubtitleLoad();
+        runAsync(() -> {
+            byte[] body = api.engine().readSidecar(sidecar);
+            if (body == null || body.length == 0) {
+                throw new java.io.IOException("读不到转档出来的字幕文件。");
+            }
+            return "sup".equals(sidecar.format)
+                    ? com.omniplay.tv.subtitle.PgsSubtitleParser
+                            .parse(new java.io.ByteArrayInputStream(body))
+                    : parseSubtitleCues(new String(body, java.nio.charset.StandardCharsets.UTF_8));
+        }, result -> {
+            if (!isSubtitleLoadCurrent(loadGeneration)) {
+                return;
+            }
+            if (playerView != null) {
+                playerView.setSubtitleTrack("no");
+            }
+            if (result instanceof java.util.List && !((java.util.List<?>) result).isEmpty()
+                    && ((java.util.List<?>) result).get(0)
+                    instanceof com.omniplay.tv.subtitle.PgsSubtitleCue) {
+                @SuppressWarnings("unchecked")
+                java.util.List<com.omniplay.tv.subtitle.PgsSubtitleCue> cues =
+                        (java.util.List<com.omniplay.tv.subtitle.PgsSubtitleCue>) result;
+                activeSubtitleCues = Collections.emptyList();
+                if (playerSubtitleOverlay != null) {
+                    playerSubtitleOverlay.setText("");
+                    playerSubtitleOverlay.setVisibility(View.GONE);
+                }
+                activePgsSubtitleCues = cues;
+                if (playerPgsSubtitleOverlay != null) {
+                    playerPgsSubtitleOverlay.setCues(cues);
+                    playerPgsSubtitleOverlay.bringToFront();
+                }
+            } else if (result instanceof java.util.List) {
+                @SuppressWarnings("unchecked")
+                java.util.List<SubtitleCue> cues = (java.util.List<SubtitleCue>) result;
+                activePgsSubtitleCues = Collections.emptyList();
+                if (playerPgsSubtitleOverlay != null) {
+                    playerPgsSubtitleOverlay.clear();
+                }
+                activeSubtitleCues = cues;
+            } else {
+                return;
+            }
+            startSubtitleOverlayUpdates();
+            showPlayerMenuSubtitleHint("已改用转档出来的字幕（" + sidecarMenuLabel(sidecar) + "）。");
+        }, failure -> {
+            selectedSidecarKey = null;
+            String reason = failure instanceof java.io.IOException && failure.getMessage() != null
+                    ? failure.getMessage() : "读不到转档出来的字幕。";
+            showToast(reason);
+        });
+    }
+
+    private void showPlayerMenuSubtitleHint(String message) {
+        showPlayerChromeTemporarily();
+        showToast(message);
+    }
 }
+

@@ -1,0 +1,7 @@
+#!/bin/sh
+DIR=$(dirname "$0")
+. "${DIR}/common.sh"
+"${DIR}/stop" 2>/dev/null
+# 只删套件自己的状态表；写进媒体库的字幕文件一律不动
+rm -f "${VAR_DIR}/state.db"
+exit 0

@@ -36,6 +36,34 @@ enum MediaNameParser {
         return (numeric ?? Int.max, fileName.lowercased())
     }
 
+    /// 蓝光包定位：返回 BDMV 目录所在的包根路径分段。同一包内 STREAM 下的多条
+    /// 记录属于同一张盘，界面要合并成一个版本，不能按 m2ts 文件名分列。
+    nonisolated static func bluRayPackageComponents(for relativePath: String) -> [String]? {
+        let trimmed = relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !trimmed.isEmpty else { return nil }
+        let components = trimmed.components(separatedBy: "/")
+        guard components.indices.contains(1),
+              let bdmvIndex = components.firstIndex(where: { $0.caseInsensitiveCompare("BDMV") == .orderedSame }),
+              bdmvIndex > 0,
+              components.indices.contains(bdmvIndex + 1),
+              components[bdmvIndex + 1].caseInsensitiveCompare("STREAM") == .orderedSame else {
+            return nil
+        }
+        return Array(components[0..<bdmvIndex])
+    }
+
+    /// 蓝光包的稳定标识，用于把同一张盘的片段归到一组
+    nonisolated static func bluRayPackageKey(relativePath: String) -> String? {
+        guard let package = bluRayPackageComponents(for: relativePath) else { return nil }
+        return package.joined(separator: "/").lowercased()
+    }
+
+    /// 蓝光包名：取包路径最后一段目录名，保留原始大小写
+    nonisolated static func bluRayPackageTitle(relativePath: String) -> String? {
+        guard let package = bluRayPackageComponents(for: relativePath), let last = package.last else { return nil }
+        return last
+    }
+
     nonisolated static func selectedBluRayStreamIndices(
         from candidates: [BluRayStreamCandidate],
         includeExtras: Bool
@@ -1008,9 +1036,9 @@ enum MediaNameParser {
 }
 
 class MediaLibraryManager {
-    private let dbQueue: DatabaseQueue
+    private let dbQueue: any DatabaseWriter
 
-    init(dbQueue: DatabaseQueue? = nil) {
+    init(dbQueue: (any DatabaseWriter)? = nil) {
         if let dbQueue {
             self.dbQueue = dbQueue
             return
@@ -1849,6 +1877,8 @@ enum MediaSourceScanDiagnosticsFormatter {
     static func sanitizedEndpoint(from raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return trimmed }
+        // 本地/SMB 路径只是拿来看的：老数据里的转义（%E7%94%B5%E5%BD%B1）还原成中文
+        if trimmed.hasPrefix("/") { return trimmed.removingPercentEncoding ?? trimmed }
         guard var components = URLComponents(string: trimmed) else { return trimmed }
         components.user = nil
         components.password = nil
@@ -2808,6 +2838,7 @@ private enum MediaSourceScanError: LocalizedError {
     case unsupportedProtocol(String)
     case invalidBaseURL(String)
     case accessDenied(String)
+    case directoryMissing(String)
     case requestFailed(String)
     case credentialUnavailable(String)
     case databaseWriteFailed(String)
@@ -2820,6 +2851,8 @@ private enum MediaSourceScanError: LocalizedError {
             return "媒体源地址无效：\(value)"
         case .accessDenied(let value):
             return "系统拒绝访问该路径：\(value)"
+        case .directoryMissing(let value):
+            return "目录不存在或已取消挂载：\(value)。SMB 源请先在媒体源里点「检测」重新挂载，也可以在访达侧边栏连接该共享。"
         case .requestFailed(let value):
             return value
         case .credentialUnavailable(let value):
@@ -2842,7 +2875,16 @@ private struct LocalFilesystemScanner: MediaSourceScanner {
         let rootURL = URL(fileURLWithPath: normalized)
         let rootPathPrefix = rootURL.path.hasSuffix("/") ? rootURL.path : rootURL.path + "/"
 
-        return try await Task.detached(priority: .utility) { () throws -> [ScannedMediaFile] in
+        return try await Task.detached(priority: .userInitiated) { () throws -> [ScannedMediaFile] in
+            // 目录本身不存在时 enumerator 只会安静地返回 0 个文件，
+            // 用户看到的就是「扫描完成，但没有发现任何视频文件」，完全猜不到是路径没了
+            var rootIsDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: rootURL.path, isDirectory: &rootIsDirectory) else {
+                throw MediaSourceScanError.directoryMissing(rootURL.path)
+            }
+            guard rootIsDirectory.boolValue else {
+                throw MediaSourceScanError.invalidBaseURL(rootURL.path)
+            }
             guard let enumerator = FileManager.default.enumerator(
                 at: rootURL,
                 includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
@@ -3026,7 +3068,7 @@ private struct WebDAVScanner: MediaSourceScanner {
             throw MediaSourceScanError.invalidBaseURL(source.baseUrl)
         }
 
-        let credential = try resolveCredential(from: source.authConfig, fallbackURL: rawBaseURL)
+        let credential = try await resolveCredential(from: source.authConfig, fallbackURL: rawBaseURL)
         let extSet: Set<String> = ["mp4", "mkv", "mov", "avi", "rmvb", "flv", "webm", "m2ts", "ts", "iso", "m4v", "wmv"]
 
         var pendingDirectories: [PendingDirectory] = [PendingDirectory(url: baseURL, relativePrefix: "")]
@@ -3099,9 +3141,9 @@ private struct WebDAVScanner: MediaSourceScanner {
         return resolved
     }
 
-    private func resolveCredential(from authConfig: String?, fallbackURL: URL) throws -> AuthCredential? {
+    private func resolveCredential(from authConfig: String?, fallbackURL: URL) async throws -> AuthCredential? {
         if let id = WebDAVCredentialStore.shared.credentialID(from: authConfig) {
-            if let stored = WebDAVCredentialStore.shared.loadCredential(id: id) {
+            if let stored = await WebDAVCredentialStore.shared.loadCredentialAsync(id: id) {
                 return AuthCredential(username: stored.username, password: stored.password)
             }
             // 钥匙串读不出来时不要再发匿名请求：服务器只会回 401，界面把它翻译成
@@ -3652,6 +3694,13 @@ extension MediaLibraryManager {
         if source.protocolKind == .webdav {
             scanningSource = await migrateWebDAVCredentialIfNeeded(source)
         }
+        // SMB 源在开机、NAS 重启或卸载后会失去挂载点；先悄悄重挂一次再扫，免得整轮扫描
+        // 空跑一趟只报告「没有视频文件」。挂载和 stat 都在后台跑：stat 一个断掉的挂载点
+        // 能卡好几秒，放在主线程上就是扫描刚开始那几下卡顿。
+        if source.protocolKind == .local, let smbInfo = SMBSourceSupport.shareInfo(from: source),
+           let remounted = await SMBSourceManager.remount(smbInfo, for: source, dbQueue: dbQueue) {
+            scanningSource.baseUrl = remounted
+        }
 
         print("\n==================================")
         print("📂 雷达启动：开始扫描文件夹 -> \(scanningSource.baseUrl)")
@@ -4089,7 +4138,7 @@ extension MediaLibraryManager {
     private func classifyScanError(_ error: Error, source: MediaSource) -> MediaSourceScanErrorCategory {
         if let scanError = error as? MediaSourceScanError {
             switch scanError {
-            case .invalidBaseURL, .unsupportedProtocol, .accessDenied:
+            case .invalidBaseURL, .unsupportedProtocol, .accessDenied, .directoryMissing:
                 return .config
             case .credentialUnavailable:
                 return .auth
@@ -4136,7 +4185,10 @@ extension MediaLibraryManager {
         case .server:
             return "“\(sourceName)”连接失败：服务端返回错误，请稍后重试。"
         case .config:
-            return "“\(sourceName)”配置无效或不可访问，请检查源地址。"
+            let reason = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
+            return reason.isEmpty
+                ? "“\(sourceName)”配置无效或不可访问，请检查源地址。"
+                : "“\(sourceName)”不可访问：\(reason)"
         case .database:
             return "已找到视频文件，但没能写进媒体库，所以海报墙还是空的：\(fallback)"
         case .unknown:

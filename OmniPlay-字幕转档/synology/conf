@@ -1,0 +1,15 @@
+[Unit]
+Description=OmniPlay Sidecar
+After=multi-user.target
+
+[Service]
+Type=forking
+PIDFile=/var/packages/OmniPlaySidecar/var/sidecar.pid
+GuessMainPID=no
+ExecStart=/var/packages/OmniPlaySidecar/scripts/start
+ExecStop=/var/packages/OmniPlaySidecar/scripts/stop
+ExecReload=/var/packages/OmniPlaySidecar/scripts/restart
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+#!/bin/sh
+DIR=$(dirname "$0")
+. "${DIR}/common.sh"
+
+if [ -z "$(find_python)" ]; then
+    echo "这台机器上没有能用的 python3（DSM 自带就有），套件先不装。"
+    exit 1
+fi
+if [ -z "$(find_tool ffmpeg ffmpeg)" ]; then
+    echo "提示：还没装 ffmpeg。套件照装，但要等社区包 ffmpeg8（或配置里指定的路径）"
+    echo "      装好之后才会真正开始转字幕。"
+fi
+exit 0

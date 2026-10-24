@@ -75,3 +75,40 @@ HTTP状态=-   URLError=-   重试次数=0
 - 两个工程 `xcodebuild test -only-testing:OmniPlayTests` 各 40 条全绿；`xcodebuild build ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO` 通过、零告警。
 
 那台 Intel 机器下次启动会自动补齐结构（控制台打印一行「🧬 媒体库结构已自动补齐：列 movie.directors、列 movie.casts、表 categoryFolder」），再点扫描刮削就能出海报，不用删库重扫。往后改迁移阶梯：已发布过的编号别再挪位置，要重排就用 GRDB 的 `registerMigration(_:merging:)`。
+
+## 第三轮：海报出来了，但指针转圈几十秒
+
+用户在新构建上再反馈：扫描能出海报了，可每次扫完左上角停在「检测 TMDB 连通性...」几十秒，这期间鼠标是转圈的等待指针。
+
+在开发机上抓了一份扫描中进程的主线程采样（`sample`，5 秒），栈顶长这样：
+
+```
+DispatchQueue_1: com.apple.main-thread
+  PosterWallView.triggerScanAndScrape(...)      PosterWallView.swift:3751
+  MediaLibraryManager.scanLocalSourceWithResult MediaLibraryManager.swift:3662
+  WebDAVScanner.scanFiles(in:)                  MediaLibraryManager.swift:3029
+  WebDAVScanner.resolveCredential(...)          MediaLibraryManager.swift:3104
+  WebDAVCredentialStore.loadCredential(id:)     DatabaseModels.swift:485
+  SecItemCopyMatching → … → mach_msg            ← 一直等 SecurityAgent 回话
+```
+
+三件事一次说清了：
+
+1. 整条扫描管线跑在主线程上。工程的默认隔离是 MainActor，`triggerScanAndScrape` 里那个 `Task(priority:)` 继承了主线程，于是扫描、解析、读凭据全在主线程排队，只在 `await` 处喘口气。
+2. 读 WebDAV 凭据的 `SecItemCopyMatching` 带着 `LAContext`，要等 SecurityAgent，遇到 ACL 校验还会弹授权框。同步调用多久都有可能——这就是「几十秒」里最硬的一段。
+3. 另一半在海报墙：`CachedPosterView` 在 `onAppear` 里同步 `Data(contentsOf:)` 读整张 JPEG 再 `NSImage(data:)`。这台机器 1926 张海报、138MB，整库刷新就是主线程连着解几百张全尺寸图；海报目录在 iCloud 容器里时更糟，没本地化的文件同步读一次要等云端下载完。
+
+## 改法（第三轮）
+
+1. `WebDAVCredentialStore` 整类改成 `nonisolated`，新增 `loadCredentialAsync(id:)`：读钥匙串丢到全局队列，用续接把结果送回。扫描链路（`WebDAVScanner.resolveCredential`）和源连通性预检都换用它；同步版原样留给播放器和媒体源面板，那些场景本来就有用户在等。
+2. 新增 `PosterImageLoader`（`PosterManager.swift`）：后台读盘 + ImageIO 只解到 640px（卡片海报够 Retina）+ `NSCache` 记 240 张 / 160MB。`CachedPosterView` 先要内存缓存，没有就派后台任务，主线程只剩「把成品图贴上去」；文件确实在但内容不是图片时照旧删掉，让上层重下。
+3. `PosterManager.downloadPoster` 的校验与落盘挪进 `Task.detached`：刮削时几十张海报连着写，主线程一张都不替它解码。
+4. `TMDBService.probeConnection` 补两条：探测成功后 60 秒内直接复用上次结果（连着点两次「扫描刮削」不再白等一遍网络）；探测请求超时显式传 6 秒——原先 `makeRequest` 里写死的 10 秒会盖掉探测会话自己的 8 秒配置，最坏情况白等十秒。
+
+## 验证（第三轮）
+
+- 新增用例 `Poster image loader downsamples and only deletes files that are really broken`：1200×1600 的 JPEG 解出来正好 480×640、进内存缓存；写一段假字节伪装成 .jpg，断言读不出图且文件被删掉。
+- 两个工程 `xcodebuild test -only-testing:OmniPlayTests` 各 41 条全绿；`xcodebuild build ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO` 通过、零告警。
+- 开发机实测：把钥匙串授权框留在屏幕上挡着扫描，界面照样画出来、海报照样显示，指针不再钉死——这是主线程真的腾出来的直接证据。
+
+那台 Intel 机器要用上这一轮，得重新构建装上。装完第一次扫描「检测 TMDB 连通性...」还是会亮几秒（那是真的在探 TMDB），但指针能动、海报会一张张出来；一分钟之内再点扫描，这一步直接复用上次结果，标签一闪而过。

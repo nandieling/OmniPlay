@@ -92,7 +92,8 @@ public final class Models {
         public final String overview;
         public final String posterAssetId;
         public final Double voteAverage;
-        public final Double doubanRating;
+        /** 豆瓣评分：绑过豆瓣条目才有值，本地库从 doubanMetadata 表里带出来。 */
+        public Double doubanRating;
         public final boolean isWatched;
         public final int videoFileCount;
         public final double maxProgressSeconds;
@@ -180,7 +181,8 @@ public final class Models {
     public static final class LibraryDetail extends LibraryItem {
         public final List<VideoFile> videoFiles;
         public final List<Season> seasons;
-        public final DoubanMetadata douban;
+        /** 绑过的豆瓣条目；没绑过是 null。 */
+        public DoubanMetadata douban;
 
         private LibraryDetail(JSONObject json) {
             super(json);
@@ -295,6 +297,27 @@ public final class Models {
         public final String genres;
         public final String countries;
         public final String posterUrl;
+
+        public DoubanMetadata(String subjectId, String subjectUrl, String title,
+                              String originalTitle, String year, Double rating,
+                              Integer ratingCount, String summary, String genres,
+                              String countries, String posterUrl) {
+            this.subjectId = orEmpty(subjectId);
+            this.subjectUrl = orEmpty(subjectUrl);
+            this.title = orEmpty(title);
+            this.originalTitle = orEmpty(originalTitle);
+            this.year = orEmpty(year);
+            this.rating = rating;
+            this.ratingCount = ratingCount;
+            this.summary = orEmpty(summary);
+            this.genres = orEmpty(genres);
+            this.countries = orEmpty(countries);
+            this.posterUrl = orEmpty(posterUrl);
+        }
+
+        private static String orEmpty(String value) {
+            return value == null ? "" : value;
+        }
 
         private DoubanMetadata(JSONObject json) {
             subjectId = optString(json, "subjectId");

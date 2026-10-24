@@ -8,6 +8,7 @@
 import Foundation
 import GRDB
 import XCTest
+import AppKit
 import Testing
 @testable import OmniPlay
 
@@ -162,6 +163,24 @@ struct BusinessLogicIntegrationTests {
             MediaNameParser.BluRayStreamCandidate(fileName: "00020.m2ts", fileSize: 1_000, duration: 0)
         ]
         #expect(MediaNameParser.selectedBluRayStreamIndices(from: splitMain, includeExtras: false) == [0, 1])
+    }
+
+    @Test("Blu-ray package key groups every STREAM clip of one disc")
+    func bluRayPackageKeyGroupsDiscStreams() {
+        let fate = "劇場版「Fate／stay night [Heaven's Feel]」 Ⅱ.lost butterfly 2019 1080P Blu-ray AVC DTS-HD MA 5.1-SweetDreamDay/BDMV/STREAM"
+        let first = MediaNameParser.bluRayPackageKey(relativePath: "\(fate)/00000.m2ts")
+        let second = MediaNameParser.bluRayPackageKey(relativePath: "\(fate)/00001.m2ts")
+        #expect(first != nil)
+        #expect(first == second)
+        #expect(MediaNameParser.bluRayPackageTitle(relativePath: "\(fate)/00001.m2ts")?
+            .hasSuffix("SweetDreamDay") == true)
+
+        // 多碟套装按碟分组，散片和 ISO 不参与分组
+        let disc1 = MediaNameParser.bluRayPackageKey(relativePath: "Gone.with.the.Wind.1939/Disc 1/BDMV/STREAM/00003.m2ts")
+        let disc2 = MediaNameParser.bluRayPackageKey(relativePath: "Gone.with.the.Wind.1939/Disc 2/BDMV/STREAM/00027.m2ts")
+        #expect(disc1 != nil && disc2 != nil && disc1 != disc2)
+        #expect(MediaNameParser.bluRayPackageKey(relativePath: "电影/1917 逆战救兵 2019.iso") == nil)
+        #expect(MediaNameParser.bluRayPackageKey(relativePath: "The.Show.S01E01.mkv") == nil)
     }
 
     @Test("Episode parsing and season detection should match common release names")
@@ -643,6 +662,55 @@ struct BusinessLogicIntegrationTests {
         }
     }
 
+    @Test("Poster image loader downsamples and only deletes files that are really broken")
+    func posterImageLoaderDownsamplesAndHealsBrokenFiles() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("omniplay-poster-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let posterURL = directory.appendingPathComponent("poster.jpg")
+        try jpegData(width: 1200, height: 1600).write(to: posterURL)
+
+        let scaled = await PosterImageLoader.shared.image(at: posterURL)
+        #expect(scaled != nil)
+        // 只解到显示尺寸：1200x1600 应被压成长边 640，而不是整图喂给主线程。
+        #expect(max(scaled?.width ?? 0, scaled?.height ?? 0) == Int(PosterImageLoader.displayMaxPixelSize))
+        #expect(min(scaled?.width ?? 0, scaled?.height ?? 0) == 480)
+        #expect(PosterImageLoader.shared.cachedImage(for: posterURL) != nil)
+
+        // 内容不是图片：删掉，让上层重新下载。
+        let brokenURL = directory.appendingPathComponent("broken.jpg")
+        try Data("not an image".utf8).write(to: brokenURL)
+        #expect(await PosterImageLoader.shared.image(at: brokenURL) == nil)
+        #expect(!FileManager.default.fileExists(atPath: brokenURL.path))
+    }
+
+    @Test("SMB 挂载路径还原被 URL 转义的中文共享名")
+    func smbMountPathCanonicalization() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("omniplay-smb-\(UUID().uuidString)", isDirectory: true)
+        let share = root.appendingPathComponent("电影", isDirectory: true)
+        try FileManager.default.createDirectory(at: share, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sharePath = share.path
+        let escaped = try #require(sharePath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed))
+        #expect(escaped != sharePath)
+        // 系统 NetFS 会把非 ASCII 挂载点转义返回，入库前得还原成真路径
+        #expect(SMBSourceManager.canonicalMountPath(escaped) == sharePath)
+        #expect(SMBSourceManager.canonicalMountPath("file://" + sharePath + "/") == sharePath)
+        // 老库里存着的转义路径也要能扫、能正常显示
+        #expect(MediaSourceProtocol.local.normalizedBaseURL(escaped) == sharePath)
+        #expect(MediaSourceScanDiagnosticsFormatter.sanitizedEndpoint(from: escaped) == sharePath)
+
+        // 还原后在盘上找不到的路径原样保留，名字里真带 % 的共享不会被改坏
+        let missing = root.appendingPathComponent("缺失共享", isDirectory: true).path
+        let escapedMissing = try #require(missing.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed))
+        #expect(SMBSourceManager.canonicalMountPath(escapedMissing) == escapedMissing)
+        #expect(MediaSourceProtocol.local.normalizedBaseURL(escapedMissing) == escapedMissing)
+    }
+
     private func makeTempDBURL() -> URL {
         URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("omniplay-test-\(UUID().uuidString).sqlite")
@@ -654,6 +722,24 @@ struct BusinessLogicIntegrationTests {
         try? fm.removeItem(atPath: path)
         try? fm.removeItem(atPath: "\(path)-shm")
         try? fm.removeItem(atPath: "\(path)-wal")
+    }
+
+    private func jpegData(width: Int, height: Int) throws -> Data {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let data = rep.representation(using: .jpeg, properties: [:]) else {
+            throw CocoaError(.formattingError)
+        }
+        return data
     }
 }
 

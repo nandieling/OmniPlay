@@ -1,0 +1,8 @@
+#!/bin/sh
+# 升级：新文件已经解压进 target，var 下的配置和进度表原样留着
+DIR=$(dirname "$0")
+. "${DIR}/common.sh"
+"${DIR}/stop" 2>/dev/null
+ensure_conf
+say "升级完成，配置与进度表保留在 ${VAR_DIR}。"
+exit 0

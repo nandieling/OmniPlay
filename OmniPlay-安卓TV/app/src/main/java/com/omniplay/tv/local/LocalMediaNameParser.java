@@ -15,13 +15,18 @@ import java.util.regex.Pattern;
  */
 public final class LocalMediaNameParser {
     private static final Pattern HAN = Pattern.compile("\\p{IsHan}");
+
+    /** 片名里有没有汉字：整条刮削链路都靠它判断「这条还需不需要补中文译名」。 */
+    public static boolean containsChinese(String value) {
+        return value != null && HAN.matcher(value).find();
+    }
     private static final Pattern SEASON_EP = Pattern.compile("(?i)\\b[sS](\\d{1,2})[ ._-]*[eE][pP]?(\\d{1,3})\\b");
     private static final Pattern SEASON_ONLY = Pattern.compile("(?i)\\b[sS](\\d{1,2})\\b");
     private static final Pattern EPISODE_ONLY = Pattern.compile("(?i)\\b[eE][pP]?(\\d{1,3})\\b");
     private static final Pattern ZH_EPISODE = Pattern.compile("第\\s*(\\d{1,3})\\s*[集话]");
     private static final Pattern SEASON_DIR = Pattern.compile("(?i)^season[ ._-]*(\\d{1,2})$");
     private static final Pattern SEASON_ANY = Pattern.compile("(?i)\\bseason[ ._-]*(\\d{1,2})\\b");
-    private static final Pattern YEAR_PATTERN = Pattern.compile("(?<![0-9])(19|20)\\d{2}(?![0-9])");
+    private static final Pattern YEAR_PATTERN = Pattern.compile("(?<![0-9])((19|20)\\d{2})(?![0-9])");
 
     public static final class EpisodeInfo {
         public final int season;
@@ -37,12 +42,16 @@ public final class LocalMediaNameParser {
 
     public static final class SearchMetadata {
         public final String chineseTitle;
+        /** 父目录里的中文片名：文件名不带中文、中文名只写在目录上时靠它兜底。 */
+        public final String parentChineseTitle;
         public final String foreignTitle;
         public final String fullCleanTitle;
         public final String year;
 
-        SearchMetadata(String chineseTitle, String foreignTitle, String fullCleanTitle, String year) {
+        SearchMetadata(String chineseTitle, String parentChineseTitle, String foreignTitle,
+                       String fullCleanTitle, String year) {
             this.chineseTitle = chineseTitle;
+            this.parentChineseTitle = parentChineseTitle;
             this.foreignTitle = foreignTitle;
             this.fullCleanTitle = fullCleanTitle;
             this.year = year;
@@ -71,12 +80,16 @@ public final class LocalMediaNameParser {
         int season = 0;
         int episode = Math.max(1, fallbackIndex);
         boolean fromFile = false;
+        // 文件名里真的写了 Sxx（含 S00）才算「季是明确的」：S00E01 是特别篇，
+        // 不能跟「压根没写季」一样被兜底成第 1 季。
+        boolean explicitSeason = false;
 
         Matcher m = SEASON_EP.matcher(fileStem);
         if (m.find()) {
             season = parseInt(m.group(1), 0);
             episode = parseInt(m.group(2), 1);
             fromFile = true;
+            explicitSeason = true;
         } else {
             m = ZH_EPISODE.matcher(fileStem);
             if (m.find()) {
@@ -98,13 +111,14 @@ public final class LocalMediaNameParser {
             Matcher sm = SEASON_EP.matcher(dirHint);
             if (sm.find()) {
                 season = parseInt(sm.group(1), 0);
+                explicitSeason = true;
             }
         }
 
         if (season == 0 && !fromFile && !hasSeasonContext(dirHint, fileStem)) {
             return new EpisodeInfo(0, episode, false);
         }
-        if (season == 0) {
+        if (season == 0 && !explicitSeason) {
             season = 1;
         }
         return new EpisodeInfo(season, episode, true);
@@ -172,8 +186,46 @@ public final class LocalMediaNameParser {
         return fileStem;
     }
 
+    /**
+     * 先把命名里的全角标点与罗马数字字符折成 ASCII。日文、中文资源名里满是「／」「：」
+     * 「「」」这类字符：它们既不算字母也不算数字，整段词会被当成垃圾丢掉，
+     * 「Fate／stay night」就只剩 "night"；「Ⅱ.lost butterfly」的 Ⅱ 是罗马数字字符，
+     * 同样会被丢掉，片名就断在「劇場版」上。折一遍再走下面的清洗规则。
+     */
+    static String normalizeNameText(String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return "";
+        }
+        String[] roman = {"I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"};
+        StringBuilder out = new StringBuilder(raw.length());
+        for (int index = 0; index < raw.length(); index++) {
+            char c = raw.charAt(index);
+            if (c == '\uFF0F' || c == '\uFF1A' || c == '\uFF1B' || c == '\uFF0C'
+                    || c == '\u3001' || c == '\u3002' || c == '\u30FB' || c == '\u3000'
+                    || c == '\uFF5E' || c == '\uFF5C' || c == '\u00B7' || c == '\u300C'
+                    || c == '\u300D' || c == '\u300E' || c == '\u300F') {
+                out.append(' ');
+            } else if (c >= '\u2160' && c <= '\u2169') {
+                out.append(roman[c - '\u2160']);
+            } else if (c >= '\u2170' && c <= '\u2179') {
+                out.append(roman[c - '\u2170']);
+            } else if (c >= '\uFF10' && c <= '\uFF19') {
+                out.append((char) ('0' + (c - '\uFF10')));
+            } else if (c >= '\uFF21' && c <= '\uFF3A') {
+                out.append((char) ('A' + (c - '\uFF21')));
+            } else if (c >= '\uFF41' && c <= '\uFF5A') {
+                out.append((char) ('a' + (c - '\uFF41')));
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
     public static SearchMetadata extractSearchMetadata(String rawPath) {
-        String originalText = cleanedTitleSource(rawPath);
+        // 全角标点、罗马数字先折成 ASCII，父目录名一并折：见 normalizeNameText。
+        String normalizedPath = normalizeNameText(rawPath);
+        String originalText = cleanedTitleSource(normalizedPath);
         // 照 mac 版先来一刀：标题之后的 1080p / BluRay / x265 这些发布元信息整段丢掉。
         String text = truncateBeforeReleaseMetadata(originalText)
                 .replaceAll("[\\[\\](){}\u3010\u3011\uFF08\uFF09\u300A\u300B\u300C\u300D\u300E\u300F\u3014\u3015\u3016\u3017]", " ");
@@ -195,30 +247,31 @@ public final class LocalMediaNameParser {
         }
 
         String[] cleanPatterns = {
-                "(?i)\\b(1080p|2160p|4k|720p|480p|blu[- ]?ray|bluray|bdrip|web[- ]?dl|webrip|remux|x264|x265|h\\.?264|h\\.?265|hevc|avc|vc[- ]?1|aac|dts[- ]?hd|dts|lpcm|truehd|hdr|dv)\\b",
-                "(?i)\\b[sS]\\d{1,2}[ ._-]*[-\u2013~][ ._-]*[sS]?\\d{1,2}\\b",
-                "(?i)\\bseason\\s*\\d{1,2}\\s*[-\u2013~]\\s*(?:season\\s*)?\\d{1,2}\\b",
+                "(?i)\\b(1080p|2160p|4k|720p|480p|blu[- ]?ray|bluray|bdrip|web[- ]?dl|webrip"
+                        + "|remux|x264|x265|h\\.?264|h\\.?265|hevc|avc|vc[- ]?1|aac|dts[- ]?hd|dts"
+                        + "|lpcm|truehd|hdr|dv)\\b",
+                "(?i)\\b[sS]\\d{1,2}\\s*[-–~]\\s*(?:[sS])?\\d{1,2}\\b",
+                "(?i)\\bseason\\s*\\d{1,2}\\s*[-–~]\\s*(?:season\\s*)?\\d{1,2}\\b",
                 "(?i)\\b[sS]\\d{1,2}[eE][pP]?\\d{1,3}\\b",
                 "(?i)\\b[sS]\\d{1,2}\\b",
                 "(?i)\\b[eE][pP]?\\d{1,3}\\b",
-                "\u7b2c\\s*\\d{1,3}\\s*[\u96c6\u8bdd]",
+                "第\\s*\\d{1,3}\\s*[集话]",
                 "(?i)\\bseason\\s*\\d{1,2}\\b",
                 "(?i)\\b\\d{1,2}bit\\b",
                 "(?i)\\b(aac|ac3|eac3|ddp|dts|dts[- ]?hd|truehd|lpcm|flac|mp3)\\d*(\\.\\d+)?\\b",
                 "(?i)\\b(ma|hi10p|10bit|8bit)\\b",
                 "(?i)\\b(usa|ger|gbr|uk|jpn|jap|kor|chn|hkg|tw|fr|fra|ita|esp|rus|can|aus)\\b",
                 "(?i)\\b(bonus|extras?|featurette|behind[- ]?the[- ]?scenes|trailer|sample)\\b",
-                "(?i)\\b(disc|disk|cd|dvd)\\s*[-_ ]?\\d{1,2}\\b",
                 "(?i)\\b(disc|disk|cd|dvd)\\b",
+                "(?i)\\b(disc|disk|cd|dvd)\\s*[-_ ]?\\d{1,2}\\b",
                 "(?i)\\b(bdrom|bdmv)\\b",
-                "(?i)\\b(vol|volume)\\s*[-_ .]?\\d{1,2}\\b",
+                "(?i)\\b(vol|volume)\\s*[-_ ]?\\d{1,2}([–—-]\\d{1,2})?\\b",
+                "\\d{1,3}\\s*周年\\s*纪念版",
+                "(?i)\\b(cctv\\d*k?|cmctv)\\b",
+                "(映画|剧场版|劇場版|電影版|电影版|完全版|总集篇|總集篇|特別篇|特别篇)",
                 "(?i)\\b(special\\s*features?|featurettes?)\\b",
                 "(?i)\\b\\d{1,3}(st|nd|rd|th)\\s+anniversary(\\s+edition)?\\b",
                 "(?i)\\b(anniversary|edition)\\b",
-                "(?i)\\b(cctv\\d*k?|cmctv)\\b",
-                "\\d{1,3}\\s*\u5468\u5e74\\s*\u7eaa\u5ff5\u7248",
-                "(\u6620\u753b|\u5267\u573a\u7248|\u5287\u573a\u7248|\u96FB\u5F71\u7248|\u7535\u5F71\u7248|\u6F22\u6E2C\u7248|\u5B8C\u5168\u7248|\u603B\u96C6\u7BC7|\u7E3D\u96C6\u7BC7|\u7279\u5225\u7BC7|\u7279\u522B\u7BC7|\u82B1\u7D42|\u82B1\u7C64|\u7279\u5178)",
-                "(\u5F71\u9662|\u5267\u573A\u7248|\u96FB\u5F71\u7248|\u7535\u5F71\u7248|\u5B8C\u5168\u7248|\u603B\u96C6\u7BC7|\u7279\u522B\u7BC7)"
         };
         for (String pattern : cleanPatterns) {
             text = text.replaceAll(pattern, " ");
@@ -239,9 +292,47 @@ public final class LocalMediaNameParser {
         String foreignTitle = extractForeignTitle(tokens);
         return new SearchMetadata(
                 chineseTitle == null || chineseTitle.isEmpty() ? null : chineseTitle,
+                null,
                 foreignTitle,
                 text.isEmpty() ? null : text,
                 year);
+    }
+
+    /**
+     * 挭平「相对路径」与「单独的文件名」两个来源的刮前信息（mac 版
+     * combinedSearchMetadata）。刮前阶段应该用这个，而不是扫描时存下的那一份快照：
+     * 快照是别的版本的清洗规则算出来的，年份与副查询词会陈旧，年份一旦为空，
+     * 候选打分里的年份权重整段失效，热度最高的同名新作就会把正确的老片抢掉。
+     */
+    public static SearchMetadata combinedSearchMetadata(String relativePath, String fileName) {
+        String path = relativePath == null ? "" : relativePath;
+        String name = fileName == null ? "" : fileName;
+        // Jellyfin / Emby 这类媒体服务器的路径里只有 items/12345/download，信息全在文件名上。
+        boolean fileNameFirst = isLikelyMediaServerEndpointPath(path);
+        String primaryRaw = fileNameFirst ? name : path;
+        String secondaryRaw = fileNameFirst ? path : name;
+        SearchMetadata primary = extractSearchMetadata(
+                primaryRaw.isEmpty() ? secondaryRaw : primaryRaw);
+        SearchMetadata secondary = primaryRaw.equals(secondaryRaw)
+                ? primary : extractSearchMetadata(secondaryRaw);
+        String parentChinese = fileNameFirst ? null : parentChineseTitle(path);
+        return new SearchMetadata(
+                firstNonEmpty(primary.chineseTitle, secondary.chineseTitle),
+                firstNonEmpty(parentChinese, null),
+                firstNonEmpty(primary.foreignTitle, secondary.foreignTitle),
+                firstNonEmpty(primary.fullCleanTitle, secondary.fullCleanTitle),
+                firstNonEmpty(primary.year, secondary.year));
+    }
+
+    /** 路径像 Jellyfin / Emby 的下载接口，而不是真实的文件树。 */
+    static boolean isLikelyMediaServerEndpointPath(String relativePath) {
+        if (relativePath == null) {
+            return false;
+        }
+        String normalized = relativePath.replace('\'', '/').replaceAll("^/+", "")
+                .toLowerCase(Locale.ROOT);
+        return normalized.matches("^(items/[^/]+/download|library/parts/|library/metadata/"
+                + "|video/|videos/).*");
     }
 
     /**
@@ -361,12 +452,9 @@ public final class LocalMediaNameParser {
     }
 
     private static final Set<String> GENERIC_CHINESE_TOKENS = new HashSet<>(Arrays.asList(
-            "\u7535\u5f71", "\u96fb\u5f71", "\u7535\u5f71\u7248", "\u96fb\u5f71\u7248",
-            "\u5267\u573a\u7248", "\u5287\u573a\u7248", "\u6620\u753b", "\u5b8c\u5168\u7248",
-            "\u603b\u96c6\u7bc7", "\u7e3d\u96c6\u7bc7", "\u7279\u522b\u7bc7", "\u7279\u522B\u7bc7",
-            "\u82b1\u7c64", "\u82b1\u7d42", "\u5e55\u540e", "\u5e55\u5f8c", "\u7279\u5178",
-            "\u9644\u8d60", "\u9644\u8d08", "\u9884\u544a\u7247", "\u9810\u544a\u7247",
-            "\u6837\u7247", "\u6a23\u7247"));
+            "电影", "電影", "电影版", "電影版", "剧场版", "劇場版", "映画", "完全版",
+            "总集篇", "總集篇", "特别篇", "特別篇", "花絮", "幕后", "幕後", "特典",
+            "附赠", "附贈", "预告片", "預告片", "样片", "樣片"));
 
     /** 连续的中文词分一组，取最长的那组当片名；「特典」「花絮」之后的补充说明切掉。 */
     private static String extractChineseTitle(List<String> tokens) {
@@ -476,24 +564,43 @@ public final class LocalMediaNameParser {
     }
 
     public static String chooseReleaseYear(String text) {
-        if (text == null || text.isEmpty()) {
+        List<String> candidates = yearCandidates(text);
+        if (candidates.isEmpty()) {
             return null;
         }
-        int latestYear = 0;
-        int latestIndex = -1;
-        Matcher m = YEAR_PATTERN.matcher(text);
-        while (m.find()) {
-            int value = Integer.parseInt(m.group());
-            if (value >= 1900 && value <= 2100 && value > latestYear) {
-                latestYear = value;
-                latestIndex = m.start();
+        if (candidates.size() >= 2) {
+            // 「2012.2009.1080p」这种写法里第一个四位数字是片名，文件名又是从片名开头写的：
+            // 开头就是第一个候选时，年份要取第二个。mac 版同一判法（compactPrefix.hasPrefix）。
+            String first = candidates.get(0);
+            String second = candidates.get(1);
+            String compactPrefix = text.substring(0, Math.min(text.length(), 12))
+                    .replaceAll("[.\\-_\\s/]+", "");
+            if (compactPrefix.startsWith(first)) {
+                return second;
             }
         }
-        if (latestIndex >= 0) {
-            // Prefer the last plausible year (release year usually sits at the tail).
-            return String.valueOf(latestYear);
+        return candidates.get(0);
+    }
+
+    /**
+     * mac 版 extractYearCandidates：只收前后都不接数字的 1900-2099。上一版这里取的是「最大的
+     * 那个」，于是 Toy.Story.1995.2010.720p 记成 2010、按年份建的文件夹（2024/某片.2019.mkv）
+     * 记成 2024——片名里自带的年份反而永远抢不过后面那些重制 / 发行年份。
+     */
+    private static List<String> yearCandidates(String text) {
+        List<String> years = new ArrayList<>();
+        if (text == null || text.isEmpty()) {
+            return years;
         }
-        return null;
+        Matcher m = YEAR_PATTERN.matcher(text);
+        while (m.find()) {
+            // group(1) 就是那四位数字：前后都不接数字才算年份，12010 里那截不算。
+            int value = Integer.parseInt(m.group(1));
+            if (value >= 1900 && value <= 2099) {
+                years.add(String.valueOf(value));
+            }
+        }
+        return years;
     }
 
     /** Folder that groups a TV series' files (the show-level folder). */

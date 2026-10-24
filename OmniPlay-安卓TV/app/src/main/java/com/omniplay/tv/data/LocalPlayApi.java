@@ -134,11 +134,25 @@ public final class LocalPlayApi {
     }
 
     public String posterUrl(String posterAssetId) {
-        return posterAssetId == null || posterAssetId.isEmpty() ? "" : posterAssetId;
+        if (posterAssetId == null || posterAssetId.isEmpty()) {
+            return "";
+        }
+        // 配了 TMDB 反代时，海报直接改走反代的 /t/p/，省掉每张图一次官方 CDN 的空跑。
+        String proxied = engine.tmdb().posterImageUrl(posterAssetId);
+        return proxied == null ? posterAssetId : proxied;
+    }
+
+    /** 海报主地址取不到时的备胎：官方 CDN 与反代 /t/p/ 互为备胎。 */
+    public String posterFallbackUrl(String posterUrl) {
+        return engine.tmdb().posterFallbackUrl(posterUrl);
     }
 
     public String thumbnailUrl(String thumbnailAssetId) {
-        return thumbnailAssetId == null || thumbnailAssetId.isEmpty() ? "" : thumbnailAssetId;
+        if (thumbnailAssetId == null || thumbnailAssetId.isEmpty()) {
+            return "";
+        }
+        String proxied = engine.tmdb().posterImageUrl(thumbnailAssetId);
+        return proxied == null ? thumbnailAssetId : proxied;
     }
 
     public String streamUrl(String videoFileId) {
