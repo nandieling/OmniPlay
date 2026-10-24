@@ -43,7 +43,8 @@ struct MovieCardView: View {
                     CachedPosterView(posterPath: movie.posterPath)
                         .frame(width: 160, height: 240)
                         .cornerRadius(12)
-                        .shadow(color: .black.opacity(0.1), radius: 8, y: 4)
+                        // 一张海报一抹投影就是一次离屏模糊，滚动中先省掉，手停下再回来
+                        .posterShadow(visible: !isPosterWallScrolling)
                     
                     VStack {
                         Spacer()
@@ -100,7 +101,8 @@ struct MovieCardView: View {
             .onChange(of: isPosterWallScrolling) { _, scrolling in
                 if scrolling { isHovering = false }
             }
-            .themeGlassMat(theme, simplified: isPosterWallScrolling)
+            // 没有系统折射的系统上，几十张海报各糊一层背景模糊太贵，直接用平涂染色底
+            .themeGlassMat(theme, simplified: isPosterWallScrolling || !AppGlassStyle.nativeRefractionAvailable)
             
             Text(movie.title)
                 .font(.headline)
@@ -365,5 +367,16 @@ extension EnvironmentValues {
     var isPosterWallScrolling: Bool {
         get { self[PosterWallScrollingKey.self] }
         set { self[PosterWallScrollingKey.self] = newValue }
+    }
+}
+
+private extension View {
+    /// 条件投影。写成条件修饰符而不是把颜色换成 clear：换成 clear 只是看不见，模糊照做。
+    @ViewBuilder func posterShadow(visible: Bool) -> some View {
+        if visible {
+            self.shadow(color: .black.opacity(0.1), radius: 8, y: 4)
+        } else {
+            self
+        }
     }
 }

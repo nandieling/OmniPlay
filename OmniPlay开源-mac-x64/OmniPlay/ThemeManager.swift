@@ -24,6 +24,12 @@ struct AppGlassStyle {
     let shadow: Color           // 玻璃片投影
     let glows: [AppGlassGlow]   // 页面底的光斑
     let cornerRadius: CGFloat
+
+    /// 这台机器上有没有真正的系统折射。macOS 26 之前只能拿背景模糊顶，整屏海报各糊一次
+    /// 模糊能把帧率压平（Intel 机器尤其明显），所以满屏重复的元件在旧系统上走平涂染色底。
+    static var nativeRefractionAvailable: Bool {
+        if #available(macOS 26.0, *) { return true } else { return false }
+    }
 }
 
 struct AppTheme {

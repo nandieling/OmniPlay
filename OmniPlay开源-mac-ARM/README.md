@@ -432,6 +432,15 @@ Release 产物通常位于：
 
 交叉编译靠 `-destination platform=macOS,arch=arm64|x86_64`，一台 arm64 runner 就能出两种架构。`.dmg` 直接挂载即可；`.zip` 请用访达双击或 `ditto -x -k` 解开，用 `unzip` 会丢 framework 里的符号链接。签名走 ad-hoc（`CODE_SIGN_IDENTITY="-"`），没做 Developer ID 与公证：自己用没问题，发给别人要么让对方 `xattr -dr com.apple.quarantine 觅影.app`，要么补上签名与公证。工程用到 `glassEffect`，runner 的 macOS SDK 必须 26 及以上，否则工作流会在「选择 Xcode 26」一步直接报错停下。
 
+本地打同一套包用 `../scripts/pack_mac.sh`，产物落在仓库根 `dist/`：
+
+```bash
+bash ../scripts/pack_mac.sh arm64   # Apple Silicon
+bash ../scripts/pack_mac.sh x64     # Intel
+```
+
+脚本走的是工作流里同样的命令（Release 编译 + `build/ci/DerivedData` + ad-hoc 签名），并在收尾做 `codesign --verify --strict`、`lipo -info`、`hdiutil verify` 三项自检。
+
 ### 归档 Archive
 
 用于后续导出 `.app`、签名或分发：

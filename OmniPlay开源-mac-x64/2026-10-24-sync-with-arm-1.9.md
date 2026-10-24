@@ -22,3 +22,7 @@
 - `project.pbxproj`：`AppIntents` 走 `OTHER_LDFLAGS` 并带 `-Wl,-no_fixup_chains`、`-Wl,-unaligned_pointers,suppress`；`DEVELOPMENT_TEAM = DT95MB3RG4`；不设 `EXCLUDED_ARCHS`。
 
 验证：`xcodebuild -configuration Release -destination 'platform=macOS,arch=x86_64'` 编译通过，产物 `lipo -info` 为 thin x86_64、ad-hoc 签名带 hardened runtime、Info.plist 含局域网权限说明；单测在 ARM 上跑（同一份源码，测试不依赖指令集）。自动打包见仓库根 `.github/workflows/macos-release.yml`，两份工程各出一个 zip 与 dmg。
+
+补记：修掉 CoreAudio 设备热插拔导致的意外退出后（`MPVPlayerManager.swift` 里把 mpv 音频输出改成 `ao=avfoundation,coreaudio`，原因见 ARM 工程 `docs/2026-10-24-playback-resilience-and-neodb-record.md` 第 8 节），两份工程重新各编译一次，均 `BUILD SUCCEEDED`。
+
+再补记：修完 x64 首页滚动卡顿与回弹（`PosterWallView.swift`、`MovieCardView.swift`、`ThemeManager.swift`，原因见 ARM 工程 `docs/2026-10-24-playback-resilience-and-neodb-record.md` 第 9 节）与播放条玻璃条去染色、再上移（`PlayerScreen.swift`）后，两份工程又各编译一次，均 `BUILD SUCCEEDED`；ARM 单测 80 个用例全绿。

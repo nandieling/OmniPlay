@@ -414,6 +414,12 @@ class MPVPlayerManager: ObservableObject {
         // 这套 libmpv 的 audio-buffer 默认只有 0.2 秒，暂停/恢复时音频输出来不及续上
         // 就是一下破音；播放器不需要低延迟，多给点余量换边界干净
         mpv_set_option_string(mpv, "audio-buffer", "0.5")
+        // 指定音频输出顺序：走 AVFoundation，coreaudio 只作兜底。
+        // 原因：libmpv 的 coreaudio 驱动在 CoreAudio 设备变动（插拔耳机、切默认输出、
+        // 蓝牙耳机连断）时会在 HAL 的通知队列里回调 hotplug_cb，而它给监听器登记的
+        // ao 上下文可能已经被拆掉（init/hotplug_init 各注册一次、只反注册一次），
+        // 于是读 ao->log 解引用空指针直接 SIGSEGV。mpv 上游目前没修。
+        mpv_set_option_string(mpv, "ao", "avfoundation,coreaudio")
         mpv_set_option_string(mpv, "target-colorspace-hint", "yes")
         mpv_set_option_string(mpv, "vo", "gpu-next")
         mpv_set_option_string(mpv, "gpu-api", "metal")

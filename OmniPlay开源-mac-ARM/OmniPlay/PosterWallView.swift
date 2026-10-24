@@ -413,35 +413,42 @@ struct PosterWallView: View {
         UserDefaults.standard.set(isFast ? 50 : 1000, forKey: "NSInitialToolTipDelay")
     }
     
-    var displayedMovies: [Movie] { var result = movies; if !searchText.isEmpty { result = result.filter { $0.title.localizedCaseInsensitiveContains(searchText) } }; result.sort { m1, m2 in let isLess: Bool; switch selectedSortOption { case .name: isLess = m1.title.localizedStandardCompare(m2.title) == .orderedAscending; case .year: isLess = (m1.releaseDate ?? "") < (m2.releaseDate ?? ""); case .rating: isLess = (m1.voteAverage ?? 0.0) < (m2.voteAverage ?? 0.0) }; return isAscending ? isLess : !isLess }; return result }
-    private var discoveredNetworkDevices: [DiscoveredDevice] {
-        lanScanner.discoveredDevices.filter { $0.type.isWebDAV || $0.type.isMediaServer || $0.type == .smb }
-    }
+    /// 首页海报列表与分类分组都是「排序产物」。原先写成计算属性：body 每求值一次就全库
+    /// filter 加 `localizedStandardCompare` 重排一遍（分类视图还要再遍历分桶+排序一次），
+    /// 而滚动相位翻转、搜索框动一下都会重估 body，慢机器上一帧全砸在这里，掉帧之外还会把
+    /// 滚动位置顶回去，看起来就是卡顿加回弹。改成输入不变直接复用上次结果。
+    @State private var cachedDisplayedMovies: [Movie] = []
+    @State private var cachedCategoryFolderGroups: [CategoryFolderGroup] = []
 
-    // MARK: - 首页分类文件夹（导演/主演）
+    var displayedMovies: [Movie] { cachedDisplayedMovies }
 
-    private var activeCategoryMode: HomeCategoryMode {
-        HomeCategoryMode(rawValue: homeCategoryMode) ?? .none
-    }
-
-    @ViewBuilder
-    private func homeMovieCard(movie: Movie) -> some View {
-        if isHomeCacheModeActive {
-            MovieCardView(movie: movie, isHomeCacheModeActive: isHomeCacheModeActive)
-        } else {
-            NavigationLink(destination: MovieDetailView(movie: movie)) {
-                MovieCardView(movie: movie)
-            }.buttonStyle(.plain)
+    /// 输入变了才重算；调用点：媒体库载入/变更后、搜索词、排序方式与方向、分类模式切换。
+    private func rebuildWallCaches() {
+        var result = movies
+        if !searchText.isEmpty {
+            result = result.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
         }
+        let ascending = isAscending
+        result.sort { m1, m2 in
+            let isLess: Bool
+            switch selectedSortOption {
+            case .name: isLess = m1.title.localizedStandardCompare(m2.title) == .orderedAscending
+            case .year: isLess = (m1.releaseDate ?? "") < (m2.releaseDate ?? "")
+            case .rating: isLess = (m1.voteAverage ?? 0.0) < (m2.voteAverage ?? 0.0)
+            }
+            return ascending ? isLess : !isLess
+        }
+        cachedDisplayedMovies = result
+        cachedCategoryFolderGroups = Self.categoryFolderGroups(
+            mode: activeCategoryMode, source: result, ascending: categoryFolderSortAsc)
     }
 
-    private var categoryFolderGroups: [CategoryFolderGroup] {
-        let mode = activeCategoryMode
+    fileprivate static func categoryFolderGroups(mode: HomeCategoryMode, source: [Movie], ascending: Bool) -> [CategoryFolderGroup] {
         guard mode != .none, let kind = mode.personKind else { return [] }
         var buckets: [String: [Movie]] = [:]
         var order: [String] = []
         var uncategorized: [Movie] = []
-        for movie in displayedMovies {
+        for movie in source {
             let names = (mode == .director ? movie.directorList : movie.castList)
             if names.isEmpty {
                 uncategorized.append(movie)
@@ -472,7 +479,7 @@ struct PosterWallView: View {
             if lhsForeign != rhsForeign { return !lhsForeign }
             let cmp = lhs.folder.name.localizedStandardCompare(rhs.folder.name)
             if cmp != .orderedSame {
-                return categoryFolderSortAsc ? cmp == .orderedAscending : cmp == .orderedDescending
+                return ascending ? cmp == .orderedAscending : cmp == .orderedDescending
             }
             return lhs.movies.count > rhs.movies.count
         }
@@ -485,6 +492,28 @@ struct PosterWallView: View {
         }
         return result
     }
+    private var discoveredNetworkDevices: [DiscoveredDevice] {
+        lanScanner.discoveredDevices.filter { $0.type.isWebDAV || $0.type.isMediaServer || $0.type == .smb }
+    }
+
+    // MARK: - 首页分类文件夹（导演/主演）
+
+    private var activeCategoryMode: HomeCategoryMode {
+        HomeCategoryMode(rawValue: homeCategoryMode) ?? .none
+    }
+
+    @ViewBuilder
+    private func homeMovieCard(movie: Movie) -> some View {
+        if isHomeCacheModeActive {
+            MovieCardView(movie: movie, isHomeCacheModeActive: isHomeCacheModeActive)
+        } else {
+            NavigationLink(destination: MovieDetailView(movie: movie)) {
+                MovieCardView(movie: movie)
+            }.buttonStyle(.plain)
+        }
+    }
+
+    private var categoryFolderGroups: [CategoryFolderGroup] { cachedCategoryFolderGroups }
 
     // 封面优先级：手动指定 > 随机影视海报（人物照片只用于详情页）
     private func groupPosterPath(for group: CategoryFolderGroup) -> String? {
@@ -1292,8 +1321,14 @@ struct PosterWallView: View {
             UserDefaults.standard.set(isFast ? 50 : 1000, forKey: "NSInitialToolTipDelay")
         }
         .onChange(of: homeCategoryMode) { _, _ in
+            rebuildWallCaches()
             refreshCategoryRandomPosters()
         }
+        .onChange(of: searchText) { _, _ in rebuildWallCaches() }
+        .onChange(of: selectedSortOption) { _, _ in rebuildWallCaches() }
+        .onChange(of: isAscending) { _, _ in rebuildWallCaches() }
+        .onChange(of: categoryFolderSortAsc) { _, _ in rebuildWallCaches() }
+        .onChange(of: movies.count) { _, _ in rebuildWallCaches() }
         .onChange(of: isShowingManageSources) { _, isShown in
             if isShown {
                 lanScanner.startScanning()
@@ -4258,6 +4293,7 @@ struct PosterWallView: View {
                 }
                 DispatchQueue.main.async {
                     self.movies = fetchedMovies
+                    self.rebuildWallCaches()
                     self.mediaSources = fetchedSources
                     self.webDAVBrowserMountedURLs = self.mountedRemoteBrowserKeys(from: fetchedSources)
                     self.continueWatchingMovies = fetchedContinueWatching
@@ -4787,17 +4823,86 @@ extension PosterWallView {
 // MARK: - 滚动相位
 
 private struct WallScrollPhaseModifier: ViewModifier {
+    /// 回落成「没在滚」要等一下。滚轮每轻推一下、惯性滚动每顿一次都会报 idle，
+    /// 立刻翻转就整墙重排一次，掉帧之外还能把滚动位置顶回去；手真正停下 0.25s 再回落。
+    static let idleSettleDelay: TimeInterval = 0.25
+
     @Binding var isScrolling: Bool
+    @State private var settleGeneration = 0
+
+    private func markActive() {
+        settleGeneration += 1
+        if !isScrolling { isScrolling = true }
+    }
+
+    private func markSettling() {
+        guard isScrolling else { return }
+        settleGeneration += 1
+        let generation = settleGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.idleSettleDelay) {
+            if generation == settleGeneration { isScrolling = false }
+        }
+    }
 
     func body(content: Content) -> some View {
         if #available(macOS 15.0, *) {
             content.onScrollPhaseChange { _, phase in
-                let active = phase != .idle
-                if active != isScrolling { isScrolling = active }
+                if phase != .idle { markActive() } else { markSettling() }
             }
         } else {
-            content
+            // macOS 14 没有滚动相位回调，改看 AppKit 的内容偏移变化，否则整套降级完全不生效
+            content.background(WallScrollAppKitProbe(onScroll: {
+                markActive()
+                markSettling()
+            }))
         }
+    }
+}
+
+/// macOS 14 的滚动探测：盯住所在窗口里最外层 NSScrollView 的内容偏移。
+private struct WallScrollAppKitProbe: NSViewRepresentable {
+    let onScroll: () -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            guard let clip = Self.outerScrollView(in: view)?.contentView else { return }
+            clip.postsBoundsChangedNotifications = true
+            context.coordinator.observe(clip)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private static func outerScrollView(in view: NSView) -> NSScrollView? {
+        guard let root = view.window?.contentView else { return nil }
+        var queue: [NSView] = [root]
+        while !queue.isEmpty {
+            let candidate = queue.removeFirst()
+            if let scroll = candidate as? NSScrollView { return scroll }
+            queue.append(contentsOf: candidate.subviews)
+        }
+        return nil
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(onScroll: onScroll) }
+
+    final class Coordinator: NSObject {
+        private let onScroll: () -> Void
+        private var observed: NSClipView?
+
+        init(onScroll: @escaping () -> Void) { self.onScroll = onScroll }
+
+        func observe(_ clip: NSClipView) {
+            guard observed == nil else { return }
+            observed = clip
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(boundsChanged),
+                name: NSView.boundsDidChangeNotification, object: clip)
+        }
+
+        @objc private func boundsChanged() { onScroll() }
     }
 }
 

@@ -1420,11 +1420,12 @@ struct PlayerScreen: View {
                         }
                         .foregroundColor(.white)
                         .onHover { if $0 { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
-                        // 图标版面尺寸固定，玻璃条只留 3pt 余量，不会被字形行框撑高
+                        // 图标版面尺寸固定，玻璃条只留 3pt 余量，不会被字形行框撑高；
+                        // tint 传 .clear：压在视频上的一层净玻璃，不带主题染色
                         .padding(.vertical, 3)
                         .padding(.horizontal, 40)
-                        .themeGlassPlate(theme, cornerRadius: 999)
-                        .padding(.bottom, 40)   // 抬到字幕上方，别压住台词
+                        .themeGlassPlate(theme, cornerRadius: 999, tint: .clear)
+                        .padding(.bottom, 72)   // 抬到字幕上方，别压住台词
 
                         if shouldShowNextEpisodeButton {
                             HStack {
