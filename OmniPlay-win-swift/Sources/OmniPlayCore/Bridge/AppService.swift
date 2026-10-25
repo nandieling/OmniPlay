@@ -14,7 +14,7 @@ public final class OmniPlayService {
             "library.stats", "library.sections", "library.section", "library.categories",
             "library.mark", "library.progress", "library.seed",
             "events.poll", "events.push",
-            "player.status", "player.start", "player.load", "player.pause", "player.stop",
+            "player.status", "player.start", "player.load", "player.seek", "player.pause", "player.stop",
         ]
     }
 
@@ -237,6 +237,10 @@ public final class OmniPlayService {
             guard let path = params["path"]?.stringValue else { return Self.error("缺少要播放的路径") }
             let loaded = player.load(path)
             return Self.ok(.object(["loaded": .bool(loaded)]))
+        case "player.seek":
+            let seconds = params["seconds"]?.doubleValue ?? 0
+            let seeked = player.seek(seconds)
+            return Self.ok(.object(["seeked": .bool(seeked), "seconds": .number(seconds)]))
         case "player.pause":
             player.setPaused(params["paused"]?.boolValue ?? true)
             return Self.ok(.object(["paused": .bool(params["paused"]?.boolValue ?? true)]))

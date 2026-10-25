@@ -21,20 +21,21 @@ Sources/OmniPlayCore/Database/   片库：SQLite 薄封装 + 表结构 + 演示�
 Sources/OmniPlayCore/Platform/   宿主注入的钩子（密钥、数据目录等）
 Sources/CSQLite/             SQLite 官方合并源（两个平台跑同一个版本）
 Sources/OmniPlayBridge/      @_cdecl 导出，六个 C 函数
-Tests/OmniPlayCoreTests/     契约与规则锁，46 项
+Tests/OmniPlayCoreTests/     契约与规则锁，47 项
 spike-db/                    GRDB on Windows 的独立探针（它红了不牵连核心包）
 scripts/host_smoke.py        用 ctypes 假扮 WPF，走一遍跨语言边界
 windows/OmniPlay.Wpf/        WPF 演示窗：主题、播放子 HWND、Popup 控制条
 windows/abi-probe/           控制台探针，CI 拿它的退出码当结论
 windows/build.ps1            一条命令：核心 -> 探针 -> 演示 -> 跑探针
 docs/SPIKE.md                验收清单与已知风险
+docs/DEVELOPMENT_PLAN.md     当前状态、契约表、分步计划
 ```
 
 ## 本机（macOS）
 
 ```bash
 swift build                      # 核心库
-swift test                       # 46 项契约与规则测试
+swift test                       # 47 项契约与规则测试
 python3 scripts/host_smoke.py    # 跨语言边界冒烟
 cd spike-db && swift run db-spike
 ```

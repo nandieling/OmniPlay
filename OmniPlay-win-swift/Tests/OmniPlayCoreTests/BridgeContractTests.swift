@@ -218,6 +218,15 @@ final class BridgeContractTests: XCTestCase {
         XCTAssertEqual(polled["events"]?.arrayValue?.count, 2)
     }
 
+    // MARK: - 播放器
+
+    func testPlayerSeekAnswersWithItsOwnShape() throws {
+        // 没起播就 seek：必须回一条结构正确的「没做成」，不能抛异常出去让界面炸
+        let seeked = try call("player.seek", .object(["seconds": .number(930)]))
+        XCTAssertEqual(seeked["seeked"]?.boolValue, false)
+        XCTAssertEqual(seeked["seconds"]?.doubleValue, 930)
+    }
+
     func testEventBufferStaysBounded() {
         for _ in 0..<600 { service.push(topic: "scan.progress", payload: .object([:])) }
         let (head, events) = service.eventsSince(0)

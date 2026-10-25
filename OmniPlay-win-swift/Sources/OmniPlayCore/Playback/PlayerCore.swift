@@ -198,6 +198,15 @@ public final class PlayerCore {
         return "loadfile \"\(path)\"".withCString { library.commandString(handle, $0) == 0 }
     }
 
+    /// 跳到某个秒数。走 seek 命令而不是直接写 time-pos：seek 会按 mpv 的关键帧与
+    /// 精度逻辑处理，直接写属性在某些容器上会被吞掉。absolute 越界由 mpv 自己夹。
+    @discardableResult
+    public func seek(_ seconds: Double) -> Bool {
+        guard let library, let handle, seconds.isFinite, seconds >= 0 else { return false }
+        let command = #"["seek", \#(seconds), "absolute"]"#
+        return command.withCString { library.commandString(handle, $0) == 0 }
+    }
+
     public func setPaused(_ paused: Bool) {
         guard let library, let handle else { return }
         _ = library.setPropertyString(handle, "pause", paused ? "yes" : "no")

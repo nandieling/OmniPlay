@@ -10,7 +10,11 @@ namespace OmniPlay.WpfSpike;
 /// 分组顺序、片名排序、已看未看都是核心算好的，跟 mac 版共用同一套规矩。
 public sealed class HomeBoard : ContentControl
 {
-    public sealed record Card(long FileId, string Title, int? Year, int Percent, bool Watched, double Hue);
+    /// 一条片子。字段跟 library.sections 给的 entry 对齐，界面不再自己算。
+    public sealed record Card(
+        long FileId, string Title, int? Year, int Percent, bool Watched, double Hue,
+        string Path, double Position, double Duration,
+        IReadOnlyList<string> Genres, IReadOnlyList<string> Directors, IReadOnlyList<string> Casts);
     public sealed record Shelf(string Id, string Title, IReadOnlyList<Card> Cards);
 
     private const double PosterWidth = 132;
@@ -180,15 +184,28 @@ public sealed class HomeBoard : ContentControl
     {
         foreach (var entry in entries?.AsArray() ?? new JsonArray())
         {
-            var id = entry?["fileId"]?.GetValue<double>() ?? 0;
             yield return new Card(
-                (long)id,
+                (long)(entry?["fileId"]?.GetValue<double>() ?? 0),
                 entry?["title"]?.GetValue<string>() ?? string.Empty,
                 ReadYear(entry?["year"]),
                 entry?["percent"]?.GetValue<double>() is double percent ? (int)percent : 0,
                 entry?["watched"]?.GetValue<bool>() ?? false,
-                entry?["hue"]?.GetValue<double>() ?? 0);
+                entry?["hue"]?.GetValue<double>() ?? 0,
+                entry?["path"]?.GetValue<string>() ?? string.Empty,
+                entry?["position"]?.GetValue<double>() ?? 0,
+                entry?["duration"]?.GetValue<double>() ?? 0,
+                ReadStrings(entry?["genres"]),
+                ReadStrings(entry?["directors"]),
+                ReadStrings(entry?["casts"]));
         }
+    }
+
+    private static string[] ReadStrings(JsonNode? node)
+    {
+        var list = new List<string>();
+        foreach (var item in node?.AsArray() ?? new JsonArray())
+            list.Add(item?.GetValue<string>() ?? string.Empty);
+        return list.ToArray();
     }
 
     private static int? ReadYear(JsonNode? node)

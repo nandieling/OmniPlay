@@ -28,8 +28,13 @@ public partial class SpikeWindow : Window
     private GlassPlate? _logPlate;
     private HomeBoard _home = null!;
     private NavRail _nav = null!;
+    private DetailView _detail = null!;
     private GlassPlate? _navPlate;
     private TextBlock? _selectionText;
+    private TextBlock? _nowPlayingText;
+    // 正在放的片子与上次回写进度的时刻。进度每 5 秒回写一次，关窗前必须再写一次
+    private HomeBoard.Card? _playing;
+    private DateTime _lastProgressWrite = DateTime.MinValue;
     private TextBlock? _titleBlock;
     private TextBlock? _progressText;
     private TextBlock? _statusText;
@@ -125,11 +130,17 @@ public partial class SpikeWindow : Window
         _home.StatusChanged += Log;
         _home.SelectionChanged += card =>
         {
+            _detail.Show(card);
             if (_selectionText is not null)
                 _selectionText.Text = card is null ? "没选片子" : $"选中：{card.Title}";
         };
         _home.Refresh();
         VideoArea.Children.Add(_home);
+
+        _detail = new DetailView((Style)Resources["Pill"]) { Margin = new Thickness(0, 10, 12, 10) };
+        _detail.PlayRequested += PlayCard;
+        _detail.MarkRequested += (card, watched) => Mark(watched);
+        VideoArea.Children.Add(_detail);
 
         _nav = new NavRail();
         _nav.ViewChosen += view => _home.Show(view);
@@ -242,6 +253,7 @@ public partial class SpikeWindow : Window
         _logPlate?.Apply(spec, Backdrop);
         _navPlate?.Apply(spec, Backdrop);
         _nav.Apply(spec);
+        _detail.Apply(spec);
 
         _home.Apply(spec);
         if (_titleBlock is not null) _titleBlock.Foreground = new SolidColorBrush(spec.TextPrimary);
@@ -298,12 +310,33 @@ public partial class SpikeWindow : Window
 
     // MARK: - 播放
 
-    private void OnPlaySample(object sender, RoutedEventArgs e)
+    private void OnPlaySample(object sender, RoutedEventArgs e) => StartPlayback(SampleFile(), null);
+
+    /// 详情页里点播放。演示片库的路径是假的，拿随包示例片顶一下，
+    /// 至少「点海报 → 起播 → 回写进度 → 进继续播放」这条链是真的。
+    private void PlayCard(HomeBoard.Card card)
     {
-        var sample = Path.Combine(AppContext.BaseDirectory, "testdata", "sample.mp4");
-        if (!File.Exists(sample))
+        var path = card.Path.StartsWith("demo://", StringComparison.Ordinal) ? SampleFile() : card.Path;
+        if (path.Length == 0)
         {
-            Log($"找不到示例视频：{sample}");
+            Log("这部片没有可播的路径");
+            return;
+        }
+        StartPlayback(path, card);
+        if (card.Position > 1)
+        {
+            _core.Invoke("player.seek", new JsonObject { ["seconds"] = card.Position });
+            Log($"续播：跳到 {card.Position:F0}s");
+        }
+    }
+
+    private static string SampleFile() => Path.Combine(AppContext.BaseDirectory, "testdata", "sample.mp4");
+
+    private void StartPlayback(string path, HomeBoard.Card? card)
+    {
+        if (!File.Exists(path))
+        {
+            Log($"找不到视频文件：{path}");
             return;
         }
         if (_video.RenderHandle == IntPtr.Zero)
@@ -311,16 +344,50 @@ public partial class SpikeWindow : Window
             Log("播放子窗口还没建好");
             return;
         }
-        var parameters = new JsonObject { ["wid"] = (long)_video.RenderHandle, ["path"] = sample };
+        var parameters = new JsonObject { ["wid"] = (long)_video.RenderHandle, ["path"] = path };
         var result = _core.Invoke("player.start", parameters);
         Log($"player.start → {result.ToJsonString()}");
         if (result["started"]?.GetValue<bool>() != true) return;
 
         // 画面进来后，海报与中间那条玻璃会被子 HWND 盖住（airspace），
         // 控制条改由 Popup 承担：这正是这个演示要验的东西。
+        _playing = card;
+        _lastProgressWrite = DateTime.Now;
         _home.Visibility = Visibility.Collapsed;
         if (_centerPlate is not null) _centerPlate.Visibility = Visibility.Collapsed;
         BuildPopupBar();
+        if (_nowPlayingText is not null) _nowPlayingText.Text = card?.Title ?? "示例片段";
+    }
+
+    /// 停机：先落进度，再让核心停机，最后把海报墙刷回来
+    private void StopPlayback()
+    {
+        WriteProgress(force: true);
+        _core.Invoke("player.stop");
+        _playing = null;
+        _home.Visibility = Visibility.Visible;
+        if (_centerPlate is not null) _centerPlate.Visibility = Visibility.Visible;
+        if (ControlPopup.Child is not null) ControlPopup.IsOpen = false;
+        _home.Refresh();
+        Log("已停机，进度已回写");
+    }
+
+    /// 进度回写。每 5 秒一次；关窗与停机时强制写一次。
+    private void WriteProgress(bool force = false)
+    {
+        var card = _playing;
+        if (card is null) return;
+        var now = DateTime.Now;
+        if (!force && (now - _lastProgressWrite).TotalSeconds < 5) return;
+        var status = _core.Invoke("player.status");
+        var position = status["timePos"]?.GetValue<double>() ?? 0;
+        var duration = status["duration"]?.GetValue<double>() ?? 0;
+        if (position <= 0) return;
+        _lastProgressWrite = now;
+        _core.Invoke("library.progress", new JsonObject
+        {
+            ["fileId"] = card.FileId, ["position"] = position, ["duration"] = duration,
+        });
     }
 
     private void BuildPopupBar()
@@ -329,6 +396,16 @@ public partial class SpikeWindow : Window
         var panel = new StackPanel { Orientation = Orientation.Horizontal };
         var play = new Button { Content = "⏯", Style = (Style)Resources["Pill"], Padding = new Thickness(16, 6, 16, 6) };
         play.Click += (_, _) => TogglePause();
+        var stop = new Button { Content = "停止", Style = (Style)Resources["Pill"] };
+        stop.Click += (_, _) => StopPlayback();
+        _nowPlayingText = new TextBlock
+        {
+            Text = _playing?.Title ?? "示例片段",
+            Margin = new Thickness(14, 0, 8, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = new SolidColorBrush(_spec.TextPrimary),
+        };
+        panel.Children.Add(_nowPlayingText);
         _progressText = new TextBlock
         {
             Text = "0.0s",
@@ -337,6 +414,7 @@ public partial class SpikeWindow : Window
             Foreground = new SolidColorBrush(_spec.TextPrimary),
         };
         panel.Children.Add(play);
+        panel.Children.Add(stop);
         panel.Children.Add(_progressText);
         // Popup 与窗口内容不同视觉树，采不到画面，退回纯染色玻璃
         ControlPopup.Child = new GlassPlate(_spec, panel, null);
@@ -365,12 +443,18 @@ public partial class SpikeWindow : Window
         if (_statusText is not null)
             _statusText.Text = $"player：{position:F1}s / {duration:F1}s  {(paused ? "已暂停" : "播放中")}";
         if (_progressText is not null) _progressText.Text = $"{position:F1}s / {duration:F1}s";
+        WriteProgress();
     }
 
     private void OnClosing(object sender, System.ComponentModel.CancelEventArgs e)
     {
         _poll.Stop();
-        try { _core.Invoke("player.stop"); } catch (Exception error) { Log("停止播放失败：" + error.Message); }
+        try
+        {
+            WriteProgress(force: true);
+            _core.Invoke("player.stop");
+        }
+        catch (Exception error) { Log("停止播放失败：" + error.Message); }
         _core.Dispose();
         StartupLog.Write("窗口已关闭，核心已释放");
     }
