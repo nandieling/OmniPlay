@@ -16,6 +16,11 @@ CI（`.github/workflows/windows-swift-spike.yml`）已经把下面大部分变�
 纯函数；或者核心里放一层极薄的 SQL 封装，不引 GRDB。两条路的代价都是把「查询」搬回宿主，
 核心退化成规则层。
 
+**2026-10-25 Windows 实测：不通过。** 不是运行时不行，是编译就起不来——GRDB 的
+`GRDBSQLite` C 目标在 Windows 上找不到 `sqlite3.h`（它只在 Apple 平台上用系统 SQLite）。
+退路按优先级：① 自带 SQLite 合并源码（vendor `sqlite3.c`，走 GRDB 的 custom SQLite build
+用法，改动只在依赖声明上）；② 核心里放一层极薄的 SQL 封装；③ 宿主持库，核心退成规则层。
+
 ## 2. libmpv + WPF 的 airspace（`abi-probe` + 演示窗）
 
 机器部分（`abi-probe`）：核心装载 `libmpv-2.dll`、headless 起 mpv、示例文件时长解析、
@@ -105,8 +110,16 @@ Windows 上若只有这条红，说明 ICU 排序与 mac 的 `localizedStandardC
 解决办法是在核心里注册自定义 collator（GRDB 支持），或者把排序权重表算成纯 Swift 数据，
 不再依赖平台 collation。
 
+**2026-10-25 实测**：Windows（Swift 6.2.1 + ICU）35 项全绿，拼音序与 mac 本机一致；
+但 `macos-14` CI 镜像上同样这三条红了。所以不守恒的变量不是「mac 还是 Windows」，
+而是 macOS/Xcode 版本。正式实现里排序权重要在核心内部定死，别交给平台 collation。
+
 ## 4. 已知风险
 
+- `libmpv-2.dll`（shinchiro mpv-dev）在 CI 的 Windows Server 2022 镜像上 `LoadLibraryW`
+  报 126——它自己的依赖在 Server SKU 上缺（多半是媒体框架那类组件），探针因此 skip 播放。
+  安装包照样打了这份 115 MB 的库；普通 Win10/11 桌面能不能装载要装完才知道，装不上时界面
+  会带 Win32 错误码说明原因，也可以直接往安装目录放一份自己的 `libmpv-2.dll`。
 - 安装包向导目前是英文（Inno 的 Default.isl）：简体中文 isl 不属于官方安装包，
   想要中文界面要么随包带上 ChineseSimplified.isl，要么把 [Setup] 换成 Inno Setup
   Wishlist 分支。应用本体是中文的，这里先不折腾。

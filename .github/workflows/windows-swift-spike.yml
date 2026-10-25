@@ -51,6 +51,7 @@ jobs:
       - name: GRDB 探针
         id: db
         continue-on-error: true
+        if: always()
         # 新构建引擎（swiftbuild）在 GRDB 的 C 目标上会报「Multiple input files」，
         # 本地 Swift 6.4 实测要退回 native，CI 同样留这条退路
         run: swift run db-spike || swift run --build-system native db-spike
