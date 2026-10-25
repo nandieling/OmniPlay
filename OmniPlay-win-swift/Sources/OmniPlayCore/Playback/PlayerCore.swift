@@ -145,13 +145,13 @@ public final class PlayerCore {
     public func start(headless: Bool = false, renderSurface: UnsafeMutableRawPointer? = nil) -> Bool {
         guard let library, handle == nil else { return handle != nil }
         guard let handle = library.create() else { return false }
-        library.setOptionString(handle, "vo", headless ? "null" : "gpu")
-        library.setOptionString(handle, "ao", headless ? "null" : Self.audioOutputs)
-        library.setOptionString(handle, "idle", "no")
-        library.setOptionString(handle, "keep-open", "yes")
+        _ = library.setOptionString(handle, "vo", headless ? "null" : "gpu")
+        _ = library.setOptionString(handle, "ao", headless ? "null" : Self.audioOutputs)
+        _ = library.setOptionString(handle, "idle", "no")
+        _ = library.setOptionString(handle, "keep-open", "yes")
         if let renderSurface {
             // wid 是整数：mac 传 NSView 指针，Windows 传 HWND
-            library.setOptionString(handle, "wid", "\(UInt(bitPattern: renderSurface))")
+            _ = library.setOptionString(handle, "wid", "\(UInt(bitPattern: renderSurface))")
         }
         guard library.initialize(handle) == 0 else {
             library.destroy(handle)
@@ -169,7 +169,7 @@ public final class PlayerCore {
 
     public func setPaused(_ paused: Bool) {
         guard let library, let handle else { return }
-        library.setPropertyString(handle, "pause", paused ? "yes" : "no")
+        _ = library.setPropertyString(handle, "pause", paused ? "yes" : "no")
     }
 
     public var status: PlayerStatus {

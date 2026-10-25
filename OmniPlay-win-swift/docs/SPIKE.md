@@ -68,6 +68,11 @@ C# 探针在 mac 上也能干跑：`DllImport("omniplay-core")` 会去找 `libom
 `.sha256`。流程在 `windows/package.ps1`：构建后先跑一遍 `abi-probe`，探针不过就不出包；
 libmpv 取不到只降级、不阻断。装完按第 2 节那九条看。
 
+发布目录里除 `omniplay-core.dll` 外还会躺一串 Swift 运行时 DLL：核心在 Windows 上是动态链接
+`swiftCore` 的，`Copy-SwiftRuntime` 顺着 `omniplay-core.dll` 的 PE 导入表把工具链 `usr\bin`
+里需要的几个拷进来（顺带补 `VCRUNTIME140`/`msvcp140`，Swift 安装器只在构建机装过 redist）。
+少了这一步，包在自己机器上能跑、换台机器就 `DllNotFoundException`。
+
 Swift 6.4 的新构建引擎（swiftbuild）在 GRDB 的 C 目标上会报「Multiple input files」，
 本地跑探针要加 `--build-system native`；CI 那步已经写了这条退路。
 

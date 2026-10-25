@@ -35,8 +35,10 @@ public struct PlatformHooks {
 
     public static func defaultDataDirectory() -> URL {
         #if os(Windows)
-        let base = FileManager.default.urls(for: .appDataDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        // Windows 的 Foundation 没有 appDataDirectory 这个搜索路径，直接认 %APPDATA%
+        let appData = ProcessInfo.processInfo.environment["APPDATA"]
+        let base = (appData?.isEmpty == false) ? URL(fileURLWithPath: appData!)
+            : URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         #else
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)

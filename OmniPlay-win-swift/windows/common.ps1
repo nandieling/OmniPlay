@@ -62,3 +62,107 @@ function Find-InnoSetup {
     }
     return $null
 }
+
+# Swift 在 Windows 上永远动态链接 swiftCore 之类，装到用户机器上必须把这几个 DLL 一起带上。
+function Find-SwiftToolchainBin {
+    $cmd = Get-Command swift.exe -ErrorAction SilentlyContinue
+    if (-not $cmd) { return $null }
+    $bin = Split-Path -Parent $cmd.Source
+    if (Test-Path (Join-Path $bin 'swiftCore.dll')) { return $bin }
+    return $null
+}
+
+# 读 PE 导入表，够回答「这个 DLL 还依赖谁」就行，不做完整解析。
+function Get-PeImageImports {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 0x40 -or [BitConverter]::ToUInt16($bytes, 0) -ne 0x5A4D) { return @() }
+    $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+    if ($pe -le 0 -or ($pe + 24) -gt $bytes.Length) { return @() }
+    $sizeOfOptional = [BitConverter]::ToUInt16($bytes, $pe + 20)
+    $sections = [BitConverter]::ToUInt16($bytes, $pe + 6)
+    $optional = $pe + 24
+    $magic = [BitConverter]::ToUInt16($bytes, $optional)
+    # 数据目录起点：PE32+ 在可选头 +112，PE32 在 +96；导入表是第 2 项，每项 8 字节
+    $directory = $optional + $(if ($magic -eq 0x20B) { 112 } else { 96 }) + 8
+    $importRva = [BitConverter]::ToUInt32($bytes, $directory)
+    if ($importRva -eq 0) { return @() }
+    $sectionTable = $optional + $sizeOfOptional
+
+    $offsetOf = {
+        param([uint32]$Rva)
+        for ($i = 0; $i -lt $sections; $i++) {
+            $row = $sectionTable + ($i * 40)
+            $virtual = [BitConverter]::ToUInt32($bytes, $row + 12)
+            $virtualSize = [BitConverter]::ToUInt32($bytes, $row + 8)
+            $rawSize = [BitConverter]::ToUInt32($bytes, $row + 16)
+            $raw = [BitConverter]::ToUInt32($bytes, $row + 20)
+            if ($Rva -ge $virtual -and $Rva -lt ($virtual + [Math]::Max($virtualSize, $rawSize))) {
+                return [int]($raw + ($Rva - $virtual))
+            }
+        }
+        return -1
+    }
+
+    $names = New-Object System.Collections.Generic.List[string]
+    $descriptor = & $offsetOf $importRva
+    while (($descriptor -ge 0) -and ($descriptor + 20) -le $bytes.Length) {
+        $nameRva = [BitConverter]::ToUInt32($bytes, $descriptor + 12)
+        if ($nameRva -eq 0) { break }
+        $at = & $offsetOf $nameRva
+        if ($at -lt 0 -or $at -ge $bytes.Length) { break }
+        $end = $at
+        while (($end -lt $bytes.Length) -and ($bytes[$end] -ne 0)) { $end++ }
+        $names.Add([System.Text.Encoding]::ASCII.GetString($bytes, $at, $end - $at))
+        $descriptor += 20
+    }
+    return $names
+}
+
+# 顺着核心 DLL 的导入，把工具链 usr\bin 里的 Swift 运行时（含 MSVC CRT）拷进发布目录。
+function Copy-SwiftRuntime {
+    param([Parameter(Mandatory = $true)][string]$CoreDll,
+          [Parameter(Mandatory = $true)][string]$TargetDir)
+
+    $bin = Find-SwiftToolchainBin
+    if (-not $bin) {
+        Write-Warning '没找到工具链的 usr\bin：Swift 运行时没进包，换台没装 Swift 的机器会起不来'
+        return @()
+    }
+    $queue = New-Object System.Collections.Generic.Queue[string]
+    foreach ($name in (Get-PeImageImports -Path $CoreDll)) { $queue.Enqueue($name) }
+
+    $copied = New-Object System.Collections.Generic.List[string]
+    $bytes = 0L
+    while ($queue.Count -gt 0) {
+        $name = $queue.Dequeue()
+        if ($copied -contains $name) { continue }
+        $source = Join-Path $bin $name                       # Swift 运行时：工具链里那份
+        $isSwiftRuntime = Test-Path -LiteralPath $source
+        if (-not $isSwiftRuntime) {
+            # MSVC CRT：Swift 安装器只在构建机上装过 redist，用户机器不一定有，顺手带上
+            if ($name -notmatch '^(vcruntime|msvcp|concrt)') { continue }
+            $source = Join-Path (Join-Path $env:SystemRoot 'System32') $name
+            if (-not (Test-Path -LiteralPath $source)) { continue }
+        }
+        try {
+            $item = Get-Item -LiteralPath $source
+            Copy-Item -LiteralPath $source -Destination (Join-Path $TargetDir $name) -Force
+            $copied.Add($name)
+            $bytes += $item.Length
+            if ($isSwiftRuntime) {
+                foreach ($next in (Get-PeImageImports -Path $source)) { $queue.Enqueue($next) }
+            }
+        } catch {
+            Write-Warning "拷 $name 时出岔子：$($_.Exception.Message)"
+        }
+    }
+
+    if ($copied.Count -eq 0) {
+        Write-Warning '核心 DLL 的导入表里没解析出任何工具链 DLL：运行时可能没进包，装到别的机器上试试'
+    } else {
+        Write-Host ("  Swift 运行时：{0} 个 DLL，{1:N1} MB" -f $copied.Count, ($bytes / 1MB))
+    }
+    return $copied
+}
