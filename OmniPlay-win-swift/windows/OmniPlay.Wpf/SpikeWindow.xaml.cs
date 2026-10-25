@@ -81,7 +81,8 @@ public partial class SpikeWindow : Window
         _glassToggle.Checked += (_, _) => { _glass = true; ApplyTheme(); };
         _glassToggle.Unchecked += (_, _) => { _glass = false; ApplyTheme(); };
 
-        var play = new Button { Content = "播放示例", Style = (Style)Resources["Pill"], Click = OnPlaySample };
+        var play = new Button { Content = "播放示例", Style = (Style)Resources["Pill"] };
+        play.Click += OnPlaySample;
 
         _topContent = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         _topContent.Children.Add(_titleBlock);
@@ -238,9 +239,13 @@ public partial class SpikeWindow : Window
         {
             var top = ThemeSpec.Fade(spec.Accent, 0.22 + (i % 5) * 0.13);
             var bottom = ThemeSpec.Fade(spec.TextPrimary, 0.30 + (i % 3) * 0.16);
-            _posterCards[i].Background = new LinearGradientBrush(
-                new GradientStopCollection { new GradientStop(top, 0), new GradientStop(bottom, 1) },
-                new Point(0, 0), new Point(1, 1), MappingMode.RelativeToBoundingBox);
+            _posterCards[i].Background = new LinearGradientBrush
+            {
+                MappingMode = BrushMappingMode.RelativeToBoundingBox,
+                StartPoint = new Point(0, 0),
+                EndPoint = new Point(1, 1),
+                GradientStops = new GradientStopCollection { new GradientStop(top, 0), new GradientStop(bottom, 1) },
+            };
         }
     }
 

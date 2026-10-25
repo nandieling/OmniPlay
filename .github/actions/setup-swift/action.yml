@@ -1,0 +1,62 @@
+name: 准备 Swift（Windows）
+description: |
+  装 swift.org 官方 Windows 工具链，并当场验一次「能不能编译 import Foundation」。
+  6.0.x 的模块映射在部分 runner 上有环（ucrt -> _Builtin_intrinsics -> ucrt），
+  一有环整个核心库就编不动，报错还落在 LibcOverlayShims.h 上，看着像业务代码的问题。
+  自检不过就换 update-sdk-modules 重装一次：它用 swiftlang 仓库里现成的 modulemap
+  覆盖安装包里那套（ucrt / vcruntime / WinSDK / clang 的 _Builtin_intrinsics）。
+  要换工具链版本，只改下面两个 default。
+
+inputs:
+  swift-version:
+    description: swift.org 版本标识
+    required: false
+    default: swift-6.2.1-release
+  swift-build:
+    description: swift.org 构建标识
+    required: false
+    default: 6.2.1-RELEASE
+
+runs:
+  using: composite
+  steps:
+    - name: 安装 Swift
+      uses: compnerd/gha-setup-swift@main
+      with:
+        swift-version: ${{ inputs.swift-version }}
+        swift-build: ${{ inputs.swift-build }}
+        cache: 'true'
+
+    - name: 自检模块映射
+      id: probe
+      continue-on-error: true
+      shell: pwsh
+      run: |
+        $probe = Join-Path $env:RUNNER_TEMP 'omniplay-toolchain-probe.swift'
+        Set-Content -Path $probe -Value 'import Foundation' -Encoding utf8
+        swift --version
+        swiftc -typecheck $probe
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host '::warning::工具链自带的模块映射有环，改用重写后的 modulemap 重装'
+          exit 1
+        }
+
+    - name: 换 modulemap 重装
+      if: steps.probe.outcome == 'failure'
+      uses: compnerd/gha-setup-swift@main
+      with:
+        swift-version: ${{ inputs.swift-version }}
+        swift-build: ${{ inputs.swift-build }}
+        cache: 'true'
+        update-sdk-modules: 'true'
+
+    - name: 模块映射复测
+      if: steps.probe.outcome == 'failure'
+      shell: pwsh
+      run: |
+        swiftc -typecheck (Join-Path $env:RUNNER_TEMP 'omniplay-toolchain-probe.swift')
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "::error::Swift ${{ inputs.swift-build }} 在这台 runner 上连 import Foundation 都编不过，先换工具链版本再谈打包"
+          exit 1
+        }
+        Write-Host '工具链自检通过' -ForegroundColor Green

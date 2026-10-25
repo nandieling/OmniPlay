@@ -76,6 +76,6 @@
 
         <!-- 控制条走 Popup：子 HWND 盖住 WPF 内容，只有独立顶层窗口能浮在播放画面之上 -->
         <Popup x:Name="ControlPopup" PlacementTarget="{Binding ElementName=VideoArea}"
-               Placement="Center" AllowsTransparency="True" StaysOpen="True" AllowsTopMost="True" />
+               Placement="Center" AllowsTransparency="True" StaysOpen="True" />
     </Grid>
 </Window>

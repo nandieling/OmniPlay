@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
+using System.Windows.Shapes;
 
 namespace OmniPlay.WpfSpike;
 
@@ -33,8 +34,13 @@ public sealed class GlassBackdrop : FrameworkElement
         var stops = new GradientStopCollection();
         for (var i = 0; i < spec.Backdrop.Count; i++)
             stops.Add(new GradientStop(spec.Backdrop[i], (double)i / Math.Max(1, spec.Backdrop.Count - 1)));
-        var wash = new LinearGradientBrush(stops, spec.BackdropFrom, spec.BackdropTo,
-                                          MappingMode.RelativeToBoundingBox);
+        var wash = new LinearGradientBrush
+        {
+            MappingMode = BrushMappingMode.RelativeToBoundingBox,
+            StartPoint = spec.BackdropFrom,
+            EndPoint = spec.BackdropTo,
+            GradientStops = stops,
+        };
         dc.DrawRectangle(wash, null, rect);
 
         // 光斑：核心给的是归一化圆心与扩散半径，按短边折算成像素
@@ -47,7 +53,7 @@ public sealed class GlassBackdrop : FrameworkElement
             var center = new Point(size.Width * glow.X, size.Height * glow.Y);
             var brush = new RadialGradientBrush
             {
-                MappingMode = MappingMode.RelativeToBoundingBox,
+                MappingMode = BrushMappingMode.RelativeToBoundingBox,
                 GradientOrigin = new Point(0.5, 0.5),
                 Center = new Point(0.5, 0.5),
                 RadiusX = 0.5,
@@ -71,7 +77,7 @@ public sealed class GlassPlate : Grid
     private readonly Border _tint;
     private readonly Border _sheen;
     private readonly Border _rim;
-    private readonly DropShadowEffect _shadow = new() { BlurRadius = 22, ShadowDepth = 2, RenderingBias = EffectRenderingBias.Performance };
+    private readonly DropShadowEffect _shadow = new() { BlurRadius = 22, ShadowDepth = 2 };
     private UIElement? _source;
     private ThemeSpec _spec = null!;
 
@@ -81,11 +87,11 @@ public sealed class GlassPlate : Grid
         _sampler = sampleSource is null ? null : new VisualBrush(sampleSource)
         {
             Stretch = Stretch.Fill,
-            TileMode = BrushTileMode.None,
+            TileMode = TileMode.None,
             ViewboxUnits = BrushMappingMode.Absolute,
         };
         if (_sampler is not null) _sampled.Fill = _sampler;
-        _sampled.Effect = new BlurEffect { Radius = 26, KernelType = KernelType.GaussianKernel };
+        _sampled.Effect = new BlurEffect { Radius = 26 };
 
         _sampleClip = new Border { Child = _sampled };
         _tint = new Border();
@@ -133,8 +139,10 @@ public sealed class GlassPlate : Grid
         _sheen.Visibility = Visibility.Visible;
         _tint.Background = new SolidColorBrush(glass.Tint);
         _sheen.Background = new LinearGradientBrush(glass.SheenTop, glass.SheenBottom,
-                                                   new Point(0, 0), new Point(glass.SheenEndX, glass.SheenEndY),
-                                                   MappingMode.RelativeToBoundingBox);
+                                                    new Point(0, 0), new Point(glass.SheenEndX, glass.SheenEndY))
+        {
+            MappingMode = BrushMappingMode.RelativeToBoundingBox,
+        };
         _rim.BorderBrush = new SolidColorBrush(glass.Border);
         _rim.BorderThickness = new Thickness(1);
         _shadow.Color = glass.Shadow;

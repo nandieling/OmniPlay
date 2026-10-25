@@ -43,12 +43,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # windows 运行器不自带 Swift，用社区装的官方发行版
+      # windows 运行器不自带 Swift；版本与模块映射自检见 .github/actions/setup-swift
       - name: 安装 Swift
-        uses: compnerd/gha-setup-swift@main
-        with:
-          branch: swift-6.0.3-release
-          tag: 6.0.3-RELEASE
+        uses: ./.github/actions/setup-swift
 
       - name: 定版本号
         id: ver

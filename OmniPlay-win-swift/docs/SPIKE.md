@@ -43,13 +43,21 @@ CI（`.github/workflows/windows-swift-spike.yml`）已经把下面大部分变�
 ### 本机（Apple Silicon，Swift 6.4）已跑通
 
 ```
-swift build                        Build complete
-swift test                         Executed 35 tests, with 0 failures
-python3 scripts/host_smoke.py      host-smoke: OK
-./.build/debug/db-spike            db-spike: OK platform=macos sqlite=3.54.0 pool=wal fts5=ok rows=3
-nm -gU libomniplay-core.dylib      六个 _omniplay_* 平铺导出齐全
-dotnet abi-probe（挂真 dylib）      abi-probe: OK（播放一段本机没装 libmpv，跳过）
+swift build                                        Build complete
+swift test                                         Executed 35 tests, with 0 failures
+python3 scripts/host_smoke.py                      host-smoke: OK
+./.build/debug/db-spike                            db-spike: OK platform=macos sqlite=3.54.0 pool=wal fts5=ok rows=3
+nm -gU libomniplay-core.dylib                      六个 _omniplay_* 平铺导出齐全
+dotnet abi-probe（挂真 dylib）                      abi-probe: OK（播放一段本机没装 libmpv，跳过）
+dotnet build windows/OmniPlay.Wpf                  已成功生成（见下）
 ```
+
+WPF 宿主在 mac 上也能编译期把关：`OmniPlay.Wpf.csproj` 里开了 `EnableWindowsTargeting`，
+`dotnet build windows/OmniPlay.Wpf/OmniPlay.Wpf.csproj` 会把 XAML 与 C# 一起过一遍。
+这一步省掉两轮 CI——首轮跨目标编译就抓到 `Popup` 上没有的 `AllowsTopMost`、
+`LinearGradientBrush` 的错构造，以及 `BrushMappingMode`/`TileMode` 被写成
+`MappingMode`/`BrushTileMode`。注意它只验编译，不验观感：`VisualBrush` 采样、airspace
+仍要 Windows 上人眼确认。
 
 C# 探针在 mac 上也能干跑：`DllImport("omniplay-core")` 会去找 `libomniplay-core.dylib`，
 所以除了「平台自报」和「播放」两条，其余检查与 Windows 上完全同一份代码。
@@ -63,6 +71,26 @@ libmpv 取不到只降级、不阻断。装完按第 2 节那九条看。
 Swift 6.4 的新构建引擎（swiftbuild）在 GRDB 的 C 目标上会报「Multiple input files」，
 本地跑探针要加 `--build-system native`；CI 那步已经写了这条退路。
 
+## 2c. Windows 上的 Swift 工具链
+
+两个 Windows job 都不再直接写 `compnerd/gha-setup-swift`，改成 `uses: ./.github/actions/setup-swift`：
+版本只在该 action 的两个 default 里，装完立刻做一次 `swiftc -typecheck`（内容只有 `import Foundation`），
+不过就带 `update-sdk-modules: true` 重装再验一次。
+
+为什么要有这一步：首轮 CI 用 6.0.3，`swift build` 在编译核心时炸在
+
+```
+error: cyclic dependency in module 'ucrt': ucrt -> _Builtin_intrinsics -> ucrt
+error: could not build module '_Builtin_intrinsics'   (intrin.h -> x86intrin.h -> mm_malloc.h -> stdlib.h)
+error: could not build C module 'SwiftOverlayShims'   (LibcOverlayShims.h -> errno.h)
+```
+
+看着像业务代码的错，其实是工具链自带 modulemap 里有环：ucrt 依赖 `_Builtin_intrinsics`，
+而它的 `mm_malloc.h` 又 include 属于 ucrt 的 `stdlib.h`。`update-sdk-modules` 会拿 swiftlang
+仓库里的 modulemap 覆盖安装包里那套（ucrt / vcruntime / WinSDK / clang 资源目录），环就断了；
+升级到 6.1+ 同样绕开——6.1 起 SDK 用 `SwiftUCRT.h` 把这两块解耦。现在两道保险都上：
+先试 6.2.1，环没断就换 modulemap 再来。
+
 ## 3. 排序一致性
 
 `Tests/OmniPlayCoreTests/HomeSortTests.swift` 里的拼音序断言在两个平台都必须绿。
@@ -72,7 +100,8 @@ Windows 上若只有这条红，说明 ICU 排序与 mac 的 `localizedStandardC
 
 ## 4. 已知风险
 
-- `compnerd/gha-setup-swift` 装的发行版与稳定版有差异，正式打包前换成官方安装包。
+- 工具链由 `.github/actions/setup-swift` 从 swift.org 官方安装包静默安装（不是自建发行版），
+  换版本改那里的 default；换 modulemap 的退路也在那里。
 - WPF 的 `HwndHost` 在窗口最小化/最大化时可能重建子窗口，届时 `wid` 要重新交给 mpv。
 - 核心的 `PlayerCore` 目前是单实例状态机，与 mac 版一致；多路播放（预览小窗）要另想。
 - 自绘玻璃用 VisualBrush 采本窗口内容，源子树每帧会被渲染两遍：正式实现里要按板块大小限制

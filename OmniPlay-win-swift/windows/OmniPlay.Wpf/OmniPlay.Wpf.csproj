@@ -12,6 +12,8 @@
     <RootNamespace>OmniPlay.WpfSpike</RootNamespace>
     <RollForward>LatestMajor</RollForward>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- 让 mac 上也能 dotnet build 这份 WPF 宿主，改完不用等 CI 才发现 XAML 写错 -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
 
   <!-- 核心库与 libmpv 由 windows/build.ps1 放进输出目录，路径用属性传进来 -->
