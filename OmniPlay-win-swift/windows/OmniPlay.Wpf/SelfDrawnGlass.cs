@@ -158,7 +158,14 @@ public sealed class GlassPlate : Grid
         {
             var transform = _sampled.TransformToVisual(_source);
             var origin = transform.Transform(new Point(0, 0));
-            _sampler.Viewbox = new Rect(origin, new Size(_sampled.ActualWidth, _sampled.ActualHeight));
+            var size = new Size(_sampled.ActualWidth, _sampled.ActualHeight);
+            if (size.Width < 1 || size.Height < 1)
+            {
+                // 零尺寸的采样区配上高斯模糊是块非法渲染目标，有些驱动直接撂挑子
+                _sampleClip.Visibility = Visibility.Collapsed;
+                return;
+            }
+            _sampler.Viewbox = new Rect(origin, size);
             _sampleClip.Visibility = _spec.Glass is null ? Visibility.Collapsed : Visibility.Visible;
         }
         catch (InvalidOperationException)

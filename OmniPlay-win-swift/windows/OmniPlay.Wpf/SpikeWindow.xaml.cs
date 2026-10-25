@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 
@@ -50,6 +51,8 @@ public partial class SpikeWindow : Window
         InitializeComponent();
         // 轮询里的异常不能带崩进程：停表并把原因写在状态行上
         _poll.Tick += (_, _) => PollTick();
+        // 首帧这行是分隔线：日志停在这行之前 = 死在渲染，停在之后 = 死在读库
+        ContentRendered += (_, _) => StartupLog.Write("界面：第一帧已画出");
     }
 
     private void PollTick()
@@ -70,6 +73,8 @@ public partial class SpikeWindow : Window
     {
         try
         {
+            if (RenderOptions.ProcessRenderMode == RenderMode.SoftwareOnly)
+                Log("这次用软件渲染：显卡特效先关掉");
             var version = _core.Invoke("version");
             Log($"核心 {_core.Version}，平台 {version["platform"]?.GetValue<string>()}");
             // 核心会往宿主注册的回调上推消息，库落到哪儿了这类事就靠它带话
@@ -189,6 +194,7 @@ public partial class SpikeWindow : Window
         }
         try
         {
+            StartupLog.Write("片库：开始读取");
             _home.Refresh();
         }
         catch (Exception error)

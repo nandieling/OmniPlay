@@ -1,4 +1,6 @@
 using System.Windows;
+using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 
 namespace OmniPlay.WpfSpike;
@@ -20,6 +22,23 @@ public partial class App : Application
         _smoke = e.Args.Contains("--smoke");
         NoLibrary = e.Args.Contains("--no-library");
         StartupLog.Write($"启动：.NET {Environment.Version}，参数「{string.Join(" ", e.Args)}」");
+
+        // 上一趟崩在哪儿，这一趟就先绕开哪儿；手动开关留着给人工二分用。
+        var softRender = e.Args.Contains("--soft-render") ||
+                         Environment.GetEnvironmentVariable("OMNIPLAY_SOFT_RENDER") == "1" ||
+                         StartupLog.PreviousRunDiedBeforeFirstFrame;
+        if (softRender)
+        {
+            RenderOptions.ProcessRenderMode = RenderMode.SoftwareOnly;
+            StartupLog.Write(StartupLog.PreviousRunDiedBeforeFirstFrame
+                ? "上次崩在首帧之前：本次改用软件渲染（不用显卡特效）"
+                : "按要求用软件渲染");
+        }
+        if (StartupLog.PreviousRunDiedBeforeLibrary && !NoLibrary)
+        {
+            NoLibrary = true;
+            StartupLog.Write("上次崩在片库读取：本次先跳过片库");
+        }
 
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
             ReportFailure("进程级未捕获异常", args.ExceptionObject as Exception);

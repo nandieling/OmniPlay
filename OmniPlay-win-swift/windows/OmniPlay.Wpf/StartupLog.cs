@@ -27,9 +27,29 @@ public static class StartupLog
         _ => string.Join(" 或 ", writable),
     };
 
+    /// 上一次那趟跑到哪儿就没了。用来判断该不该自动退到安全模式：
+    /// 崩在首帧之前 = 大概率渲染/显卡驱动，崩在首帧之后 = 大概率片库那一层。
+    public static bool PreviousRunDiedBeforeFirstFrame { get; private set; }
+    public static bool PreviousRunDiedBeforeLibrary { get; private set; }
+
     public static void Reset()
     {
         writable.Clear();
+        try
+        {
+            if (File.Exists(FilePath))
+            {
+                var previous = File.ReadAllText(FilePath);
+                if (!previous.Contains("退出（"))
+                {
+                    PreviousRunDiedBeforeFirstFrame =
+                        previous.Contains("界面搭建完成") && !previous.Contains("第一帧");
+                    PreviousRunDiedBeforeLibrary =
+                        previous.Contains("第一帧") && !previous.Contains("片库：");
+                }
+            }
+        }
+        catch (Exception) { /* 上一份日志读不出来就按首次启动处理 */ }
         foreach (var path in new[] { FilePath, FallbackPath })
         {
             try

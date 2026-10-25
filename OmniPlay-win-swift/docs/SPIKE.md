@@ -152,6 +152,22 @@ error: could not build C module 'SwiftOverlayShims'   (LibcOverlayShims.h -> err
 - CI 冒烟两处日志都认，并把「片库读取失败」「原生崩溃」当失败——绿包不再等于蒙过去。
 
 
+### 用户机器上的日志说停在哪儿
+
+实机日志（`C:\Users\nan\...`，纯 ASCII 路径）走到 `界面搭建完成` 就断，后面既没有
+`原生崩溃` 也没有 `退出（0）`：进程是被硬终止的，不走 .NET 异常管道（`__fastfail` 这类
+连 `SetUnhandledExceptionFilter` 都不经过）。断点在首帧渲染与读库之间，两者都还没被标记分开。
+
+于是补一条分隔线和一个自愈：
+
+- `ContentRendered` 打一行 `界面：第一帧已画出`。日志停在这行之前 = 死在渲染（多半是显卡驱动
+  撂挑子），停在之后 = 死在片库那一层。`片库：开始读取` 再切一刀。
+- 下次启动先读上一份日志：上次没画到首帧 → 本次自动 `RenderOptions.ProcessRenderMode =
+  RenderMode.SoftwareOnly`；上次画到首帧但没读到库 → 本次自动跳过片库。手动开关是
+  `--soft-render`（或环境变量 `OMNIPLAY_SOFT_RENDER=1`）与 `--no-library`。
+- 采样区尺寸为 0 时不再挂高斯模糊：那是块非法渲染目标。
+
+
 ## 3. 排序一致性
 
 `Tests/OmniPlayCoreTests/HomeSortTests.swift` 里的拼音序断言在两个平台都必须绿。
