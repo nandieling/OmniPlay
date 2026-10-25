@@ -224,6 +224,37 @@ Fatal error. Internal CLR error. (0x80131506)
   就不再碰它（`OMNIPLAY_LIBRARY=1` 强行再试），宁可海报是空的。
 
 
+## 2g. 不闪退了，改成"关窗后挂住"（2026-10-25 第四轮）
+
+玻璃那处修好后 CI 冒烟不再秒死，但包还是被拦：进程 90 秒不退出。日志这回走完了全程：
+
+```
+片库：阶段 开库 … → 建表与建索引 → 查库统计 → 铺演示数据 → 读分组与排序
+片库：片库 12 部 · 文件 12 · 已看 3 · 可续播 5
+片库：读取完成 → 冒烟：界面活着 → 窗口已关闭，核心已释放      ← 然后没有然后
+```
+
+数据层、渲染、外来模块（零）全部清白，`wermgr` 也没在跑，所以不是「已停止工作」弹窗
+在吊着。断点在 `OnClosed` 之后、`OnExit` 之前——正是 WPF 渲染线程退出、AppDomain 卸载、
+Swift 运行时 DLL 的 `DllMain` 收尾那一段，而 §4 早就记过这组 DLL 的收尾顺序会 fastfail：
+以前靠"退出前没人调用 FreeLibrary， unload 根本没发生"绕开，这一轮给核心的 13 个运行时
+DLL 做了按全路径预装载，它们从"核心的依赖"变成"进程自己装载的模块"，卸载时真的会走
+`DLL_PROCESS_CLOSE`，收尾问题就摆到台面上了。三个动作：
+
+- 冒烟收尾改成关窗而不是 `Application.Shutdown()`：`Shutdown` 一定走到 AppDomain 卸载。
+- `OnClosed` 里武装一个 3 秒兜底线程：窗口一关，无论 WPF 收尾走到哪一步，3 秒后
+  `TerminateProcess`。库和日志此时都已落盘，等它没有意义（用户端等价于"点关闭后
+  进程还挂着"）。
+- `SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX)` + `WerAddExcludedApplication`：
+  出事时不再摆「已停止工作」对话框。那个框会把进程吊在那儿等点击——无人值守的机器上
+  就是干等，用户那边也是点了才没影。原因我们本来就已经写进启动日志。
+
+顺带一条与本次卡顿无关的降级：玻璃采样只在有显卡加速时做（`RenderCapability.Tier > 0`）。
+VisualBrush 要把被采样的子树重画一遍再高斯模糊，虚拟机、基础显示驱动、远程桌面这些
+纯软件渲染下这笔开销不划算，退回纯染色玻璃——构建机报的是显卡加速，所以本轮卡顿不是
+它造成的，别把两件事混成一个结论。
+
+
 ## 3. 排序一致性
 
 `Tests/OmniPlayCoreTests/HomeSortTests.swift` 里的拼音序断言在两个平台都必须绿。

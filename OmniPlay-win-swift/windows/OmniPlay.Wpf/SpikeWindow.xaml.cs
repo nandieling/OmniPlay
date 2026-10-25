@@ -548,6 +548,21 @@ public partial class SpikeWindow : Window
         catch (Exception error) { Log("停止播放失败：" + error.Message); }
         _core.Dispose();
         StartupLog.Write("窗口已关闭，核心已释放");
+        ArmExitBackstop();
+    }
+
+    /// 窗口关掉了就等于这趟结束了。后面那段收尾（WPF 渲染线程退出、AppDomain 卸载、
+    /// Swift 运行时各 DLL 的 DllMain）在构建机上实测能挂一分多钟——库和日志都已经
+    /// 落盘，没必要等它。3 秒还没走开就直接结束进程。
+    private static void ArmExitBackstop()
+    {
+        new Thread(() =>
+        {
+            Thread.Sleep(3000);
+            StartupLog.Write(App.Failed ? "退出（1）（关窗后 3 秒兜底）" : "退出（0）（关窗后 3 秒兜底）");
+            NativePreflight.HardExit(App.Failed ? 1 : 0);
+        })
+        { IsBackground = false }.Start();
     }
 
     private Color ContrastOn(Color background) => ThemeSpec.Luminance(background) > 150 ? Colors.Black : Colors.White;

@@ -129,7 +129,7 @@ if (-not $app.WaitForExit(90000)) {
     Write-Host ("  ! 超时时的 stderr：`n" + $errTask.Result)
     try {
         # 卡住的那一刻它到底在哪个调用里：把托管栈打出来，比猜快
-        $dotnetRoot = (Split-Path (Get-Command dotnet)).FullName
+        $dotnetRoot = Split-Path (Get-Command dotnet).Source
         $reporter = (Get-ChildItem (Join-Path $dotnetRoot 'sdk') -Recurse -Filter 'Stack.Core.dll' -ErrorAction SilentlyContinue |
                      Sort-Object FullName -Descending | Select-Object -First 1).FullName
         if ($reporter -and -not $env:DOTNET_DbgEnableMiniDump) {

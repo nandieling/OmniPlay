@@ -57,6 +57,7 @@ public partial class App : Application
             ? "渲染：显卡加速"
             : "渲染：软件渲染（无显卡加速）：玻璃退回纯染色，不做实时采样");
 
+        NativePreflight.SilenceErrorDialogs();
         NativePreflight.InstallCrashReporter();
         NativePreflight.PinSearchPaths();
         try
@@ -94,7 +95,10 @@ public partial class App : Application
             {
                 timer.Stop();
                 StartupLog.Write(Failed ? "冒烟：期间出过错" : "冒烟：界面活着");
-                Shutdown();
+                // 关窗而不是 Shutdown：Shutdown 要走到 AppDomain 卸载，那里得等 Swift
+                // 运行时各 DLL 的 DllMain 收尾，顺序一错就是 fastfail 或者干脆挂住。
+                // 关窗同样会触发 OnExit，那里写完收尾日志就直接结束进程。
+                foreach (var window in Windows.Cast<Window>().ToList()) window.Close();
             };
             timer.Start();
         }

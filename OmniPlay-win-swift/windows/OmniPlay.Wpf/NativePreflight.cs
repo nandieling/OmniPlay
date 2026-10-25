@@ -62,6 +62,29 @@ public static class NativePreflight
     [DllImport("kernel32.dll")]
     private static extern bool TerminateProcess(IntPtr process, uint exitCode);
 
+    [DllImport("kernel32.dll")]
+    private static extern uint SetErrorMode(uint mode);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint WerAddExcludedApplication(string appName, IntPtr reserved, bool doNotRestart);
+
+    /// 别再让系统在出事的正上方摆一个「已停止工作」对话框：它会把进程吊在那儿
+    /// 等用户点，冒烟因此「90 秒不退出」，用户那边则是点了才没影。原因我们自己
+    /// 已经写进日志了，弹窗与 WER 采集都关掉。
+    public static void SilenceErrorDialogs()
+    {
+        const uint semFailCriticalErrors = 0x0001;   // 插盘没纸这类错误别弹框
+        const uint semNoGpFaultErrorBox = 0x0002;    // 「已停止工作」对话框
+        SetErrorMode(semFailCriticalErrors | semNoGpFaultErrorBox);
+        try
+        {
+            var exe = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? "OmniPlaySpike");
+            // 再让 WER 整个跳过这个应用：它采集时会挂起进程，无人值守的机器上就是干等
+            WerAddExcludedApplication(exe, IntPtr.Zero, true);
+        }
+        catch (Exception) { /* 这层只是让失败好看点，可有可无 */ }
+    }
+
     /// 装载失败或依赖有缺口时抛这个，界面能直接把原因显示出来。
     public sealed class StartupFailureException : Exception
     {
