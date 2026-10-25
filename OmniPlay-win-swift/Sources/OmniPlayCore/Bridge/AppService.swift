@@ -58,9 +58,33 @@ public final class OmniPlayService {
 
     private func library() throws -> LibraryStore {
         if let store { return store }
-        let opened = try LibraryStore(database: SQLiteDatabase(fileURL: libraryFileURL))
-        store = opened
-        return opened
+        var failures: [String] = []
+        for candidate in libraryCandidates {
+            do {
+                let database = try SQLiteDatabase(fileURL: candidate)
+                let opened = try LibraryStore(database: database)
+                store = opened
+                if !failures.isEmpty || !database.openNotes.isEmpty {
+                    var notes = failures.map { "打不开 \($0)" }
+                    notes += database.openNotes
+                    push(topic: "library.location", payload: .object([
+                        "file": .string(candidate.path),
+                        "notes": .array(notes.map { JSONValue.string($0) }),
+                    ]))
+                }
+                return opened
+            } catch {
+                failures.append("\(candidate.path)：\(error)")
+            }
+        }
+        throw SQLiteDatabase.Failure.open(reason: failures.joined(separator: "\n"))
+    }
+
+    /// 首选数据目录；那个位置打不开（同步盘接管、目录只读、漫游配置没落地）就退回
+    /// 临时目录。界面至少有东西可画，原因作为事件推给宿主显示。
+    private var libraryCandidates: [URL] {
+        [libraryFileURL,
+         URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("OmniPlay/library.db")]
     }
 
     /// library.* 的统一出口：开库、空库铺演示数据、异常翻成给人看的一句话。

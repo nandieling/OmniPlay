@@ -72,6 +72,10 @@ public final class SQLiteDatabase {
     }
 
     public let fileURL: URL
+
+    /// 开库时咽下去的小岔子（比如 WAL 开不起来）。开库不算失败，但宿主该能看见。
+    public private(set) var openNotes: [String] = []
+
     private var handle: OpaquePointer?
     private let lock = NSLock()
 
@@ -88,10 +92,17 @@ public final class SQLiteDatabase {
             throw Failure.open(reason: reason)
         }
         handle = db
-        // WAL：界面读的时候不等着写入方撒手；外键：删片时 videoFile 跟着走
-        for pragma in ["PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", "PRAGMA synchronous=NORMAL"] {
-            try exec(pragma)
+        // WAL：界面读的时候不等着写入方撒手。AppData 被同步盘接管、或者目录不支持
+        // 共享映射的机器上 WAL 会开不起来，那就退回默认日志模式——功能一样，并发差一点。
+        do {
+            try exec("PRAGMA journal_mode=WAL")
+        } catch {
+            openNotes.append("WAL 开不起来（\(error)），已退回默认日志模式")
+            try? exec("PRAGMA journal_mode=DELETE")
         }
+        // 外键：删片时 videoFile 跟着走；这两条Pragma 不会失败，真失败了说明库已经不正常
+        try exec("PRAGMA foreign_keys=ON")
+        try exec("PRAGMA synchronous=NORMAL")
     }
 
     deinit { close() }

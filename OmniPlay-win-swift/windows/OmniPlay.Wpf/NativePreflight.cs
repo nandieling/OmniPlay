@@ -36,6 +36,78 @@ public static class NativePreflight
         public StartupFailureException(string message) : base(message) { }
     }
 
+    // MARK: - 本机崩溃兜底
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryBasicInformation
+    {
+        public IntPtr BaseAddress;
+        public IntPtr AllocationBase;
+        public uint AllocationProtect;
+        public nuint RegionSize;
+        public uint State;
+        public uint Protect;
+        public uint Type;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ExceptionPointers
+    {
+        public IntPtr ExceptionRecord;
+        public IntPtr ContextRecord;
+    }
+
+    private delegate int ExceptionFilter(ref ExceptionPointers pointers);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr SetUnhandledExceptionFilter(ExceptionFilter filter);
+
+    [DllImport("kernel32.dll")]
+    private static extern nuint VirtualQuery(IntPtr address, out MemoryBasicInformation info, nuint length);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetModuleFileNameW(IntPtr module, System.Text.StringBuilder buffer, uint size);
+
+    // 委托必须被静态字段持有，否则 GC 一走，回调指针就成了野指针
+    private static readonly ExceptionFilter CrashFilter = OnNativeCrash;
+    private const int ContinueSearch = -1;
+
+    /// 原生崩溃（访问违例、栈溢出这类）不会走 .NET 的异常管道，进程直接没了，
+    /// 用户看到的就是「点开就闪退」。这里挂一个过滤器：把异常码、出错地址和
+    /// 那个地址属于哪个 DLL 写进启动日志，至少下次能少猜一轮。
+    public static void InstallCrashReporter()
+    {
+        try { SetUnhandledExceptionFilter(CrashFilter); }
+        catch (Exception error) { StartupLog.Write("崩溃兜底没挂上：" + error.Message); }
+    }
+
+    private static int OnNativeCrash(ref ExceptionPointers pointers)
+    {
+        try
+        {
+            var record = pointers.ExceptionRecord;
+            var code = Marshal.ReadInt32(record);
+            var address = Marshal.ReadIntPtr(record, IntPtr.Size == 8 ? 16 : 12);
+            StartupLog.Write($"原生崩溃：异常码 0x{code:X8}，地址 0x{address:X}，模块 {ModuleOf(address)}");
+        }
+        catch (Exception)
+        {
+            // 崩在这里也没关系，至少前面的阶段标记还在
+        }
+        return ContinueSearch;
+    }
+
+    private static string ModuleOf(IntPtr address)
+    {
+        if (address == IntPtr.Zero ||
+            VirtualQuery(address, out var info, (nuint)Marshal.SizeOf<MemoryBasicInformation>()) == nuint.Zero)
+            return "读不出来";
+        var buffer = new System.Text.StringBuilder(1024);
+        return GetModuleFileNameW(info.AllocationBase, buffer, (uint)buffer.Capacity) == 0
+            ? "未知模块"
+            : Path.GetFileName(buffer.ToString());
+    }
+
     /// 把包内 redist\ 加进 DLL 搜索路径，并让后续所有装载都只看
     /// 「应用目录 -> redist -> 系统目录」，不再蹭构建机留下的 PATH。
     public static void PinSearchPaths()

@@ -97,8 +97,10 @@ foreach ($gap in ($gaps | Where-Object { $soft -contains $_.Dll })) {
 # 控制台探针看不见的那两件事——WPF 能不能起、Swift 运行时在干净 PATH 下能不能拉起来——
 # 在这里才看得见。开不了窗口的构建机只警告，依赖缺口才拦。
 Write-Host '==> 界面冒烟（干净 PATH）' -ForegroundColor Cyan
+# 界面会同时往 AppData 与 TEMP 写日志，读的时候两处都认
 $appLog = Join-Path $env:LOCALAPPDATA 'OmniPlay\startup.log'
-Remove-Item $appLog -Force -ErrorAction SilentlyContinue
+$appLogFallback = Join-Path $env:TEMP 'OmniPlay-startup.log'
+Remove-Item $appLog, $appLogFallback -Force -ErrorAction SilentlyContinue
 $psi = New-Object System.Diagnostics.ProcessStartInfo((Join-Path $publish 'OmniPlaySpike.exe'), '--smoke')
 $psi.UseShellExecute = $false
 $psi.WorkingDirectory = $publish
@@ -106,9 +108,10 @@ $psi.EnvironmentVariables['PATH'] = "$env:SystemRoot\System32;$env:SystemRoot"
 $app = [System.Diagnostics.Process]::Start($psi)
 if (-not $app.WaitForExit(90000)) { $app.Kill(); throw '界面冒烟 90 秒没退出' }
 $smokeCode = $app.ExitCode
-if (Test-Path $appLog) {
-    Get-Content $appLog | ForEach-Object { Write-Host "  | $_" }
-    if ((Get-Content -Raw $appLog) -match '核心装载失败|界面搭建失败|本机自检有缺口') {
+$logHit = @($appLog, $appLogFallback) | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($logHit) {
+    Get-Content $logHit | ForEach-Object { Write-Host "  | $_" }
+    if ((Get-Content -Raw $logHit) -match '核心装载失败|界面搭建失败|本机自检有缺口|片库读取失败|原生崩溃') {
         throw '界面冒烟抓到装载问题，见上面的日志'
     }
 } else {

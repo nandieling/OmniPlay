@@ -72,15 +72,21 @@ public partial class SpikeWindow : Window
         {
             var version = _core.Invoke("version");
             Log($"核心 {_core.Version}，平台 {version["platform"]?.GetValue<string>()}");
+            // 核心会往宿主注册的回调上推消息，库落到哪儿了这类事就靠它带话
+            _core.EventReceived += json => Dispatcher.BeginInvoke(new Action(() => LogEvent(json)));
 
             BuildTopContent();
+            StartupLog.Write("界面：顶栏完成");
             BuildHome();
+            StartupLog.Write("界面：海报墙与导航完成");
             BuildCenterContent();
             BuildLogContent();
             VideoArea.Children.Add(_video);
             ApplyTheme();
             _poll.Start();
             StartupLog.Write("界面搭建完成");
+            // 壳先站稳，再去读库：库在哪儿、开不开得动，都不该把窗口一起带走
+            Dispatcher.BeginInvoke(new Action(LoadLibraryData), DispatcherPriority.Background);
         }
         catch (Exception error)
         {
@@ -129,14 +135,17 @@ public partial class SpikeWindow : Window
     private void BuildHome()
     {
         _home = new HomeBoard(_core) { Margin = new Thickness(180, 0, 0, 0) };
-        _home.StatusChanged += Log;
+        _home.StatusChanged += line =>
+        {
+            Log(line);
+            StartupLog.Write("片库：" + line);   // 日志里有这行，说明库真的读到数了
+        };
         _home.SelectionChanged += card =>
         {
             _detail.Show(card);
             if (_selectionText is not null)
                 _selectionText.Text = card is null ? "没选片子" : $"选中：{card.Title}";
         };
-        _home.Refresh();
         VideoArea.Children.Add(_home);
 
         _detail = new DetailView((Style)Resources["Pill"]) { Margin = new Thickness(0, 10, 12, 10) };
@@ -157,9 +166,56 @@ public partial class SpikeWindow : Window
             Log("先点一张海报再标记");
             return;
         }
-        _core.Invoke("library.mark", new JsonObject { ["fileId"] = card.FileId, ["watched"] = watched });
-        Log($"library.mark → 文件 {card.FileId} {(watched ? "已看" : "未看")}");
-        _home.Refresh();
+        try
+        {
+            _core.Invoke("library.mark", new JsonObject { ["fileId"] = card.FileId, ["watched"] = watched });
+            Log($"library.mark → 文件 {card.FileId} {(watched ? "已看" : "未看")}");
+            LoadLibraryData();
+        }
+        catch (Exception error)
+        {
+            Log("标记没写进去：" + error.Message);
+        }
+    }
+
+    /// 读库。失败只记一笔并把话写在日志区，界面上已经画出来的那部分照常能用。
+    private void LoadLibraryData()
+    {
+        if (App.NoLibrary)
+        {
+            StartupLog.Write("片库：按 --no-library 跳过");
+            Log("按 --no-library 启动：没读片库");
+            return;
+        }
+        try
+        {
+            _home.Refresh();
+        }
+        catch (Exception error)
+        {
+            App.NoteFailure("片库读取", error);
+            Log("片库读不出来：" + error.Message);
+        }
+        RefreshGlassSamples();
+    }
+
+    /// 海报内容换了，采样的玻璃得跟着重算一次
+    private void RefreshGlassSamples() => _centerPlate?.RefreshSample();
+
+    /// 核心推来的消息。只挑需要给人看的几条说，别把日志区刷成瀑布。
+    private void LogEvent(string json)
+    {
+        try
+        {
+            var node = JsonNode.Parse(json);
+            if (node?["topic"]?.GetValue<string>() != "library.location") return;
+            var file = node?["payload"]?["file"]?.GetValue<string>() ?? "?";
+            var notes = new List<string>();
+            foreach (var item in node?["payload"]?["notes"]?.AsArray() ?? new JsonArray())
+                notes.Add(item?.GetValue<string>() ?? "?");
+            Log(notes.Count == 0 ? $"片库：{file}" : $"片库换到 {file} 去了：" + string.Join("；", notes));
+        }
+        catch (Exception) { /* 看不懂的消息直接丢 */ }
     }
 
     private void BuildCenterContent()
@@ -373,7 +429,7 @@ public partial class SpikeWindow : Window
         _home.Visibility = Visibility.Visible;
         if (_centerPlate is not null) _centerPlate.Visibility = Visibility.Visible;
         if (ControlPopup.Child is not null) ControlPopup.IsOpen = false;
-        _home.Refresh();
+        LoadLibraryData();
         Log("已停机，进度已回写");
     }
 

@@ -7,6 +7,10 @@ public partial class App : Application
 {
     private static bool _smoke;
 
+    /// --no-library：不碰片库，只把壳立起来。装到别人机器上出岔子时用它二分：
+    /// 这个开关能开 → 问题在库与数据；连这个都开不了 → 问题在装载或建版。
+    public static bool NoLibrary { get; private set; }
+
     /// 出过岔子。CI 冒烟靠退出码判断结果，弹窗那种形式在无人值守的机器上没有意义。
     public static bool Failed { get; private set; }
 
@@ -14,6 +18,7 @@ public partial class App : Application
     {
         StartupLog.Reset();
         _smoke = e.Args.Contains("--smoke");
+        NoLibrary = e.Args.Contains("--no-library");
         StartupLog.Write($"启动：.NET {Environment.Version}，参数「{string.Join(" ", e.Args)}」");
 
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
@@ -23,6 +28,7 @@ public partial class App : Application
         DispatcherUnhandledException += (_, args) =>
         { ReportFailure("界面线程未捕获异常", args.Exception); args.Handled = true; };
 
+        NativePreflight.InstallCrashReporter();
         NativePreflight.PinSearchPaths();
         try
         {
@@ -76,10 +82,17 @@ public partial class App : Application
     /// 把原因写进日志，再（非冒烟时）弹窗告诉用户日志在哪。
     public static void ReportFailure(string stage, Exception? error)
     {
+        NoteFailure(stage, error);
+        if (_smoke) return;
+        MessageBox.Show($"{stage}失败：\n{error?.GetType().Name}：{error?.Message}\n\n详情见\n{StartupLog.WhereToLook}",
+                        "觅影 Windows 演示", MessageBoxButton.OK, MessageBoxImage.Error);
+    }
+
+    /// 记一笔但不弹窗：界面还能用的小岔子（比如片库读不出来）走这条，
+    /// 冒烟照样按失败处理，不让它在 CI 里蒙混过去。
+    public static void NoteFailure(string stage, Exception? error)
+    {
         Failed = true;
         StartupLog.Fail(stage, error);
-        if (_smoke) return;
-        MessageBox.Show($"{stage}失败：\n{error?.GetType().Name}：{error?.Message}\n\n详情见\n{StartupLog.FilePath}",
-                        "觅影 Windows 演示", MessageBoxButton.OK, MessageBoxImage.Error);
     }
 }
