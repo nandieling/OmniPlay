@@ -35,6 +35,8 @@ public partial class SpikeWindow : Window
     // 正在放的片子与上次回写进度的时刻。进度每 5 秒回写一次，关窗前必须再写一次
     private HomeBoard.Card? _playing;
     private DateTime _lastProgressWrite = DateTime.MinValue;
+    // 起播那一刻文件往往还没装载完，直接 seek 会被 mpv 吞掉，等读到时长再跳
+    private double _pendingResume;
     private TextBlock? _titleBlock;
     private TextBlock? _progressText;
     private TextBlock? _statusText;
@@ -310,7 +312,11 @@ public partial class SpikeWindow : Window
 
     // MARK: - 播放
 
-    private void OnPlaySample(object sender, RoutedEventArgs e) => StartPlayback(SampleFile(), null);
+    private void OnPlaySample(object sender, RoutedEventArgs e)
+    {
+        _pendingResume = 0;
+        StartPlayback(SampleFile(), null);
+    }
 
     /// 详情页里点播放。演示片库的路径是假的，拿随包示例片顶一下，
     /// 至少「点海报 → 起播 → 回写进度 → 进继续播放」这条链是真的。
@@ -322,12 +328,8 @@ public partial class SpikeWindow : Window
             Log("这部片没有可播的路径");
             return;
         }
+        _pendingResume = card.Position > 1 ? card.Position : 0;
         StartPlayback(path, card);
-        if (card.Position > 1)
-        {
-            _core.Invoke("player.seek", new JsonObject { ["seconds"] = card.Position });
-            Log($"续播：跳到 {card.Position:F0}s");
-        }
     }
 
     private static string SampleFile() => Path.Combine(AppContext.BaseDirectory, "testdata", "sample.mp4");
@@ -353,6 +355,8 @@ public partial class SpikeWindow : Window
         // 控制条改由 Popup 承担：这正是这个演示要验的东西。
         _playing = card;
         _lastProgressWrite = DateTime.Now;
+        if (_pendingResume > 0)
+            Log($"续播：等装载完跳到 {_pendingResume:F0}s");
         _home.Visibility = Visibility.Collapsed;
         if (_centerPlate is not null) _centerPlate.Visibility = Visibility.Collapsed;
         BuildPopupBar();
@@ -365,6 +369,7 @@ public partial class SpikeWindow : Window
         WriteProgress(force: true);
         _core.Invoke("player.stop");
         _playing = null;
+        _pendingResume = 0;
         _home.Visibility = Visibility.Visible;
         if (_centerPlate is not null) _centerPlate.Visibility = Visibility.Visible;
         if (ControlPopup.Child is not null) ControlPopup.IsOpen = false;
@@ -443,6 +448,13 @@ public partial class SpikeWindow : Window
         if (_statusText is not null)
             _statusText.Text = $"player：{position:F1}s / {duration:F1}s  {(paused ? "已暂停" : "播放中")}";
         if (_progressText is not null) _progressText.Text = $"{position:F1}s / {duration:F1}s";
+        if (_pendingResume > 0 && duration > 0)
+        {
+            var at = _pendingResume;
+            _pendingResume = 0;
+            _core.Invoke("player.seek", new JsonObject { ["seconds"] = at });
+            Log($"续播：已跳到 {at:F0}s");
+        }
         WriteProgress();
     }
 
