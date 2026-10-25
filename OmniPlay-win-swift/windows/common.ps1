@@ -184,10 +184,9 @@ function Copy-SwiftRuntime {
             Copy-Item -LiteralPath $source -Destination $dest -Force
             $all.Add($name)
             $bytes += $item.Length
-            if ($isRuntime) {
-                $runtime.Add($name)
-                foreach ($next in (Get-PeImageImports -Path $source)) { $queue.Enqueue($next) }
-            }
+            if ($isRuntime) { $runtime.Add($name) }
+            # CRT 也要往下走一层：MSVCP140 还要吃 VCRUNTIME140_1，少一个就是白折腾
+            foreach ($next in (Get-PeImageImports -Path $source)) { $queue.Enqueue($next) }
         } catch {
             Write-Warning "拷 $name 时出岔子：$($_.Exception.Message)"
         }
