@@ -143,6 +143,15 @@ public static class StartupLog
                 Thread.Sleep(TimeSpan.FromSeconds(wait));
                 if (_rendered) return;
                 Write($"界面：{at} 秒没画出一帧——进程还活着，停在「{Phase}」");
+                if (at >= 40)
+                {
+                    // 日志读得懂、下一步写得清楚：卡住的那台机器上不用问人该跑什么
+                    Write("排查：命令行跑 " + Path.GetFileNameWithoutExtension(
+                        Environment.ProcessPath ?? "OmniPlaySpike") +
+                        ".exe --win32-probe 与 --min-wpf 各一次，把本日志发回来");
+                    Write("排查：这两个探针一个完全不碰 WPF、一个是裸窗口，" +
+                          "停在哪儿就能把「系统不让建窗」「WPF 起不来」「我们的内容有问题」切开");
+                }
                 if (!_dumped)
                 {
                     _dumped = true;
