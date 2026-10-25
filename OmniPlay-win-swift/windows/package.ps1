@@ -87,10 +87,10 @@ Write-Host '==> 随包依赖自检' -ForegroundColor Cyan
 $gaps = @(Test-ShippedImports -PublishDir $publish)
 $soft = @('libmpv-2.dll')
 $serious = @($gaps | Where-Object { $soft -notcontains $_.Dll })
-foreach ($gap in $serious) { Write-Host ("  {0} 缺：{1}" -f $_.Dll, ($_.Missing -join '、')) -ForegroundColor Red }
+foreach ($gap in $serious) { Write-Host ("  {0} 缺：{1}" -f $gap.Dll, ($gap.Missing -join '、')) -ForegroundColor Red }
 if ($serious) { throw '有原生 DLL 的依赖没进包：装到干净机器上会起不来' }
 foreach ($gap in ($gaps | Where-Object { $soft -contains $_.Dll })) {
-    Write-Warning ("{0} 的可选依赖这台机器上没有：{1}" -f $_.Dll, ($_.Missing -join '、'))
+    Write-Warning ("{0} 的可选依赖这台机器上没有：{1}" -f $gap.Dll, ($gap.Missing -join '、'))
 }
 
 # 界面冒烟：把 PATH 缩到只剩系统目录再起一次，模拟「装了包但没有工具链」的机器。

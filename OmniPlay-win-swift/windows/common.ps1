@@ -164,14 +164,15 @@ function Copy-SwiftRuntime {
     while ($queue.Count -gt 0) {
         $name = $queue.Dequeue()
         if (($all -contains $name) -or ($runtime -contains $name)) { continue }
+        # MSVC CRT：用户机器上多半已有一份，工具链里那份未必更新，所以只进 redist\ 备着
+        $isCrt = $name -match '^(vcruntime|msvcp|concrt)'
         $source = Join-Path $bin $name                       # Swift 运行时：工具链里那份
-        $isRuntime = Test-Path -LiteralPath $source
-        if (-not $isRuntime) {
-            # MSVC CRT：构建机上装过 redist，用户机器不一定有，备一份在 redist\ 里
-            if ($name -notmatch '^(vcruntime|msvcp|concrt)') { continue }
+        if (-not (Test-Path -LiteralPath $source)) {
+            if (-not $isCrt) { continue }
             $source = Join-Path (Join-Path $env:SystemRoot 'System32') $name
             if (-not (Test-Path -LiteralPath $source)) { continue }
         }
+        $isRuntime = -not $isCrt
         if ($isRuntime) {
             $dest = Join-Path $TargetDir $name
         } else {

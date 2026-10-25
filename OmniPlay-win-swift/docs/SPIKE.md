@@ -105,23 +105,34 @@ error: could not build C module 'SwiftOverlayShims'   (LibcOverlayShims.h -> err
 
 ## 2d. 1.9 装到用户机器上直接闪退
 
-第一版包只在构建机上验过（`abi-probe` 是控制台程序），WPF 从没在干净机器上起过，
-所以「双击就没了」没有现成的原因可查。这一轮做了三件事，让下一次要么直接好，要么留下字。
+第一版包只在构建机上验过，而 `abi-probe` 是控制台程序——WPF 从没真起过，所以「双击就没了」
+没有现成的原因可查。补上 `--smoke` 界面冒烟后一次就抓到了：
 
-- 宿主开机先自检：`NativePreflight` 按全路径装载一次 `omniplay-core.dll`，失败就把
-  Win32 错误码翻译成人话，并顺着导入表指出缺哪个 DLL；整个过程写进
-  `%LOCALAPPDATA%\OmniPlay\startup.log`，界面任何一处炸掉都会弹窗并给出这个路径。
-- MSVC 运行库（`vcruntime`/`msvcp`/`concrt`）从应用目录挪进 `redist\`。摆在应用目录
-  会盖住本机已装的那份——WPF 的原生组件同样吃这套，版本对不上就是开局就炸。
-  现在只有核心第一次装载失败（126）时，才把 `redist\` 补进搜索路径重试一次。
-- 打包多了两道闸：`Test-ShippedImports` 把包里每个原生 DLL 的导入过一遍，包内和
-  System32 都没有就别想出货；`OmniPlaySpike.exe --smoke` 在 PATH 只剩系统目录的情况
-  下真起一次界面（20 秒看门狗），只把装载类问题当失败，构建机开不了窗只警告。
+```
+界面搭建失败：InvalidOperationException：创建播放子窗口失败：1407
+   at OmniPlay.WpfSpike.VideoHost.BuildWindowCore(HandleRef hwndParent)
+```
 
-包内依赖闭包已用 PE 导入表核对过：核心的导入只有 `swiftCore`/`swiftWinSDK`/
-`swiftCRT`/`Foundation`/`FoundationEssentials` + VC 运行库，这些都在包里；
-`libmpv-2.dll` 额外要 `vulkan-1.dll`（随显卡驱动来），Server 镜像上没有，
-这也是探针里 126 的来源——装载失败会显示在界面上，不影响启动。
+1407 是「找不到窗口类」。`VideoHost` 用 `private static readonly ushort ClassAtom = Register();`
+注册窗口类，但类里没有静态构造，类型就是 `beforefieldinit`：CLR 只保证「第一次读静态字段之前」
+完成初始化，而这段代码从头到尾没人读 `ClassAtom`，于是 `Register()` 根本没跑过，
+`CreateWindowExW` 拿着一个没注册过的类名失败。改成显式 `static VideoHost()` 后好了。
+依赖不是原因——冒烟日志里 `核心 omniplay-core.dll 装载成功`、`本机自检：Swift 运行时
+13 个 DLL 依赖齐` 都在。
+
+顺带留下的东西：
+
+- 宿主开机先自检：按全路径装载一次 `omniplay-core.dll`，失败就把 Win32 错误码翻译成人话，
+  并顺着导入表指出缺哪个 DLL；全程写进 `%LOCALAPPDATA%\OmniPlay\startup.log`，
+  界面任何一处炸掉都会弹窗并给出这个路径，不再无声退出。
+- MSVC 运行库（`vcruntime`/`msvcp`/`concrt`）从应用目录挪进 `redist\`。摆在应用目录会盖住
+  本机已装的那份，而 WPF 的原生组件同样吃这套；现在只有核心第一次装载报 126 时，
+  才把 `redist\` 补进搜索路径重试一次。
+- 打包多了两道闸：`Test-ShippedImports` 把包里每个原生 DLL 的导入过一遍，包内和 System32
+  都没有就别想出货（`libmpv-2.dll` 的可选图形依赖只警告）；`OmniPlaySpike.exe --smoke` 在
+  PATH 只剩系统目录的情况下真起一次界面，带 20 秒看门狗，装载类问题直接拦下出包。
+- `libmpv-2.dll` 额外要 `vulkan-1.dll`（随显卡驱动来），Server 镜像上没有，这也是探针里
+  126 的来源——装载失败会显示在界面上，不影响启动。
 
 ## 3. 排序一致性
 

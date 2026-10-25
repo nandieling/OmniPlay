@@ -53,7 +53,12 @@ public sealed class VideoHost : HwndHost
 
     // 类只需注册一次；委托放静态字段里防止被回收。
     private static readonly WindowProc ProcStub = OnMessage;
-    private static readonly ushort ClassAtom = Register();
+    private static readonly ushort ClassAtom;
+
+    /// 显式写静态构造。少这一行，这个类就是 beforefieldinit，CLR 允许把静态字段
+    /// 初始化拖到第一次「读静态字段」为止，而这里没人读 ClassAtom——于是窗口类从没
+    /// 注册过，CreateWindowExW 直接报 1407「找不到窗口类」，界面起手就没了。
+    static VideoHost() => ClassAtom = Register();
 
     private static ushort Register()
     {
@@ -84,6 +89,7 @@ public sealed class VideoHost : HwndHost
 
     protected override HandleRef BuildWindowCore(HandleRef hwndParent)
     {
+        _ = ClassAtom;        // 类没注册成功的话这里就该抛，不该把 1407 留给 CreateWindowExW
         var width = (int)Math.Max(1d, Math.Floor(ActualWidth));
         var height = (int)Math.Max(1d, Math.Floor(ActualHeight));
         RenderHandle = CreateWindowExW(0, ClassName, string.Empty, WsChild | WsVisible,
