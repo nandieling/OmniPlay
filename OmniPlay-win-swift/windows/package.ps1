@@ -78,7 +78,7 @@ if (-not (Select-String -Path $probeLog -Pattern 'abi-probe: OK' -Quiet)) {
     throw "abi-probe 没通过（退出码 $probeCode），不出包"
 }
 if ($probeCode -ne 0) {
-    Write-Warning ("探针全绿但进程退出码 0x{0:X8}：Windows 收尾问题，见 docs/SPIKE.md §4" -f [uint32]$probeCode)
+    Write-Warning ("探针全绿但进程退出码 0x{0:X8}：Windows 收尾问题，见 docs/SPIKE.md §4" -f ($probeCode -band 0xFFFFFFFF))
 }
 
 $name = "OmniPlay-win-swift-$Version-x64"

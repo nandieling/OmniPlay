@@ -34,14 +34,21 @@ public final class MpvLibrary {
         "libmpv-2.dll", "mpv-2.dll", "libmpv.2.dylib", "libmpv.so.2", "libmpv.so.1",
     ]
 
-    /// 最近一次装载失败的具体原因（Windows 带 Win32 错误码）。
-    /// 「文件不在」和「在但装不起来」要分开说，后者通常是缺依赖 DLL。
-    nonisolated(unsafe) public private(set) static var lastLoadFailure: String?
+    /// 每个候选名的失败原因，按尝试顺序（Windows 带 Win32 错误码）。
+    /// 「文件不在」和「在但装不起来」要分开说，后者通常是缺依赖 DLL；
+    /// 只留最后一条会把真正那个 DLL 的错冲掉，所以整串都记下来。
+    nonisolated(unsafe) public private(set) static var lastLoadFailures: [String] = []
+
+    /// dlerror 在 mac 上会把每个搜索路径都念一遍，界面装不下，只留首行并截断
+    private static func brief(_ text: String) -> String {
+        let line = text.split(separator: "\n").first.map(String.init) ?? text
+        return line.count > 160 ? String(line.prefix(157)) + "..." : line
+    }
 
     private let handle: UnsafeMutableRawPointer
 
     public static func load(name: String? = nil) -> MpvLibrary? {
-        lastLoadFailure = nil
+        lastLoadFailures = []
         for candidate in [name].compactMap({ $0 }) + candidateNames {
             if let library = open(candidate) { return library }
         }
@@ -55,14 +62,14 @@ public final class MpvLibrary {
         utf16.append(0)
         let raw = utf16.withUnsafeBufferPointer { LoadLibraryW($0.baseAddress) }
         guard let raw else {
-            MpvLibrary.lastLoadFailure = "\(name)：LoadLibraryW 失败，Win32 错误 \(GetLastError())"
+            MpvLibrary.lastLoadFailures.append(MpvLibrary.brief("\(name)：LoadLibraryW 失败，Win32 错误 \(GetLastError())"))
             return nil
         }
         let handle = UnsafeMutableRawPointer(raw)
         #elseif canImport(Darwin) || canImport(Glibc)
         let raw = dlopen(name, RTLD_NOW | RTLD_LOCAL)
         guard let raw else {
-            if let error = dlerror() { MpvLibrary.lastLoadFailure = "\(name)：\(String(cString: error))" }
+            if let error = dlerror() { MpvLibrary.lastLoadFailures.append(MpvLibrary.brief("\(name)：\(String(cString: error))")) }
             return nil
         }
         let handle = UnsafeMutableRawPointer(raw)
@@ -72,12 +79,12 @@ public final class MpvLibrary {
         func symbol<T>(_ fn: String, _ type: T.Type) -> T? {
             #if os(Windows)
             guard let address = GetProcAddress(raw, fn) else {
-                MpvLibrary.lastLoadFailure = "\(name)：缺符号 \(fn)"
+                MpvLibrary.lastLoadFailures.append(MpvLibrary.brief("\(name)：缺符号 \(fn)"))
                 return nil
             }
             #else
             guard let address = dlsym(raw, fn) else {
-                MpvLibrary.lastLoadFailure = "\(name)：缺符号 \(fn)"
+                MpvLibrary.lastLoadFailures.append(MpvLibrary.brief("\(name)：缺符号 \(fn)"))
                 return nil
             }
             #endif
@@ -137,10 +144,12 @@ public final class PlayerCore {
         self.library = library
         if library == nil {
             let tried = MpvLibrary.candidateNames.joined(separator: ", ")
-            if let detail = MpvLibrary.lastLoadFailure {
-                self.unavailableReason = "libmpv 装载失败：\(detail)（试过：\(tried)）"
-            } else {
+            if MpvLibrary.lastLoadFailures.isEmpty {
                 self.unavailableReason = "没找到 libmpv（试过：\(tried)）"
+            } else {
+                self.unavailableReason = "libmpv 装载失败："
+                    + MpvLibrary.lastLoadFailures.joined(separator: "；")
+                    + "（试过：\(tried)）"
             }
         } else {
             self.unavailableReason = nil
