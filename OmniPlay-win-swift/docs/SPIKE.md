@@ -134,6 +134,24 @@ error: could not build C module 'SwiftOverlayShims'   (LibcOverlayShims.h -> err
 - `libmpv-2.dll` 额外要 `vulkan-1.dll`（随显卡驱动来），Server 镜像上没有，这也是探针里
   126 的来源——装载失败会显示在界面上，不影响启动。
 
+## 2e. 接上片库后又闪退（2026-10-25 第二轮）
+
+现象：装机后点开没影。构建机的冒烟是绿的，差异只能在用户机器上——所以先把「崩了也
+得留下字」做实，再谈原因：
+
+- 原生崩溃不走 .NET 异常管道（访问违例、栈溢出这类），进程直接没了。现在挂了
+  `SetUnhandledExceptionFilter`，把异常码、出错地址、那块地址属于哪个 DLL 写进启动日志。
+- 启动日志同时写 `%LOCALAPPDATA%\OmniPlay\startup.log` 与 `%TEMP%\OmniPlay-startup.log`。
+  AppData 被同步盘接管、目录只读、杀软拦写入这类机器上，只剩 TEMP 那份能读。
+- 建版分阶段留标记：`顶栏完成` / `海报墙与导航完成` / `界面搭建完成` / `片库：…`。
+  日志停在哪一行，问题就在下一步。
+- 库这一层不再能拖垮窗口：先搭壳，`Background` 优先级再读库，失败只记一笔。
+  WAL 在接管盘上开不起来就退回默认日志模式；AppData 打不开就在临时目录另建一份，
+  原因作为 `library.location` 事件推给界面念出来。
+- `--no-library` 只起壳不碰库，用来二分：能开 = 问题在数据层，连这个都开不了 = 装载或建版。
+- CI 冒烟两处日志都认，并把「片库读取失败」「原生崩溃」当失败——绿包不再等于蒙过去。
+
+
 ## 3. 排序一致性
 
 `Tests/OmniPlayCoreTests/HomeSortTests.swift` 里的拼音序断言在两个平台都必须绿。
