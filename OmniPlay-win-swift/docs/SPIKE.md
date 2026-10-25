@@ -103,6 +103,26 @@ error: could not build C module 'SwiftOverlayShims'   (LibcOverlayShims.h -> err
 升级到 6.1+ 同样绕开——6.1 起 SDK 用 `SwiftUCRT.h` 把这两块解耦。现在两道保险都上：
 先试 6.2.1，环没断就换 modulemap 再来。
 
+## 2d. 1.9 装到用户机器上直接闪退
+
+第一版包只在构建机上验过（`abi-probe` 是控制台程序），WPF 从没在干净机器上起过，
+所以「双击就没了」没有现成的原因可查。这一轮做了三件事，让下一次要么直接好，要么留下字。
+
+- 宿主开机先自检：`NativePreflight` 按全路径装载一次 `omniplay-core.dll`，失败就把
+  Win32 错误码翻译成人话，并顺着导入表指出缺哪个 DLL；整个过程写进
+  `%LOCALAPPDATA%\OmniPlay\startup.log`，界面任何一处炸掉都会弹窗并给出这个路径。
+- MSVC 运行库（`vcruntime`/`msvcp`/`concrt`）从应用目录挪进 `redist\`。摆在应用目录
+  会盖住本机已装的那份——WPF 的原生组件同样吃这套，版本对不上就是开局就炸。
+  现在只有核心第一次装载失败（126）时，才把 `redist\` 补进搜索路径重试一次。
+- 打包多了两道闸：`Test-ShippedImports` 把包里每个原生 DLL 的导入过一遍，包内和
+  System32 都没有就别想出货；`OmniPlaySpike.exe --smoke` 在 PATH 只剩系统目录的情况
+  下真起一次界面（20 秒看门狗），只把装载类问题当失败，构建机开不了窗只警告。
+
+包内依赖闭包已用 PE 导入表核对过：核心的导入只有 `swiftCore`/`swiftWinSDK`/
+`swiftCRT`/`Foundation`/`FoundationEssentials` + VC 运行库，这些都在包里；
+`libmpv-2.dll` 额外要 `vulkan-1.dll`（随显卡驱动来），Server 镜像上没有，
+这也是探针里 126 的来源——装载失败会显示在界面上，不影响启动。
+
 ## 3. 排序一致性
 
 `Tests/OmniPlayCoreTests/HomeSortTests.swift` 里的拼音序断言在两个平台都必须绿。
@@ -125,9 +145,10 @@ Windows 上若只有这条红，说明 ICU 排序与 mac 的 `localizedStandardC
   Wishlist 分支。应用本体是中文的，这里先不折腾。
 
 - `abi-probe` 在 Windows 上把每项检查都跑绿、打印完 `abi-probe: OK` 之后，进程仍可能带
-  `0xC0000409` 退出——卸载 Swift 运行时的收尾顺序问题，不是功能失败。`package.ps1` 因此以
-  探针打的结论行为准，退出码异常只告警。正式实现要在自己的退出路径上验一遍（mac 那边
-  ⌘Q 不落盘是同一类问题：收尾时机）。
+  `0xC0000409` 退出——Swift 运行时那几个 DLL 的 `DllMain` 收尾顺序问题，不是功能失败。
+  `package.ps1` 因此以探针打的结论行为准，退出码异常只告警。演示窗这边在 `OnExit` 里
+  先写完日志再 `TerminateProcess`：界面和数据都已收尾完，跳过系统那套收尾顺序，
+  用户端就不会再看到「已停止工作」（mac 那边 ⌘Q 不落盘是同一类问题：收尾时机）。
 - Windows 上 Swift 运行时 DLL 不在编译器旁边的 `Toolchains\<版本>\usr\bin`，而在
   `SDKROOT\usr\bin`。`Find-SwiftRuntimeDir` 两处都找，再退回扫 PATH。
 

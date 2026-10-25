@@ -39,21 +39,45 @@ public partial class SpikeWindow : Window
     public SpikeWindow()
     {
         InitializeComponent();
-        _poll.Tick += (_, _) => RefreshPlaybackStatus();
+        // 轮询里的异常不能带崩进程：停表并把原因写在状态行上
+        _poll.Tick += (_, _) => PollTick();
+    }
+
+    private void PollTick()
+    {
+        try
+        {
+            RefreshPlaybackStatus();
+        }
+        catch (Exception error)
+        {
+            _poll.Stop();
+            if (_statusText is not null) _statusText.Text = "状态轮询已停：" + error.Message;
+            StartupLog.Fail("状态轮询", error);
+        }
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        var version = _core.Invoke("version");
-        Log($"核心 {_core.Version}，平台 {version["platform"]?.GetValue<string>()}");
+        try
+        {
+            var version = _core.Invoke("version");
+            Log($"核心 {_core.Version}，平台 {version["platform"]?.GetValue<string>()}");
 
-        BuildTopContent();
-        BuildPosterBoard();
-        BuildCenterContent();
-        BuildLogContent();
-        VideoArea.Children.Add(_video);
-        ApplyTheme();
-        _poll.Start();
+            BuildTopContent();
+            BuildPosterBoard();
+            BuildCenterContent();
+            BuildLogContent();
+            VideoArea.Children.Add(_video);
+            ApplyTheme();
+            _poll.Start();
+            StartupLog.Write("界面搭建完成");
+        }
+        catch (Exception error)
+        {
+            // 版面搭到一半就炸：弹窗说清原因，别让窗口无声消失
+            App.ReportFailure("界面搭建", error);
+        }
     }
 
     // MARK: - 版面（只搭内容，玻璃板在 EnsurePlates 里统一包）
@@ -327,6 +351,7 @@ public partial class SpikeWindow : Window
         _poll.Stop();
         try { _core.Invoke("player.stop"); } catch (Exception error) { Log("停止播放失败：" + error.Message); }
         _core.Dispose();
+        StartupLog.Write("窗口已关闭，核心已释放");
     }
 
     private Color ContrastOn(Color background) => ThemeSpec.Luminance(background) > 150 ? Colors.Black : Colors.White;

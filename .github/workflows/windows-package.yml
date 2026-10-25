@@ -10,7 +10,7 @@ on:
     inputs:
       version:
         description: 版本号（进安装包文件名）
-        default: "0.1.0"
+        default: "1.9"
       configuration:
         description: 构建配置
         type: choice

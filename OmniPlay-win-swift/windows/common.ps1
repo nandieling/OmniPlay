@@ -142,7 +142,9 @@ function Get-PeImageImports {
     return $names
 }
 
-# 顺着核心 DLL 的导入，把工具链 usr\bin 里的 Swift 运行时（含 MSVC CRT）拷进发布目录。
+# 顺着核心 DLL 的导入，把工具链 usr\bin 里的 Swift 运行时拷进发布目录。
+# MSVC 运行库（vcruntime/msvcp/concrt）单独放 redist\：摆进应用目录会盖住机器上本来
+# 更新的那份，而 WPF 的原生组件也要吃这套；宿主只在装载失败时才把它补进搜索路径。
 function Copy-SwiftRuntime {
     param([Parameter(Mandatory = $true)][string]$CoreDll,
           [Parameter(Mandatory = $true)][string]$TargetDir)
@@ -152,28 +154,37 @@ function Copy-SwiftRuntime {
         Write-Warning '没找到 Swift 运行时目录（swiftCore.dll）：运行时没进包，换台没装 Swift 的机器会起不来'
         return @()
     }
+    $redist = Join-Path $TargetDir 'redist'
     $queue = New-Object System.Collections.Generic.Queue[string]
     foreach ($name in (Get-PeImageImports -Path $CoreDll)) { $queue.Enqueue($name) }
 
-    $copied = New-Object System.Collections.Generic.List[string]
+    $all = New-Object System.Collections.Generic.List[string]
+    $runtime = New-Object System.Collections.Generic.List[string]
     $bytes = 0L
     while ($queue.Count -gt 0) {
         $name = $queue.Dequeue()
-        if ($copied -contains $name) { continue }
+        if (($all -contains $name) -or ($runtime -contains $name)) { continue }
         $source = Join-Path $bin $name                       # Swift 运行时：工具链里那份
-        $isSwiftRuntime = Test-Path -LiteralPath $source
-        if (-not $isSwiftRuntime) {
-            # MSVC CRT：Swift 安装器只在构建机上装过 redist，用户机器不一定有，顺手带上
+        $isRuntime = Test-Path -LiteralPath $source
+        if (-not $isRuntime) {
+            # MSVC CRT：构建机上装过 redist，用户机器不一定有，备一份在 redist\ 里
             if ($name -notmatch '^(vcruntime|msvcp|concrt)') { continue }
             $source = Join-Path (Join-Path $env:SystemRoot 'System32') $name
             if (-not (Test-Path -LiteralPath $source)) { continue }
         }
+        if ($isRuntime) {
+            $dest = Join-Path $TargetDir $name
+        } else {
+            New-Item -ItemType Directory -Force -Path $redist | Out-Null
+            $dest = Join-Path $redist $name
+        }
         try {
             $item = Get-Item -LiteralPath $source
-            Copy-Item -LiteralPath $source -Destination (Join-Path $TargetDir $name) -Force
-            $copied.Add($name)
+            Copy-Item -LiteralPath $source -Destination $dest -Force
+            $all.Add($name)
             $bytes += $item.Length
-            if ($isSwiftRuntime) {
+            if ($isRuntime) {
+                $runtime.Add($name)
                 foreach ($next in (Get-PeImageImports -Path $source)) { $queue.Enqueue($next) }
             }
         } catch {
@@ -181,10 +192,34 @@ function Copy-SwiftRuntime {
         }
     }
 
-    if ($copied.Count -eq 0) {
+    if ($runtime.Count -eq 0) {
         Write-Warning '核心 DLL 的导入表里没解析出任何工具链 DLL：运行时可能没进包，装到别的机器上试试'
     } else {
-        Write-Host ("  Swift 运行时：{0} 个 DLL，{1:N1} MB" -f $copied.Count, ($bytes / 1MB))
+        Write-Host ("  Swift 运行时：{0} 个 DLL，{1:N1} MB；MSVC 运行库 {2} 个放 redist\" -f
+            $runtime.Count, ($bytes / 1MB), ($all.Count - $runtime.Count))
     }
-    return $copied
+    return $all
+}
+
+# 依赖自检：包里每个原生 DLL 的导入，要么也在包里，要么在 System32，要么是 api-ms-/ext-ms-
+# 契约。构建机 PATH 里整条工具链都在，看不出真缺口——装到干净机器上的闪退就是这么来的。
+function Test-ShippedImports {
+    param([Parameter(Mandatory = $true)][string]$PublishDir)
+
+    $system32 = Join-Path $env:SystemRoot 'System32'
+    $shipped = @(Get-ChildItem -LiteralPath $PublishDir -Recurse -Filter '*.dll' -File |
+        ForEach-Object { $_.Name.ToLowerInvariant() })
+    $gaps = @()
+    foreach ($dll in Get-ChildItem -LiteralPath $PublishDir -Recurse -Filter '*.dll' -File) {
+        $imports = Get-PeImageImports -Path $dll.FullName
+        # 托管程序集那身导入表是给 CLR 看的（清一色 mscoree.dll），系统装载器不参与
+        if ($imports -contains 'mscoree.dll') { continue }
+        $missing = @($imports | Where-Object {
+            ($_.StartsWith('api-ms-') -or $_.StartsWith('ext-ms-')) -eq $false -and
+            ($shipped -notcontains $_.ToLowerInvariant()) -and
+            (-not (Test-Path -LiteralPath (Join-Path $system32 $_)))
+        } | Sort-Object -Unique)
+        if ($missing.Count -gt 0) { $gaps += [pscustomobject]@{ Dll = $dll.Name; Missing = $missing } }
+    }
+    return $gaps
 }

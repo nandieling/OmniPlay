@@ -33,7 +33,7 @@ public sealed class CoreBridge : IDisposable
     [DllImport(CoreLibrary, CallingConvention = CallingConvention.Cdecl)]
     private static extern void omniplay_destroy(IntPtr handle);
 
-    private readonly IntPtr _handle;
+    private IntPtr _handle;
     private readonly NativeEventCallback _callback;   // 委托必须被持有，否则会被 GC 收走
     private long _eventCount;
 
@@ -93,6 +93,10 @@ public sealed class CoreBridge : IDisposable
 
     public void Dispose()
     {
-        if (_handle != IntPtr.Zero) omniplay_destroy(_handle);
+        if (_handle == IntPtr.Zero) return;
+        // 先把回调摘了：句柄释放后核心不该再往宿主的函数指针上打
+        omniplay_set_event_callback(_handle, IntPtr.Zero, null);
+        omniplay_destroy(_handle);
+        _handle = IntPtr.Zero;
     }
 }

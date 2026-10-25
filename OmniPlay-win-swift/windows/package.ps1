@@ -81,6 +81,41 @@ if ($probeCode -ne 0) {
     Write-Warning ("探针全绿但进程退出码 0x{0:X8}：Windows 收尾问题，见 docs/SPIKE.md §4" -f ($probeCode -band 0xFFFFFFFF))
 }
 
+# 依赖自检：包里每个原生 DLL 要的东西，必须在包内或者系统目录里。
+# libmpv 的可选图形依赖（vulkan 那类）在 Server 镜像上本来就没有，只提示不拦。
+Write-Host '==> 随包依赖自检' -ForegroundColor Cyan
+$gaps = @(Test-ShippedImports -PublishDir $publish)
+$soft = @('libmpv-2.dll')
+$serious = @($gaps | Where-Object { $soft -notcontains $_.Dll })
+foreach ($gap in $serious) { Write-Host ("  {0} 缺：{1}" -f $_.Dll, ($_.Missing -join '、')) -ForegroundColor Red }
+if ($serious) { throw '有原生 DLL 的依赖没进包：装到干净机器上会起不来' }
+foreach ($gap in ($gaps | Where-Object { $soft -contains $_.Dll })) {
+    Write-Warning ("{0} 的可选依赖这台机器上没有：{1}" -f $_.Dll, ($_.Missing -join '、'))
+}
+
+# 界面冒烟：把 PATH 缩到只剩系统目录再起一次，模拟「装了包但没有工具链」的机器。
+# 控制台探针看不见的那两件事——WPF 能不能起、Swift 运行时在干净 PATH 下能不能拉起来——
+# 在这里才看得见。开不了窗口的构建机只警告，依赖缺口才拦。
+Write-Host '==> 界面冒烟（干净 PATH）' -ForegroundColor Cyan
+$appLog = Join-Path $env:LOCALAPPDATA 'OmniPlay\startup.log'
+Remove-Item $appLog -Force -ErrorAction SilentlyContinue
+$psi = New-Object System.Diagnostics.ProcessStartInfo((Join-Path $publish 'OmniPlaySpike.exe'), '--smoke')
+$psi.UseShellExecute = $false
+$psi.WorkingDirectory = $publish
+$psi.EnvironmentVariables['PATH'] = "$env:SystemRoot\System32;$env:SystemRoot"
+$app = [System.Diagnostics.Process]::Start($psi)
+if (-not $app.WaitForExit(90000)) { $app.Kill(); throw '界面冒烟 90 秒没退出' }
+$smokeCode = $app.ExitCode
+if (Test-Path $appLog) {
+    Get-Content $appLog | ForEach-Object { Write-Host "  | $_" }
+    if ((Get-Content -Raw $appLog) -match '核心装载失败|界面搭建失败|本机自检有缺口') {
+        throw '界面冒烟抓到装载问题，见上面的日志'
+    }
+} else {
+    Write-Warning '界面冒烟没留下启动日志：这台机器大概开不了窗口'
+}
+if ($smokeCode -ne 0) { Write-Warning "界面冒烟退出码 $smokeCode（构建机开不了窗时属预期）" }
+
 $name = "OmniPlay-win-swift-$Version-x64"
 $zip = Join-Path $artifacts "$name-portable.zip"
 Compress-Archive -Path (Join-Path $publish '*') -DestinationPath $zip -Force
