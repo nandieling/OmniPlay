@@ -113,12 +113,14 @@ public partial class App : Application
             RunProbe();
             StartupLog.MarkFinished("探针结束");
             StartupLog.Write("退出（探针）");
+            StartupLog.Write("退出（探针）");
             NativePreflight.HardExit(Failed ? 1 : 0);
         }
         if (Win32Probe)
         {
             UiProbe.Run(_smoke);
             StartupLog.MarkFinished("Win32 探针结束");
+            StartupLog.Write("退出（Win32 探针）");
             StartupLog.Write("退出（Win32 探针）");
             NativePreflight.HardExit(Failed ? 1 : 0);
         }
