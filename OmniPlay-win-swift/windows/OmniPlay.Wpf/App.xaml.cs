@@ -53,6 +53,10 @@ public partial class App : Application
         DispatcherUnhandledException += (_, args) =>
         { ReportFailure("界面线程未捕获异常", args.Exception); args.Handled = true; };
 
+        StartupLog.Write(RenderCapability.Tier > 0
+            ? "渲染：显卡加速"
+            : "渲染：软件渲染（无显卡加速）：玻璃退回纯染色，不做实时采样");
+
         NativePreflight.InstallCrashReporter();
         NativePreflight.PinSearchPaths();
         try

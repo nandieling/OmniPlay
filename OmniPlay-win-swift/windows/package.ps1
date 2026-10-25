@@ -115,7 +115,20 @@ $app = [System.Diagnostics.Process]::Start($psi)
 # 光看启动日志看不见（日志停在哪儿只能说明断点，说明不了死因）
 $errTask = $app.StandardError.ReadToEndAsync()
 $outTask = $app.StandardOutput.ReadToEndAsync()
-if (-not $app.WaitForExit(90000)) { $app.Kill(); throw '界面冒烟 90 秒没退出' }
+if (-not $app.WaitForExit(90000)) {
+    $app.Kill()
+    # 先把手头能看到的都倒出来再报失败：只有「没退出」这一句等于白跑一轮
+    foreach ($path in @($appLog, $appLogFallback) | Where-Object { Test-Path $_ }) {
+        Write-Host "  | 超时时的启动日志（$path）："
+        Get-Content $path | ForEach-Object { Write-Host "  | $_" }
+        break
+    }
+    Start-Sleep -Milliseconds 300
+    # 进程是 Kill 掉的，流会跟着关；再等两秒兜底，别卡在读流上
+    [void]$errTask.Wait(2000); [void]$outTask.Wait(2000)
+    Write-Host ("  ! 超时时的 stderr：`n" + $errTask.Result)
+    throw '界面冒烟 90 秒没退出'
+}
 $stderr = $errTask.Result; $stdout = $outTask.Result
 $smokeCode = $app.ExitCode
 foreach ($line in ($stderr + "`n" + $stdout) -split "`r?`n") { if ($line) { Write-Host "  ! $line" } }

@@ -82,6 +82,12 @@ public sealed class GlassPlate : Grid
     private UIElement? _source;
     private ThemeSpec _spec = null!;
 
+    /// 只有显卡加速时才采样。VisualBrush 要把被采样的那棵子树重画一遍再高斯模糊，
+    /// 没有 GPU（虚拟机、基础显示驱动、远程桌面、上次崩在渲染后自动退的软件模式）时
+    /// 这一笔能把一帧拖成几秒——构建机上「点开之后 90 秒不退出」就是这么来的。
+    /// 退回纯染色玻璃，玻璃板本身、描边、高光都还在。
+    public static bool CanSample => RenderCapability.Tier > 0;
+
     public GlassPlate(ThemeSpec spec, UIElement content, UIElement? sampleSource)
     {
         _sampled = new Rectangle();
@@ -140,7 +146,7 @@ public sealed class GlassPlate : Grid
             return;
         }
 
-        _sampleClip.Visibility = Visibility.Visible;
+        _sampleClip.Visibility = CanSample ? Visibility.Visible : Visibility.Collapsed;
         _sheen.Visibility = Visibility.Visible;
         _tint.Background = new SolidColorBrush(glass.Tint);
         _sheen.Background = new LinearGradientBrush(glass.SheenTop, glass.SheenBottom,
@@ -158,7 +164,7 @@ public sealed class GlassPlate : Grid
     /// 重算「板下方那块画面」。Popup 里的板与窗口内容不同根，拿不到变换时退回纯染色。
     public void RefreshSample()
     {
-        if (_sampler is null || _source is null) return;
+        if (_sampler is null || _source is null || !CanSample) return;
         try
         {
             // 先确认两边都还挂在窗口上：少这一眼，下面那句变换就会把 milcore
