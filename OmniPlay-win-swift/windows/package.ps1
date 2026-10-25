@@ -155,6 +155,10 @@ function Invoke-UISmoke([string]$label, [string]$smokeArgs) {
     $logHit = @($appLog, $appLogFallback) | Where-Object { Test-Path $_ } | Select-Object -First 1
     if ($logHit) {
         $raw = Get-Content -Raw $logHit
+        # 探针那一趟必须把结论那行写出来，否则等于什么都没测
+        if ($raw -match '探针：' -and $raw -notmatch '核心这一层全通') {
+            throw "界面冒烟（$label）：核心探针没走通，见上面的日志"
+        }
         if ($raw -match '核心装载失败|界面搭建失败|本机自检有缺口|片库读取失败|原生崩溃|没画出一帧') {
             throw "界面冒烟（$label）抓到问题，见上面的日志"
         }
@@ -171,9 +175,11 @@ function Invoke-UISmoke([string]$label, [string]$smokeArgs) {
     if ($smokeCode -ne 0) { Write-Warning "界面冒烟（$label）退出码 $smokeCode（构建机开不了窗时属预期）" }
 }
 
-# 第二趟只把玻璃采样关掉：这是给用户留的排障档（--no-glass），CI 得替它验一遍能用
+# 第二趟只把玻璃采样关掉：这是给用户留的排障档（--no-glass），CI 得替它验一遍能用。
+# 第三趟完全不建窗：核心那一摊在 WPF 之外能不能跑通，界面起不来时先问这个。
 Invoke-UISmoke '完整功能' '--smoke'
 Invoke-UISmoke '关掉玻璃采样' '--smoke --no-glass --no-library'
+Invoke-UISmoke '只跑核心探针' '--probe'
 
 $name = "OmniPlay-win-swift-$Version-x64"
 $zip = Join-Path $artifacts "$name-portable.zip"
