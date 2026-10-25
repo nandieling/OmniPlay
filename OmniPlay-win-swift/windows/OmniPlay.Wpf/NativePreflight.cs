@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 
@@ -126,6 +127,9 @@ public static class NativePreflight
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint GetModuleFileNameW(IntPtr module, System.Text.StringBuilder buffer, uint size);
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool GetModuleHandleEx(uint flags, string name, out IntPtr module);
+
     // 委托必须被静态字段持有，否则 GC 一走，回调指针就成了野指针
     private static readonly ExceptionFilter CrashFilter = OnFirstChance;
     private static readonly ExceptionFilter DeathFilter = OnUnhandled;
@@ -236,14 +240,9 @@ public static class NativePreflight
         if (!File.Exists(core)) throw new StartupFailureException($"安装目录里没有 omniplay-core.dll：{core}");
 
         var flags = LoadLibrarySearchDllLoadDir | LoadLibrarySearchDefaultDirs | LoadLibrarySearchApplicationDir;
-        // 先把 Swift 运行时按全路径抢下来。这些 DLL 名字太通用（Foundation.dll、
-        // icu*.dll），输入法、杀软、网盘注入的同名模块只要抢在前头，表现就是
-        // 「构建机上好好的，装到这台机器上就没了」。先装载 = 我们这份一定赢。
-        var pinned = SwiftRuntimeDllNames.Count(name =>
-            File.Exists(Path.Combine(appDir, name)) &&
-            LoadLibraryExW(Path.Combine(appDir, name), IntPtr.Zero, flags) != IntPtr.Zero);
-        StartupLog.Write($"运行时预装载：{pinned} 个用的是包里的");
-
+        // 只装载核心一个：Swift 运行时由加载器按依赖自己拉，我们不插手。
+        // 之前先按全路径把 13 个抢下来（防同名劫持），结果用户机器上 WPF 建窗直接卡死——
+        // 多出来的那批 LoadLibrary 动了加载器锁的时序，构建机看不出来。改成事后核对来源。
         var handle = LoadLibraryExW(core, IntPtr.Zero, flags);
         var error = (uint)Marshal.GetLastWin32Error();
 
@@ -261,7 +260,9 @@ public static class NativePreflight
             throw new StartupFailureException($"核心装载失败：{DescribeFailure(core, error)}");
 
         StartupLog.Write("核心 omniplay-core.dll 装载成功");
+        CheckRuntimeSources(appDir);
         AuditShippedNativeLibraries(appDir);
+        LogLiveInstances();
     }
 
     /// 核心已经起来了，顺手把包里其他原生 DLL 也扫一遍：真出问题至少要留下记录。
@@ -318,6 +319,50 @@ public static class NativePreflight
         }
         catch (Exception error) { StartupLog.Write("外来模块清单没列出来：" + error.Message); }
         finally { CloseHandle(snapshot); }
+    }
+
+    /// 这 13 个运行时 DLL 到底从哪儿装载的：同名劫持要看得见，但不用靠抢先装载去防。
+    private static void CheckRuntimeSources(string appDir)
+    {
+        const uint unchangedRefCount = 0x0000_0002;
+        var strays = new List<string>();
+        var loaded = 0;
+        foreach (var name in SwiftRuntimeDllNames)
+        {
+            if (!GetModuleHandleEx(unchangedRefCount, name, out var module) || module == IntPtr.Zero) continue;
+            loaded++;
+            var buffer = new System.Text.StringBuilder(1024);
+            if (GetModuleFileNameW(module, buffer, (uint)buffer.Capacity) != 0 &&
+                !buffer.ToString().StartsWith(appDir, StringComparison.OrdinalIgnoreCase))
+                strays.Add($"{name}（来自 {System.IO.Path.GetDirectoryName(buffer.ToString())}）");
+        }
+        StartupLog.Write(strays.Count == 0
+            ? $"运行时来源核对：{loaded} 个在进程里，都在包目录"
+            : "运行时来源不对头：" + string.Join("；", strays));
+    }
+
+    /// 界面上一个窗都没有，用户就会再点一次图标，于是又多一个卡住的进程，日志也被
+    /// 两趟写在一起。把这事儿写在日志里，看的人不用猜为什么有两行。
+    private static void LogLiveInstances()
+    {
+        try
+        {
+            var own = Environment.ProcessId;
+            var path = Environment.ProcessPath ?? "";
+            var others = Process.GetProcessesByName(Process.GetCurrentProcess().ProcessName)
+                .Where(other => other.Id != own)
+                .Where(other =>
+                {
+                    try { return string.Equals(other.MainModule?.FileName, path, StringComparison.OrdinalIgnoreCase); }
+                    catch (Exception) { return true; }    // 读不到模块路径的也算上，宁可多报
+                })
+                .Select(other => other.Id)
+                .ToList();
+            if (others.Count > 0)
+                StartupLog.Write($"同一个程序还有 {others.Count} 个实例在跑（PID {string.Join("、", others)}）：" +
+                                 "它们大概也没画出窗口，任务管理器里收掉");
+        }
+        catch (Exception) { /* 这一行少了不影响判断 */ }
     }
 
     /// 这个 DLL 的导入里，哪些既不在包里也不在系统目录里。

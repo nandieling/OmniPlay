@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -16,10 +17,15 @@ public partial class App : Application
     /// 出过岔子。CI 冒烟靠退出码判断结果，弹窗那种形式在无人值守的机器上没有意义。
     public static bool Failed { get; private set; }
 
+    /// --probe：只做核心那摊事，一个窗口都不建。界面起不来时用它把「核心行不行」和
+    /// 「WPF 行不行」切开——日志最后那行探针结论就是答案。
+    public static bool Probe { get; private set; }
+
     protected override void OnStartup(StartupEventArgs e)
     {
         StartupLog.Reset();
         _smoke = e.Args.Contains("--smoke");
+        Probe = e.Args.Contains("--probe");
         NoLibrary = e.Args.Contains("--no-library");
         StartupLog.Write($"启动：.NET {Environment.Version}，参数「{string.Join(" ", e.Args)}」");
 
@@ -92,6 +98,19 @@ public partial class App : Application
         }
 
         base.OnStartup(e);
+
+        if (Probe)
+        {
+            RunProbe();
+            StartupLog.Write("退出（探针）");
+            NativePreflight.HardExit(Failed ? 1 : 0);
+        }
+
+        // 窗口由这里自己建（不用 StartupUri）：探针模式要能完全不碰 WPF 的建窗路径
+        StartupLog.Mark("建主窗口");
+        var window = new SpikeWindow();
+        MainWindow = window;
+        window.Show();
         StartupLog.Write("主窗口已创建");
 
         if (_smoke)
@@ -117,6 +136,29 @@ public partial class App : Application
         StartupLog.Write($"退出（{e.ApplicationExitCode}）");
         base.OnExit(e);
         NativePreflight.HardExit(e.ApplicationExitCode);
+    }
+
+    /// 核心侧自检：装载、theme.get、片库开库与分组，全走真实调用，但不开窗口。
+    private static void RunProbe()
+    {
+        try
+        {
+            using var core = new CoreBridge();
+            StartupLog.Write($"探针：核心 {core.Version}，platform " +
+                             core.Invoke("version")["platform"]?.GetValue<string>());
+            var theme = core.Invoke("theme.get",
+                new JsonObject { ["color"] = "crystal", ["style"] = "liquidGlass" });
+            StartupLog.Write($"探针：theme.get 通了（{theme.ToJsonString().Length} 字符）");
+            var sections = core.Invoke("library.sections");
+            var stats = core.Invoke("library.stats");
+            StartupLog.Write($"探针：library.sections 通了（{sections.ToJsonString().Length} 字符）；" +
+                             $"stats {stats.ToJsonString()}");
+            StartupLog.Write("探针：核心这一层全通，卡点在 WPF 建窗");
+        }
+        catch (Exception error)
+        {
+            ReportFailure("探针", error);
+        }
     }
 
     /// 把原因写进日志，再（非冒烟时）弹窗告诉用户日志在哪。

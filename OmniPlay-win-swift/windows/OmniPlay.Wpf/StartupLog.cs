@@ -90,6 +90,15 @@ public static class StartupLog
         }
     }
 
+    /// 走到哪一步了。看门狗会把这两个字打出来，日志因此自带断点，不用靠猜。
+    public static string Phase { get; private set; } = "刚启动";
+
+    public static void Mark(string phase)
+    {
+        Phase = phase;
+        Write("阶段：" + phase);
+    }
+
     public static void Write(string line)
     {
         var text = $"{DateTime.Now:HH:mm:ss.fff}  {line}{Environment.NewLine}";

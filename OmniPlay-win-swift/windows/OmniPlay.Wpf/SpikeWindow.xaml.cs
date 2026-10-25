@@ -48,31 +48,43 @@ public partial class SpikeWindow : Window
 
     public SpikeWindow()
     {
-        StartupLog.Write("界面：窗口开始构造");
-        ArmFirstFrameWatchdog(8);
+        StartupLog.Mark("窗口开始构造");
+        ArmFirstFrameWatchdog();
+        // 字体枚举是 WPF 首帧前最慢的一步，也是中文机器上常见的坑（一款坏字体能让
+        // DirectWrite 转半天）。先在这儿自己走一遍：卡住的话断点就写在这行上。
+        StartupLog.Mark("字体回源（DirectWrite 找微软雅黑）");
+        var probe = new FormattedText("觅影 0123", System.Globalization.CultureInfo.CurrentCulture,
+            FlowDirection.LeftToRight, new Typeface("Microsoft YaHei"), 14, Brushes.White, 1.25);
+        StartupLog.Mark($"字体回源通了（量出 {probe.WidthIncludingTrailingWhitespace:F0} 像素宽），XAML 待解析");
         InitializeComponent();
+        StartupLog.Mark("XAML 解析完，等源就绪");
         // 轮询里的异常不能带崩进程：停表并把原因写在状态行上
         _poll.Tick += (_, _) => PollTick();
         // 首帧这行是分隔线：日志停在这行之前 = 死在渲染，停在之后 = 死在读库
         ContentRendered += (_, _) =>
         {
             _firstFrame = true;
-            StartupLog.Write("界面：第一帧已画出");
+            StartupLog.Mark("第一帧已画出");
         };
+        SourceInitialized += (_, _) => StartupLog.Mark("窗口句柄已建好");
     }
 
     // 只有一个窗口，静态就够；看门狗在普通线程上读它
     private static volatile bool _firstFrame;
 
-    /// 「点开没反应」有两种：进程当场没了，或者还活着但卡在哪儿。这两种在日志里必须
-    /// 长得不一样，否则只能靠用户盯任务管理器。走普通线程而不是计时器：界面线程本身
-    /// 就可能就是卡住的那个。
-    private static void ArmFirstFrameWatchdog(int seconds)
+    /// 看门狗走普通线程而不是计时器：界面线程本身可能就是卡住的那个。报两次（8 秒、
+    /// 40 秒）——「卡一下」和「永远卡住」是两回事，日志里得能看出来。停在哪儿由
+    /// StartupLog.Phase 说，不用再猜。
+    private static void ArmFirstFrameWatchdog()
     {
         new Thread(() =>
         {
-            Thread.Sleep(TimeSpan.FromSeconds(seconds));
-            if (!_firstFrame) StartupLog.Write($"界面：{seconds} 秒没画出一帧——进程还活着，卡在构造或首帧渲染里");
+            foreach (var (seconds, wait) in new[] { (8, 8), (40, 32) })
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(wait));
+                if (_firstFrame) return;
+                StartupLog.Write($"界面：{seconds} 秒没画出一帧——进程还活着，停在「{StartupLog.Phase}」");
+            }
         })
         { IsBackground = true }.Start();
     }
@@ -103,15 +115,15 @@ public partial class SpikeWindow : Window
             _core.EventReceived += OnCoreEvent;
 
             BuildTopContent();
-            StartupLog.Write("界面：顶栏完成");
+            StartupLog.Mark("顶栏完成");
             BuildHome();
-            StartupLog.Write("界面：海报墙与导航完成");
+            StartupLog.Mark("海报墙与导航完成");
             BuildCenterContent();
             BuildLogContent();
             VideoArea.Children.Add(_video);
             ApplyTheme();
             _poll.Start();
-            StartupLog.Write("界面搭建完成");
+            StartupLog.Mark("界面搭建完成");
             // 壳先站稳，再去读库：库在哪儿、开不开得动，都不该把窗口一起带走
             Dispatcher.BeginInvoke(new Action(LoadLibraryData), DispatcherPriority.Background);
         }
