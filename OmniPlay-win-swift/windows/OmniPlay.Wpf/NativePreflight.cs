@@ -77,7 +77,10 @@ public static class NativePreflight
     {
         try
         {
-            var name = $"hang-{DateTime.Now:HHmmss}-{phase.Length}格.dmp";
+            // 文件名带上阶段：光看目录里有什么，就知道上一趟卡在哪儿
+            var tag = new string(phase.Where(c => !Path.GetInvalidFileNameChars().Contains(c)).ToArray())
+                .Replace("：", " ").Trim();
+            var name = $"hang-{DateTime.Now:HHmmss}-{(tag.Length > 28 ? tag[..28] : tag)}.dmp";
             var path = Path.Combine(Path.GetDirectoryName(StartupLog.FilePath)!, name);
             using var file = new FileStream(path, FileMode.Create);
             const uint withThreadInfo = 0x0000_0200;

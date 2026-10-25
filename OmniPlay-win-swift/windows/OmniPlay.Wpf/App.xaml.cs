@@ -28,6 +28,10 @@ public partial class App : Application
     /// --win32-probe：完全不碰 WPF，只用 user32 建个最普通的窗口。见 UiProbe。
     public static bool Win32Probe { get; private set; }
 
+    /// --no-activate：Show 的时候不抢前台。上一趟卡在建窗（连句柄都没拿到）时会自动
+    /// 带上这个：显示内容是一样的，少掉的只是激活那一串 DWM 前后的交接。
+    public static bool NoActivate { get; private set; }
+
     protected override void OnStartup(StartupEventArgs e)
     {
         StartupLog.Reset();
@@ -35,6 +39,11 @@ public partial class App : Application
         Probe = e.Args.Contains("--probe");
         MinimalWpf = e.Args.Contains("--min-wpf");
         Win32Probe = e.Args.Contains("--win32-probe");
+        NoActivate = e.Args.Contains("--no-activate") || StartupLog.PreviousRunWedgedBeforeHandle;
+        if (NoActivate)
+            StartupLog.Write(StartupLog.PreviousRunWedgedBeforeHandle
+                ? "上次卡在建窗（没拿到窗口句柄）：本次显示时不抢前台"
+                : "按要求显示窗口时不抢前台（--no-activate）");
         NoLibrary = e.Args.Contains("--no-library");
         StartupLog.Write($"启动：.NET {Environment.Version}，参数「{string.Join(" ", e.Args)}」");
 
@@ -113,14 +122,12 @@ public partial class App : Application
             RunProbe();
             StartupLog.MarkFinished("探针结束");
             StartupLog.Write("退出（探针）");
-            StartupLog.Write("退出（探针）");
             NativePreflight.HardExit(Failed ? 1 : 0);
         }
         if (Win32Probe)
         {
             UiProbe.Run(_smoke);
             StartupLog.MarkFinished("Win32 探针结束");
-            StartupLog.Write("退出（Win32 探针）");
             StartupLog.Write("退出（Win32 探针）");
             NativePreflight.HardExit(Failed ? 1 : 0);
         }
@@ -148,6 +155,8 @@ public partial class App : Application
                 StartupLog.NoteRendered();
                 StartupLog.Mark("最小窗口：第一帧已画出");
             };
+            bare.ShowActivated = !NoActivate;
+            ArmExitBackstopOn(bare);
             bare.Show();
             MainWindow = bare;
             StartupLog.Write("最小窗口：Show 已返回");
@@ -155,7 +164,8 @@ public partial class App : Application
         else
         {
             StartupLog.Mark("建主窗口");
-            var window = new SpikeWindow();
+            var window = new SpikeWindow { ShowActivated = !NoActivate };
+            ArmExitBackstopOn(window);
             MainWindow = window;
             window.Show();
             StartupLog.Write("主窗口已创建");
@@ -176,6 +186,26 @@ public partial class App : Application
             };
             timer.Start();
         }
+    }
+
+    /// 窗口关掉了就等于这趟结束了。后面那段收尾（WPF 渲染线程退出、AppDomain 卸载、
+    /// Swift 运行时各 DLL 的 DllMain）在构建机上实测能挂一分多钟——库和日志都已经
+    /// 落盘，没必要等它。3 秒还没走开就直接结束进程。
+    /// 挂在 App 上而不是主窗口里：--min-wpf 建的是裸窗口，没有 OnClosing 可挂，
+    /// 少了这一手它关完窗就卡在收尾里，冒烟只能干等到超时。
+    private static void ArmExitBackstopOn(Window window)
+    {
+        // 后订阅先兜底：主窗口自己的 Closing 会先把进度落盘、释放核心。
+        window.Closing += (_, _) =>
+        {
+            new Thread(() =>
+            {
+                Thread.Sleep(3000);
+                StartupLog.Write(Failed ? "退出（1）（关窗后 3 秒兜底）" : "退出（0）（关窗后 3 秒兜底）");
+                NativePreflight.HardExit(Failed ? 1 : 0);
+            })
+            { IsBackground = false }.Start();
+        };
     }
 
     protected override void OnExit(ExitEventArgs e)

@@ -165,8 +165,9 @@ function Invoke-UISmoke([string]$label, [string]$smokeArgs, [string]$require = '
         if ($raw -match '核心装载失败|界面搭建失败|本机自检有缺口|片库读取失败|原生崩溃|没画出一帧|现场没存下来') {
             throw "界面冒烟（$label）抓到问题，见上面的日志"
         }
-        # 界面立起来了却没写下收尾那行 = 中途被硬带走，这种包发出去就是「点开闪退」
-        if ($raw -match '界面搭建完成' -and $raw -notmatch '退出（') {
+        # 每一趟都得自己写下收尾那行（正常关窗走 OnExit，卡住走兜底，探针直接写）。
+        # 进程退了却没留收尾行 = 中途被硬带走，这种包发出去就是「点开闪退」
+        if ($raw -notmatch '退出（') {
             throw "界面冒烟（$label）中途进程就没了：日志停在上面最后一行"
         }
     } else {
@@ -180,11 +181,15 @@ function Invoke-UISmoke([string]$label, [string]$smokeArgs, [string]$require = '
 
 # 第二趟只把玻璃采样关掉：这是给用户留的排障档（--no-glass），CI 得替它验一遍能用。
 # 第三趟完全不建窗：核心那一摊在 WPF 之外能不能跑通，界面起不来时先问这个。
+# 后两趟把「WPF 行不行」和「操作系统给不给建窗」切开：最小窗口出得来而主窗口起不来，
+# 问题在我们的内容；两趟都卡，就是这台机器的建窗或显示那一层被什么绊住了。
 Invoke-UISmoke '完整功能' '--smoke' '阶段：第一帧已画出'
 Invoke-UISmoke '关掉玻璃采样' '--smoke --no-glass --no-library'
 Invoke-UISmoke '只跑核心探针' '--probe' '核心这一层全通'
 Invoke-UISmoke '最小 WPF 窗口' '--min-wpf --smoke' '最小窗口：第一帧已画出'
 Invoke-UISmoke '不用 WPF 的窗口探针' '--win32-probe --smoke' '消息泵走完'
+# 第六趟验「显示时不抢前台」这条退路：用户机器上卡在建窗时程序会自动走它。
+Invoke-UISmoke '显示时不抢前台' '--smoke --no-activate'
 
 $name = "OmniPlay-win-swift-$Version-x64"
 $zip = Join-Path $artifacts "$name-portable.zip"

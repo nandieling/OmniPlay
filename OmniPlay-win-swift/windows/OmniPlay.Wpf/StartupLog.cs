@@ -68,6 +68,10 @@ public static class StartupLog
                     PreviousRunDiedBeforeFirstFrame = PreviousRunPhase.Length > 0
                         ? !(PreviousRunPhase.Contains("第一帧") || PreviousRunPhase.Contains("已退出"))
                         : !previous.Contains("第一帧");
+                    PreviousRunWedgedBeforeHandle = PreviousRunPhase.Length > 0
+                        && PreviousRunPhase.Contains("窗口")
+                        && !PreviousRunPhase.Contains("句柄")
+                        && !PreviousRunPhase.Contains("第一帧");
                 }
             }
         }
@@ -108,6 +112,11 @@ public static class StartupLog
     /// 上一趟是不是连一帧都没画出来。命中就别再硬撑显卡特效了。
     public static bool PreviousRunNeverRendered { get; private set; }
 
+    /// 上一趟是不是卡在建窗那一步、连窗口句柄都没拿到。命中说明不是我们的内容
+    /// 有问题（XAML 都解析完了），而是显示这一步本身在这台机器上过不去，
+    /// 这一趟就换个姿势显示（不抢前台）。
+    public static bool PreviousRunWedgedBeforeHandle { get; private set; }
+
     public static void Mark(string phase)
     {
         Phase = phase;
@@ -137,6 +146,9 @@ public static class StartupLog
                 if (!_dumped)
                 {
                     _dumped = true;
+                    // 先喊一声再存：MiniDumpWriteDump 要冻结所有线程，卡点要是抱着
+                    // 加载器锁不放，这一步自己就能挂住，那连这行都不会出现
+                    Write("正在存现场…");
                     var path = NativePreflight.WriteHangDump(Phase);
                     Write(path is null
                         ? "现场没存下来（连写 dmp 都要等锁：多半卡在加载器锁或内核调用里）"
