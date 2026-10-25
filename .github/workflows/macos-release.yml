@@ -55,11 +55,16 @@ jobs:
         working-directory: ${{ matrix.project }}
         run: |
           set -euo pipefail
-          xcodebuild -project OmniPlay.xcodeproj -scheme OmniPlay \
+          # -resolvePackageDependencies 是选项，不是 build action；
+          # 少写横线会被当成 action 名，报 Unknown build action。
+          # 网络抖动导致预解析失败也只是警告，后面的编译会自己再解析一次。
+          if ! xcodebuild -project OmniPlay.xcodeproj -scheme OmniPlay \
             -destination "platform=macOS,arch=${{ matrix.arch }}" \
             -clonedSourcePackagesDirPath build/ci/SourcePackages \
             -skipPackagePluginValidation -skipMacroValidation \
-            resolvePackageDependencies
+            -resolvePackageDependencies; then
+            echo "::warning::Swift Package 预解析失败，交给编译步骤重新解析"
+          fi
 
       - name: 单元测试
         if: matrix.id == 'arm64'
@@ -73,6 +78,7 @@ jobs:
             -derivedDataPath build/ci/DerivedData \
             -clonedSourcePackagesDirPath build/ci/SourcePackages \
             -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Manual PROVISIONING_PROFILE_SPECIFIER="" DEVELOPMENT_TEAM="" \
             test -only-testing:OmniPlayTests
 
       - name: 编译 Release
