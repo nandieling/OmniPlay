@@ -24,14 +24,14 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 
 [Files]
-Source="{#StageDir}\*"; DestDir="{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Tasks]
-Name: "desktopicon"; Description="创建桌面快捷方式"
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Icons]
-Name="{autoprograms}\觅影 Windows 演示"; Filename="{app}\OmniPlaySpike.exe"
-Name="{autodesktop}\觅影 Windows 演示"; Filename="{app}\OmniPlaySpike.exe"; Tasks: desktopicon
+Name: "{autoprograms}\觅影 Windows 演示"; Filename: "{app}\OmniPlaySpike.exe"
+Name: "{autodesktop}\觅影 Windows 演示"; Filename: "{app}\OmniPlaySpike.exe"; Tasks: desktopicon
 
 [Run]
-Filename="{app}\OmniPlaySpike.exe"; Description="运行觅影 Windows 演示"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\OmniPlaySpike.exe"; Description: "运行觅影 Windows 演示"; Flags: nowait postinstall skipifsilent

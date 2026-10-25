@@ -107,6 +107,10 @@ Windows 上若只有这条红，说明 ICU 排序与 mac 的 `localizedStandardC
 
 ## 4. 已知风险
 
+- 安装包向导目前是英文（Inno 的 Default.isl）：简体中文 isl 不属于官方安装包，
+  想要中文界面要么随包带上 ChineseSimplified.isl，要么把 [Setup] 换成 Inno Setup
+  Wishlist 分支。应用本体是中文的，这里先不折腾。
+
 - `abi-probe` 在 Windows 上把每项检查都跑绿、打印完 `abi-probe: OK` 之后，进程仍可能带
   `0xC0000409` 退出——卸载 Swift 运行时的收尾顺序问题，不是功能失败。`package.ps1` 因此以
   探针打的结论行为准，退出码异常只告警。正式实现要在自己的退出路径上验一遍（mac 那边
