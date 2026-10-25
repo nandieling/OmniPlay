@@ -4,9 +4,9 @@
 路线来自两份评估：`../OmniPlay-win/2026-10-24-swift-rewrite-assessment-and-plan.md`
 与 `../OmniPlay-win/2026-10-24-swift-core-wpf-assessment.md`。
 
-思路是把 mac 版的规则层（排序、分组、主题配方、播放器状态机）搬进一个零依赖的 Swift 包，
-用 C ABI + JSON 契约暴露出去；Windows 侧只做界面与系统集成。mac 与 Windows 共用同一套
-判断，两份界面就不会各自漂一套规则。
+思路是把 mac 版的规则层（片库读写、排序、分组、主题配方、播放器状态机）搬进一个不自带
+外部依赖的 Swift 包，用 C ABI + JSON 契约暴露出去；Windows 侧只做界面与系统集成。
+mac 与 Windows 共用同一套判断，两份界面就不会各自漂一套规则。
 
 两条已定的方案：玻璃观感走**自绘**（VisualBrush 采本窗口内容 + 高斯模糊，Mica/Acrylic 采不到
 窗口内容，做不出海报墙滚动时玻璃跟着变色的效果）；与现有 C#/Avalonia 版**并存**，新版功能对齐
@@ -15,11 +15,13 @@
 ## 目录
 
 ```
-Package.swift                零依赖核心包（只用 Foundation）
+Package.swift                核心包（Foundation + 仓库自带的 SQLite）
 Sources/OmniPlayCore/        规则层：主题配方、首页排序与分组、JSON、播放器状态机
+Sources/OmniPlayCore/Database/   片库：SQLite 薄封装 + 表结构 + 演示数据
 Sources/OmniPlayCore/Platform/   宿主注入的钩子（密钥、数据目录等）
+Sources/CSQLite/             SQLite 官方合并源（两个平台跑同一个版本）
 Sources/OmniPlayBridge/      @_cdecl 导出，六个 C 函数
-Tests/OmniPlayCoreTests/     契约与规则锁，35 项
+Tests/OmniPlayCoreTests/     契约与规则锁，46 项
 spike-db/                    GRDB on Windows 的独立探针（它红了不牵连核心包）
 scripts/host_smoke.py        用 ctypes 假扮 WPF，走一遍跨语言边界
 windows/OmniPlay.Wpf/        WPF 演示窗：主题、播放子 HWND、Popup 控制条
@@ -32,7 +34,7 @@ docs/SPIKE.md                验收清单与已知风险
 
 ```bash
 swift build                      # 核心库
-swift test                       # 35 项契约与规则测试
+swift test                       # 46 项契约与规则测试
 python3 scripts/host_smoke.py    # 跨语言边界冒烟
 cd spike-db && swift run db-spike
 ```
@@ -64,6 +66,9 @@ pwsh windows/build.ps1 -Release
 ## 边界规则
 
 - 只传 JSON，不传 Swift 对象；请求 `{method, params}`，响应 `{ok, result|error}`。
+- 片库方法：`library.sections`（首页四个分组）、`library.section`、`library.stats`、
+  `library.categories`、`library.mark`、`library.progress`、`library.seed`。
+  库文件在 `<数据目录>/library.db`，Windows 下就是 `%APPDATA%\OmniPlay\library.db`。
 - 错误信息是给人看的一句话，界面直接显示，不做本地化映射。
 - 响应缓冲由核心分配，宿主必须用 `omniplay_free_bytes` 归还。
 - 事件由核心推送（`omniplay_set_event_callback`），界面不轮询；耗时动作先回「已受理」。

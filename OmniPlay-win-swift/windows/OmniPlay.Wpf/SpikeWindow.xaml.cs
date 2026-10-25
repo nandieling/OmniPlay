@@ -17,7 +17,6 @@ public partial class SpikeWindow : Window
     private readonly VideoHost _video = new();
     private readonly DispatcherTimer _poll = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private readonly List<(string Id, Color Accent, Button Chip)> _themeChips = new();
-    private readonly List<Border> _posterCards = new();
 
     private StackPanel? _topContent;
     private StackPanel? _centerContent;
@@ -27,7 +26,8 @@ public partial class SpikeWindow : Window
     private GlassPlate? _topPlate;
     private GlassPlate? _centerPlate;
     private GlassPlate? _logPlate;
-    private WrapPanel? _posters;
+    private HomeBoard _home = null!;
+    private TextBlock? _selectionText;
     private TextBlock? _titleBlock;
     private TextBlock? _progressText;
     private TextBlock? _statusText;
@@ -65,7 +65,7 @@ public partial class SpikeWindow : Window
             Log($"核心 {_core.Version}，平台 {version["platform"]?.GetValue<string>()}");
 
             BuildTopContent();
-            BuildPosterBoard();
+            BuildHome();
             BuildCenterContent();
             BuildLogContent();
             VideoArea.Children.Add(_video);
@@ -115,24 +115,33 @@ public partial class SpikeWindow : Window
         _topContent.Children.Add(play);
     }
 
-    /// 海报墙占位：给玻璃板提供真正的采样内容，换主题时玻璃里的颜色跟着走。
-    private void BuildPosterBoard()
+    /// 真片库：分组与排序都由核心的 library.sections 给，这块只是把它画出来。
+    /// 海报墙同时是玻璃板的采样源，滚到哪儿玻璃里的颜色就跟到哪儿。
+    private void BuildHome()
     {
-        var board = new WrapPanel { Margin = new Thickness(24, 20, 24, 20), ItemWidth = 148, ItemHeight = 214 };
-        for (var i = 0; i < 12; i++)
+        _home = new HomeBoard(_core);
+        _home.StatusChanged += Log;
+        _home.SelectionChanged += card =>
         {
-            var card = new Border
-            {
-                Width = 132,
-                Height = 198,
-                Margin = new Thickness(6),
-                CornerRadius = new CornerRadius(9),
-            };
-            _posterCards.Add(card);
-            board.Children.Add(card);
+            if (_selectionText is not null)
+                _selectionText.Text = card is null ? "没选片子" : $"选中：{card.Title}";
+        };
+        _home.Refresh();
+        VideoArea.Children.Add(_home);
+    }
+
+    /// 标记已看 / 未看：写完让核心重读一遍，界面不自己猜结果
+    private void Mark(bool watched)
+    {
+        var card = _home.Selected;
+        if (card is null)
+        {
+            Log("先点一张海报再标记");
+            return;
         }
-        _posters = board;
-        VideoArea.Children.Add(board);
+        _core.Invoke("library.mark", new JsonObject { ["fileId"] = card.FileId, ["watched"] = watched });
+        Log($"library.mark → 文件 {card.FileId} {(watched ? "已看" : "未看")}");
+        _home.Refresh();
     }
 
     private void BuildCenterContent()
@@ -146,10 +155,20 @@ public partial class SpikeWindow : Window
             Margin = new Thickness(14, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center,
         };
+        var watched = new Button { Content = "已看", Style = (Style)Resources["Pill"] };
+        watched.Click += (_, _) => Mark(true);
+        var unwatched = new Button { Content = "未看", Style = (Style)Resources["Pill"] };
+        unwatched.Click += (_, _) => Mark(false);
+        _selectionText = new TextBlock
+        {
+            Text = "没选片子",
+            Margin = new Thickness(14, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
         panel.Children.Add(play);
-        panel.Children.Add(new Button { Content = "已看", Style = (Style)Resources["Pill"] });
-        panel.Children.Add(new Button { Content = "未看", Style = (Style)Resources["Pill"] });
-        panel.Children.Add(_progressText);
+        panel.Children.Add(watched);
+        panel.Children.Add(unwatched);
+        panel.Children.Add(_selectionText);
         _centerContent = panel;
     }
 
@@ -214,10 +233,12 @@ public partial class SpikeWindow : Window
         Put("ChipBorderBrush", glass?.Border ?? ThemeSpec.Fade(spec.TextPrimary, 0.14));
 
         _topPlate?.Apply(spec, Backdrop);
-        _centerPlate?.Apply(spec, _posters);
+        _centerPlate?.Apply(spec, _home);
         _logPlate?.Apply(spec, Backdrop);
 
+        _home.Apply(spec);
         if (_titleBlock is not null) _titleBlock.Foreground = new SolidColorBrush(spec.TextPrimary);
+        if (_selectionText is not null) _selectionText.Foreground = new SolidColorBrush(spec.TextPrimary);
         if (_progressText is not null) _progressText.Foreground = new SolidColorBrush(spec.TextPrimary);
         if (_statusText is not null) _statusText.Foreground = new SolidColorBrush(spec.TextSecondary);
         if (_logText is not null) _logText.Foreground = new SolidColorBrush(spec.TextSecondary);
@@ -226,7 +247,6 @@ public partial class SpikeWindow : Window
             chip.Background = new SolidColorBrush(id == _colorId ? accent : ThemeSpec.Fade(accent, 0.4));
             chip.Foreground = new SolidColorBrush(ContrastOn(accent));
         }
-        RecolorPosters(spec);
         Log($"主题：{spec.DisplayName} / {(spec.IsGlass ? "液态玻璃（自绘）" : "经典")}");
     }
 
@@ -242,7 +262,7 @@ public partial class SpikeWindow : Window
         }
         if (_centerPlate is null && _centerContent is not null)
         {
-            _centerPlate = new GlassPlate(spec, _centerContent, _posters)
+            _centerPlate = new GlassPlate(spec, _centerContent, _home)
             {
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Bottom,
@@ -254,22 +274,6 @@ public partial class SpikeWindow : Window
         {
             _logPlate = new GlassPlate(spec, _logContent, Backdrop) { Margin = new Thickness(14, 10, 14, 14) };
             LogHost.Children.Add(_logPlate);
-        }
-    }
-
-    private void RecolorPosters(ThemeSpec spec)
-    {
-        for (var i = 0; i < _posterCards.Count; i++)
-        {
-            var top = ThemeSpec.Fade(spec.Accent, 0.22 + (i % 5) * 0.13);
-            var bottom = ThemeSpec.Fade(spec.TextPrimary, 0.30 + (i % 3) * 0.16);
-            _posterCards[i].Background = new LinearGradientBrush
-            {
-                MappingMode = BrushMappingMode.RelativeToBoundingBox,
-                StartPoint = new Point(0, 0),
-                EndPoint = new Point(1, 1),
-                GradientStops = new GradientStopCollection { new GradientStop(top, 0), new GradientStop(bottom, 1) },
-            };
         }
     }
 
@@ -297,7 +301,7 @@ public partial class SpikeWindow : Window
 
         // 画面进来后，海报与中间那条玻璃会被子 HWND 盖住（airspace），
         // 控制条改由 Popup 承担：这正是这个演示要验的东西。
-        if (_posters is not null) _posters.Visibility = Visibility.Collapsed;
+        _home.Visibility = Visibility.Collapsed;
         if (_centerPlate is not null) _centerPlate.Visibility = Visibility.Collapsed;
         BuildPopupBar();
     }

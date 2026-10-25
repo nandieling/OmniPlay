@@ -74,6 +74,37 @@ public sealed class ThemeSpec
 
     public Color TextOn(Color background) => Luminance(background) > 150 ? Colors.Black : Colors.White;
 
+    /// 两色线性插值。海报占位色要「跟着主题走又每张不同」，靠的就是这个混合。
+    public static Color Mix(Color from, Color to, double weight)
+    {
+        var t = Math.Clamp(weight, 0, 1);
+        return Color.FromArgb(
+            (byte)Math.Round(from.A + (to.A - from.A) * t),
+            (byte)Math.Round(from.R + (to.R - from.R) * t),
+            (byte)Math.Round(from.G + (to.G - from.G) * t),
+            (byte)Math.Round(from.B + (to.B - from.B) * t));
+    }
+
+    /// 色相环取色（0–1）。核心给每张片子算了一个稳定的 hue，界面只负责把它画出来。
+    public static Color FromHsv(double hue, double saturation, double brightness)
+    {
+        var h = (hue - Math.Floor(hue)) * 6;
+        var sector = (int)Math.Floor(h);
+        var f = h - sector;
+        var value = (byte)Math.Round(Math.Clamp(brightness, 0, 1) * 255);
+        var dim = (byte)Math.Round(brightness * (1 - Math.Clamp(saturation, 0, 1)) * 255);
+        var edge = (byte)Math.Round(brightness * (1 - Math.Clamp(saturation, 0, 1) * (sector % 2 == 0 ? f : 1 - f)) * 255);
+        return sector switch
+        {
+            0 => Color.FromRgb(value, edge, dim),
+            1 => Color.FromRgb(edge, value, dim),
+            2 => Color.FromRgb(dim, value, edge),
+            3 => Color.FromRgb(dim, edge, value),
+            4 => Color.FromRgb(edge, dim, value),
+            _ => Color.FromRgb(value, dim, edge),
+        };
+    }
+
     private static GlassSpec? ReadGlass(JsonNode? node)
     {
         if (node is not JsonObject glass) return null;

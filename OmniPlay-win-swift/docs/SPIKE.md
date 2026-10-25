@@ -145,6 +145,23 @@ Windows 上若只有这条红，说明 ICU 排序与 mac 的 `localizedStandardC
 但 `macos-14` CI 镜像上同样这三条红了。所以不守恒的变量不是「mac 还是 Windows」，
 而是 macOS/Xcode 版本。正式实现里排序权重要在核心内部定死，别交给平台 collation。
 
+## 3c. 首页接上真片库（2026-10-25）
+
+- 库这一层落成 `Sources/OmniPlayCore/Database/`：SQLite 官方合并源 + 一层薄封装 + 表结构。
+  GRDB 在 Windows 编不过（§1），而两边必须跑同一个 SQLite，所以自己包；表名列名照 mac 版抄，
+  以后互导库不用翻译。
+- 桥上新增 `library.*` 七个方法。核心在第一次收到 `library.*` 时才开库：`version`、
+  `player.*` 这些调用不该顺手在磁盘上建文件，ABI 探针与契约测试也因此完全不碰数据库。
+  空库首次读会铺 12 部演示片（`DemoSeed`），界面刚装完就有海报可画。
+- 观看进度写 `mediaMark` 用 upsert：光记进度不能把用户标好的架子冲掉，反过来标记
+  也不该把已存下的百分比清空。
+- WPF 侧 `HomeBoard` 只画不判：分组、片名排序、已看未看全来自 `library.sections`。
+  海报占位色 = 核心按片名算的色相与主题色混合，换配色整面墙跟着变。
+
+已知缺口：真实海报图、媒体源扫描、详情页与播放页跳转都还没接；`library.categories` 已能被
+分类页直接调用，但界面还没用上它。
+
+
 ## 4. 已知风险
 
 - `libmpv-2.dll`（shinchiro mpv-dev）在 CI 的 Windows Server 2022 镜像上 `LoadLibraryW`

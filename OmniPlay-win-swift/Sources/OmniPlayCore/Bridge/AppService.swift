@@ -11,9 +11,18 @@ public final class OmniPlayService {
             "version", "echo", "error.demo",
             "theme.list", "theme.get",
             "home.sort", "category.groups",
+            "library.stats", "library.sections", "library.section", "library.categories",
+            "library.mark", "library.progress", "library.seed",
             "events.poll", "events.push",
             "player.status", "player.start", "player.load", "player.pause", "player.stop",
         ]
+    }
+
+    /// 闭包里想直接给用户看的一句话错误时用这个（区别于系统抛出的底层异常）
+    public struct BridgeFailure: Error, CustomStringConvertible {
+        public let message: String
+        public init(_ message: String) { self.message = message }
+        public var description: String { message }
     }
 
     public struct Event {
@@ -35,10 +44,41 @@ public final class OmniPlayService {
     /// 由宿主在 player.start 里传进来。
     public let player: PlayerCore
 
+    /// 片库。第一次有 library.* 请求时才开库：version、player.* 这些调用不该
+    /// 顺手在磁盘上建文件，测试和 ABI 探针也因此能完全不碰数据库。
+    private var store: LibraryStore?
+
     public init(hooks: PlatformHooks = PlatformHooks(), player: PlayerCore = PlayerCore()) {
         self.hooks = hooks
         self.player = player
     }
+
+    /// 库文件位置。宿主想换目录就注入自己的 dataDirectory 钩子。
+    public var libraryFileURL: URL { hooks.dataDirectory().appendingPathComponent("library.db") }
+
+    private func library() throws -> LibraryStore {
+        if let store { return store }
+        let opened = try LibraryStore(database: SQLiteDatabase(fileURL: libraryFileURL))
+        store = opened
+        return opened
+    }
+
+    /// library.* 的统一出口：开库、空库铺演示数据、异常翻成给人看的一句话。
+    private func libraryCall(seeded: Bool = true, _ body: (LibraryStore) throws -> JSONValue) -> Data {
+        do {
+            let store = try library()
+            if seeded, try store.stats().movies == 0 {
+                let inserted = try DemoSeed.run(in: store)
+                push(topic: "library.changed", payload: .object(["seeded": .int(inserted)]))
+            }
+            return Self.ok(try body(store))
+        } catch let failure as BridgeFailure {
+            return Self.error(failure.message)
+        } catch {
+            return Self.error("片库操作失败：\(error)")
+        }
+    }
+
 
     // MARK: - 事件
 
@@ -118,19 +158,53 @@ public final class OmniPlayService {
         case "category.groups":
             guard let items = Self.items(params["items"]) else { return Self.error("items 不是一组影视记录") }
             let mode = CategoryMode(rawValue: params["mode"]?.stringValue ?? "none") ?? .none
-            let groups = buildCategoryGroups(items: items, mode: mode,
-                                             ascending: params["ascending"]?.boolValue ?? true)
-            return Self.ok(.object([
-                "groups": .array(groups.map {
-                    .object([
-                        "id": .string($0.id),
-                        "kind": .string($0.kind),
-                        "name": .string($0.name),
-                        "count": .int($0.itemIDs.count),
-                        "itemIds": .array($0.itemIDs.map { JSONValue.int64($0) }),
-                    ])
-                })
-            ]))
+            return Self.ok(Self.groupsJSON(buildCategoryGroups(items: items, mode: mode,
+                                                              ascending: params["ascending"]?.boolValue ?? true)))
+        case "library.stats":
+            return libraryCall { try Self.statsJSON($0.stats()) }
+        case "library.sections":
+            return libraryCall { store in
+                .object(["sections": .array(try store.sections().map(Self.sectionJSON)),
+                         "stats": Self.statsJSON(try store.stats())])
+            }
+        case "library.section":
+            guard let id = params["id"]?.stringValue else { return Self.error("缺少分组 id") }
+            return libraryCall { store in
+                guard let section = try store.section(id: id) else {
+                    throw BridgeFailure("没有这个分组：\(id)")
+                }
+                return .object(["section": Self.sectionJSON(section)])
+            }
+        case "library.categories":
+            let mode = CategoryMode(rawValue: params["mode"]?.stringValue ?? "director") ?? .director
+            return libraryCall { store in
+                Self.groupsJSON(try categoryGroups(store: store, mode: mode,
+                                                  ascending: params["ascending"]?.boolValue ?? true))
+            }
+        case "library.mark":
+            guard let fileID = params["fileId"]?.int64Value else { return Self.error("缺少影视文件 id") }
+            let watched = params["watched"]?.boolValue ?? true
+            return libraryCall { store in
+                try store.setWatched(videoFileID: fileID, watched)
+                push(topic: "library.changed",
+                     payload: .object(["fileId": .int64(fileID), "watched": .bool(watched)]))
+                return .object(["fileId": .int64(fileID), "watched": .bool(watched)])
+            }
+        case "library.progress":
+            guard let fileID = params["fileId"]?.int64Value else { return Self.error("缺少影视文件 id") }
+            let position = params["position"]?.doubleValue ?? 0
+            let duration = params["duration"]?.doubleValue ?? 0
+            return libraryCall { store in
+                try store.recordProgress(videoFileID: fileID, position: position, duration: duration)
+                let percent = duration > 0 ? min(100, max(0, Int((position / duration * 100).rounded()))) : 0
+                return .object(["fileId": .int64(fileID), "percent": .int(percent)])
+            }
+        case "library.seed":
+            return libraryCall(seeded: false) { store in
+                let before = try store.stats().movies
+                if before == 0 { try DemoSeed.run(in: store) }
+                return .object(["movies": .int(try store.stats().movies), "seeded": .bool(before == 0)])
+            }
         case "events.poll":
             let since = params["since"]?.intValue ?? 0
             let (head, list) = eventsSince(since)
@@ -199,6 +273,66 @@ public final class OmniPlayService {
             ))
         }
         return items
+    }
+
+    /// 分类页：库里的影视直接建桶，排序沿用 HomeSort
+    private func categoryGroups(store: LibraryStore, mode: CategoryMode,
+                                ascending: Bool) throws -> [CategoryGroup] {
+        let items = try store.movies().map {
+            LibraryMovie(id: $0.id, title: $0.title,
+                         releaseDate: $0.year.map { String(format: "%04d-01-01", $0) },
+                         voteAverage: nil, directors: $0.directors, casts: $0.casts)
+        }
+        return buildCategoryGroups(items: items, mode: mode, ascending: ascending)
+    }
+
+    static func groupsJSON(_ groups: [CategoryGroup]) -> JSONValue {
+        .object([
+            "groups": .array(groups.map {
+                .object([
+                    "id": .string($0.id),
+                    "kind": .string($0.kind),
+                    "name": .string($0.name),
+                    "count": .int($0.itemIDs.count),
+                    "itemIds": .array($0.itemIDs.map { JSONValue.int64($0) }),
+                ])
+            })
+        ])
+    }
+
+    static func statsJSON(_ stats: LibraryStore.Stats) -> JSONValue {
+        .object([
+            "movies": .int(stats.movies), "files": .int(stats.files),
+            "watched": .int(stats.watched), "resumable": .int(stats.resumable),
+        ])
+    }
+
+    static func sectionJSON(_ section: LibraryStore.Section) -> JSONValue {
+        .object([
+            "id": .string(section.id),
+            "title": .string(section.title),
+            "count": .int(section.entries.count),
+            "entries": .array(section.entries.map(Self.entryJSON)),
+        ])
+    }
+
+    /// 海报墙的一条。hue 是占位色相，海报接上之后界面自己忽略它。
+    static func entryJSON(_ entry: LibraryStore.Entry) -> JSONValue {
+        .object([
+            "fileId": .int64(entry.videoFileID),
+            "movieId": .int64(entry.movie.id),
+            "title": .string(entry.movie.title),
+            "year": entry.movie.year.map { JSONValue.int($0) } ?? .null,
+            "path": .string(entry.path),
+            "duration": .number(entry.duration),
+            "position": .number(entry.position),
+            "percent": .int(entry.progressPercent),
+            "watched": .bool(entry.watched),
+            "hue": .number((entry.tintHue * 1000).rounded() / 1000),
+            "genres": .array(entry.movie.genres.map { JSONValue.string($0) }),
+            "directors": .array(entry.movie.directors.map { JSONValue.string($0) }),
+            "casts": .array(entry.movie.casts.map { JSONValue.string($0) }),
+        ])
     }
 
     public static func statusJSON(_ status: PlayerStatus) -> JSONValue {
