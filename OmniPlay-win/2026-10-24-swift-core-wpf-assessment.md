@@ -117,3 +117,16 @@
 
 骨架、探针与打包流程见 `../OmniPlay-win-swift/README.md` 与 `../OmniPlay-win-swift/docs/SPIKE.md`。
 
+## 12. 开工后的三个结论（2026-10-25）
+
+1. **持久化落定：不用 GRDB。** Windows 上 GRDB 的 `GRDBSQLite` 目标找不到 `sqlite3.h`，
+   而两个平台必须跑同一个 SQLite 版本，于是核心包自带官方合并源 + 一层薄封装
+   （`../OmniPlay-win-swift/Sources/CSQLite`）。表名与列名照 mac 版抄，互导库不用做字段翻译。
+   §7 里 Phase 0「DB 收进 `LibraryStore`」这一项因此已经在 Windows 侧先行落地。
+2. **两个 spike 都绿。** mpv 宿主那条除了「WebDAV 自签证书」还没接，本地文件、`Popup`
+   控制条、命中与 DPI 都过了；安装包在 CI 里以干净 PATH 起界面当冒烟，闪退已经收敛到
+   `startup.log` 一句话。
+3. **排期改用步骤表，不再按周估。** 每步都要能装出来看一眼再进下一步，进度与验收看
+   `../OmniPlay-win-swift/docs/DEVELOPMENT_PLAN.md` 第 5 节；那份文档是当前状态的唯一口径，
+   本文只留决策，不再更新进度。
+
