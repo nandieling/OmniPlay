@@ -66,6 +66,32 @@ public static class NativePreflight
     [DllImport("kernel32.dll")]
     private static extern uint SetErrorMode(uint mode);
 
+    [DllImport("dbghelp.dll", SetLastError = true)]
+    private static extern bool MiniDumpWriteDump(IntPtr process, uint processId, IntPtr file,
+        uint dumpType, IntPtr exceptionParam, IntPtr userStreamParam, IntPtr callbackParam);
+
+    /// 卡住时把现场存下来：MiniDumpWriteDump 会挂起所有线程再写，界面线程正停在哪个
+    /// 模块哪个偏移一目了然（结合 omniplay-core.map / 系统模块名就能判）。
+    /// 返回 null = 连 dmp 都没写出来，这本身就是线索：大概卡在加载器锁或内核调用里。
+    public static string? WriteHangDump(string phase)
+    {
+        try
+        {
+            var name = $"hang-{DateTime.Now:HHmmss}-{phase.Length}格.dmp";
+            var path = Path.Combine(Path.GetDirectoryName(StartupLog.FilePath)!, name);
+            using var file = new FileStream(path, FileMode.Create);
+            const uint withThreadInfo = 0x0000_0200;
+            const uint ignoreInaccessible = 0x0000_4000;
+            const uint withModuleHeaders = 0x0001_0000;
+            var ok = MiniDumpWriteDump(GetCurrentProcess(), (uint)Environment.ProcessId,
+                file.SafeFileHandle.DangerousGetHandle(),
+                withThreadInfo | ignoreInaccessible | withModuleHeaders,
+                IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            return ok ? path : null;
+        }
+        catch (Exception) { return null; }
+    }
+
     /// 别再让系统在出事的正上方摆一个「已停止工作」对话框：它会把进程吊在那儿
     /// 等用户点，冒烟因此「90 秒不退出」，用户那边则是点了才没影。原因我们自己
     /// 已经写进日志了，弹窗与 WER 采集都关掉。
@@ -76,6 +102,9 @@ public static class NativePreflight
     {
         const uint semNoGpFaultErrorBox = 0x0002;    // 「已停止工作」对话框
         SetErrorMode(semNoGpFaultErrorBox);
+        // 提前把 dbghelp 拉起来：卡住之后再写 dmp 还要现 LoadLibrary，万一卡点正抱着
+        // 加载器锁，那连现场都存不下来
+        LoadLibraryExW("dbghelp.dll", IntPtr.Zero, 0x0000_0001 | 0x0000_0800);
         try
         {
             var exe = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? "OmniPlaySpike");

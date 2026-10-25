@@ -21,11 +21,20 @@ public partial class App : Application
     /// 「WPF 行不行」切开——日志最后那行探针结论就是答案。
     public static bool Probe { get; private set; }
 
+    /// --min-wpf：只建一个裸窗口，没有 XAML、没有玻璃、没有海报墙。它出得来而主窗口
+    /// 起不来，问题在我们自己的内容；它也卡住，就是 WPF 初始化本身。
+    public static bool MinimalWpf { get; private set; }
+
+    /// --win32-probe：完全不碰 WPF，只用 user32 建个最普通的窗口。见 UiProbe。
+    public static bool Win32Probe { get; private set; }
+
     protected override void OnStartup(StartupEventArgs e)
     {
         StartupLog.Reset();
         _smoke = e.Args.Contains("--smoke");
         Probe = e.Args.Contains("--probe");
+        MinimalWpf = e.Args.Contains("--min-wpf");
+        Win32Probe = e.Args.Contains("--win32-probe");
         NoLibrary = e.Args.Contains("--no-library");
         StartupLog.Write($"启动：.NET {Environment.Version}，参数「{string.Join(" ", e.Args)}」");
 
@@ -102,16 +111,53 @@ public partial class App : Application
         if (Probe)
         {
             RunProbe();
+            StartupLog.MarkFinished("探针结束");
             StartupLog.Write("退出（探针）");
+            NativePreflight.HardExit(Failed ? 1 : 0);
+        }
+        if (Win32Probe)
+        {
+            UiProbe.Run(_smoke);
+            StartupLog.MarkFinished("Win32 探针结束");
+            StartupLog.Write("退出（Win32 探针）");
             NativePreflight.HardExit(Failed ? 1 : 0);
         }
 
         // 窗口由这里自己建（不用 StartupUri）：探针模式要能完全不碰 WPF 的建窗路径
-        StartupLog.Mark("建主窗口");
-        var window = new SpikeWindow();
-        MainWindow = window;
-        window.Show();
-        StartupLog.Write("主窗口已创建");
+        if (MinimalWpf)
+        {
+            StartupLog.Mark("建最小窗口");
+            StartupLog.ArmWatchdog();
+            var bare = new Window
+            {
+                Title = "觅影 · 最小窗口探针",
+                Width = 460,
+                Height = 180,
+                Content = new System.Windows.Controls.TextBlock
+                {
+                    Text = "看到这行字，说明 WPF 建窗与显示都正常",
+                    Margin = new Thickness(24),
+                    FontSize = 16,
+                },
+            };
+            bare.SourceInitialized += (_, _) => StartupLog.Mark("最小窗口：句柄已建好");
+            bare.ContentRendered += (_, _) =>
+            {
+                StartupLog.NoteRendered();
+                StartupLog.Mark("最小窗口：第一帧已画出");
+            };
+            bare.Show();
+            MainWindow = bare;
+            StartupLog.Write("最小窗口：Show 已返回");
+        }
+        else
+        {
+            StartupLog.Mark("建主窗口");
+            var window = new SpikeWindow();
+            MainWindow = window;
+            window.Show();
+            StartupLog.Write("主窗口已创建");
+        }
 
         if (_smoke)
         {
@@ -133,6 +179,7 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         if (Failed) e.ApplicationExitCode = 1;
+        StartupLog.MarkFinished("已退出");
         StartupLog.Write($"退出（{e.ApplicationExitCode}）");
         base.OnExit(e);
         NativePreflight.HardExit(e.ApplicationExitCode);

@@ -49,7 +49,7 @@ public partial class SpikeWindow : Window
     public SpikeWindow()
     {
         StartupLog.Mark("窗口开始构造");
-        ArmFirstFrameWatchdog();
+        StartupLog.ArmWatchdog();
         // 字体枚举是 WPF 首帧前最慢的一步，也是中文机器上常见的坑（一款坏字体能让
         // DirectWrite 转半天）。先在这儿自己走一遍：卡住的话断点就写在这行上。
         StartupLog.Mark("字体回源（DirectWrite 找微软雅黑）");
@@ -63,30 +63,10 @@ public partial class SpikeWindow : Window
         // 首帧这行是分隔线：日志停在这行之前 = 死在渲染，停在之后 = 死在读库
         ContentRendered += (_, _) =>
         {
-            _firstFrame = true;
+            StartupLog.NoteRendered();
             StartupLog.Mark("第一帧已画出");
         };
         SourceInitialized += (_, _) => StartupLog.Mark("窗口句柄已建好");
-    }
-
-    // 只有一个窗口，静态就够；看门狗在普通线程上读它
-    private static volatile bool _firstFrame;
-
-    /// 看门狗走普通线程而不是计时器：界面线程本身可能就是卡住的那个。报两次（8 秒、
-    /// 40 秒）——「卡一下」和「永远卡住」是两回事，日志里得能看出来。停在哪儿由
-    /// StartupLog.Phase 说，不用再猜。
-    private static void ArmFirstFrameWatchdog()
-    {
-        new Thread(() =>
-        {
-            foreach (var (seconds, wait) in new[] { (8, 8), (40, 32) })
-            {
-                Thread.Sleep(TimeSpan.FromSeconds(wait));
-                if (_firstFrame) return;
-                StartupLog.Write($"界面：{seconds} 秒没画出一帧——进程还活着，停在「{StartupLog.Phase}」");
-            }
-        })
-        { IsBackground = true }.Start();
     }
 
     private void PollTick()

@@ -52,19 +52,22 @@ public static class StartupLog
             if (File.Exists(FilePath))
             {
                 var previous = File.ReadAllText(FilePath);
+                try { if (File.Exists(PhasePath)) PreviousRunPhase = File.ReadAllText(PhasePath).Trim(); }
+                catch (Exception) { }
                 if (previous.Contains("退出（"))
                 {
                     deaths = 0;       // 上一趟正常收工，账清零
                 }
                 else
                 {
-                    // 「主窗口已创建」之后没等到首帧 = 卡在建窗与首帧渲染这一段。
-                    // 上一趟就是死在「界面搭建完成」之前，判定条件从那一刻起放宽。
-                    PreviousRunDiedBeforeFirstFrame =
-                        previous.Contains("主窗口已创建") && !previous.Contains("第一帧");
+                    PreviousRunNeverRendered = true;
                     PreviousRunDiedBeforeLibrary =
                         previous.Contains("第一帧") && !previous.Contains("片库：");
                     if (previous.Contains("片库：开始读取") && !previous.Contains("片库：读取完成")) deaths += 1;
+                    // 停在哪一格以 phase.txt 为准；没有它就退回看日志缺哪一行
+                    PreviousRunDiedBeforeFirstFrame = PreviousRunPhase.Length > 0
+                        ? !(PreviousRunPhase.Contains("第一帧") || PreviousRunPhase.Contains("已退出"))
+                        : !previous.Contains("第一帧");
                 }
             }
         }
@@ -90,14 +93,64 @@ public static class StartupLog
         }
     }
 
-    /// 走到哪一步了。看门狗会把这两个字打出来，日志因此自带断点，不用靠猜。
+    /// 走到哪一步了。看门狗会把它打出来，日志因此自带断点，不用靠猜。
+    /// 阶段另外单独落一份小文件：日志每趟重写、标记名又容易改，上一趟停在这儿这件事
+    /// 得有个不依赖日志文案的记法（上一版就是改了标记名把自愈判定给弄失效了）。
     public static string Phase { get; private set; } = "刚启动";
+
+    private static string PhasePath { get; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "OmniPlay", "phase.txt");
+
+    /// 上一趟停在哪个阶段。空字符串 = 不知道（首次运行或文件读不出来）。
+    public static string PreviousRunPhase { get; private set; } = "";
+
+    /// 上一趟是不是连一帧都没画出来。命中就别再硬撑显卡特效了。
+    public static bool PreviousRunNeverRendered { get; private set; }
 
     public static void Mark(string phase)
     {
         Phase = phase;
         Write("阶段：" + phase);
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(PhasePath)!);
+            File.WriteAllText(PhasePath, phase);
+        }
+        catch (Exception) { /* 记不上不影响这一趟 */ }
     }
+
+    /// 收尾时喊一声：下一趟据此判断「上一趟是正常结束的」，别乱降级。
+    public static void MarkFinished(string phase = "已退出") => Mark(phase);
+
+    /// 首帧前卡住的哨兵：8 秒、40 秒各报一次停在哪儿，并把现场存成 dmp。
+    /// 走普通线程而不是计时器——界面线程本身可能就是卡住的那个。
+    public static void ArmWatchdog()
+    {
+        new Thread(() =>
+        {
+            foreach (var (at, wait) in new[] { (8, 8), (40, 32) })
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(wait));
+                if (_rendered) return;
+                Write($"界面：{at} 秒没画出一帧——进程还活着，停在「{Phase}」");
+                if (!_dumped)
+                {
+                    _dumped = true;
+                    var path = NativePreflight.WriteHangDump(Phase);
+                    Write(path is null
+                        ? "现场没存下来（连写 dmp 都要等锁：多半卡在加载器锁或内核调用里）"
+                        : $"现场已存：{path}");
+                }
+            }
+        })
+        { IsBackground = true }.Start();
+    }
+
+    private static volatile bool _rendered;
+    private static volatile bool _dumped;
+
+    public static void NoteRendered() => _rendered = true;
 
     public static void Write(string line)
     {
