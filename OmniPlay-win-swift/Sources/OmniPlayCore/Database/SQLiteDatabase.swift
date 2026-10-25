@@ -92,13 +92,18 @@ public final class SQLiteDatabase {
             throw Failure.open(reason: reason)
         }
         handle = db
-        // WAL：界面读的时候不等着写入方撒手。AppData 被同步盘接管、或者目录不支持
-        // 共享映射的机器上 WAL 会开不起来，那就退回默认日志模式——功能一样，并发差一点。
-        do {
-            try exec("PRAGMA journal_mode=WAL")
-        } catch {
-            openNotes.append("WAL 开不起来（\(error)），已退回默认日志模式")
-            try? exec("PRAGMA journal_mode=DELETE")
+        // 默认就用回滚日志：单机单进程，WAL 换来的并发收益很小，却要引入 -shm 这个
+        // 内存映射文件——杀软、透明加密、同步盘这类文件系统过滤驱动最爱在映射文件上
+        // 把进程直接打没（不是报错，是直接没了）。要 WAL 拿 OMNIPLAY_WAL=1 打开。
+        if ProcessInfo.processInfo.environment["OMNIPLAY_WAL"] == "1" {
+            do {
+                try exec("PRAGMA journal_mode=WAL")
+            } catch {
+                openNotes.append("WAL 开不起来（\(error)），已退回默认日志模式")
+                try? exec("PRAGMA journal_mode=DELETE")
+            }
+        } else {
+            try exec("PRAGMA journal_mode=DELETE")
         }
         // 外键：删片时 videoFile 跟着走；这两条Pragma 不会失败，真失败了说明库已经不正常
         try exec("PRAGMA foreign_keys=ON")

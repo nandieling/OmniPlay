@@ -78,7 +78,7 @@ public partial class SpikeWindow : Window
             var version = _core.Invoke("version");
             Log($"核心 {_core.Version}，平台 {version["platform"]?.GetValue<string>()}");
             // 核心会往宿主注册的回调上推消息，库落到哪儿了这类事就靠它带话
-            _core.EventReceived += json => Dispatcher.BeginInvoke(new Action(() => LogEvent(json)));
+            _core.EventReceived += OnCoreEvent;
 
             BuildTopContent();
             StartupLog.Write("界面：顶栏完成");
@@ -208,7 +208,23 @@ public partial class SpikeWindow : Window
     /// 海报内容换了，采样的玻璃得跟着重算一次
     private void RefreshGlassSamples() => _centerPlate?.RefreshSample();
 
-    /// 核心推来的消息。只挑需要给人看的几条说，别把日志区刷成瀑布。
+    /// 核心推来的消息。阶段那条当场落盘：进程要是硬死了，日志里最后一条阶段就是断点。
+    private void OnCoreEvent(string json)
+    {
+        if (!json.Contains("\"library.stage\""))
+        {
+            Dispatcher.BeginInvoke(new Action(() => LogEvent(json)));
+            return;
+        }
+        try
+        {
+            var at = JsonNode.Parse(json)?["payload"]?["at"]?.GetValue<string>() ?? "?";
+            StartupLog.Write("片库：阶段 " + at);
+        }
+        catch (Exception) { /* 看不懂的消息直接丢 */ }
+    }
+
+    /// 只挑需要给人看的几条说，别把日志区刷成瀑布。
     private void LogEvent(string json)
     {
         try

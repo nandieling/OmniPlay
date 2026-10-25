@@ -167,6 +167,29 @@ error: could not build C module 'SwiftOverlayShims'   (LibcOverlayShims.h -> err
   `--soft-render`（或环境变量 `OMNIPLAY_SOFT_RENDER=1`）与 `--no-library`。
 - 采样区尺寸为 0 时不再挂高斯模糊：那是块非法渲染目标。
 
+### 第三刀：死在核心调用里，而且是无痕迹硬死
+
+第二轮的实机日志（软件渲染生效后）走到 `片库：开始读取` 就断：首帧画出来了，
+死在 `omniplay_invoke("library.sections")` 里面，仍然没有 `原生崩溃`，也没有
+`片库读取失败`（托管 catch 没接住）——说明是 `__fastfail` / 栈溢出这类连 unhandled
+filter 都不经过的死法。两个动作：
+
+- 核心自己报阶段：`开库 → 建表与建索引 → 查库统计 → 铺演示数据 → 读分组与排序`，
+  宿主在事件回调里**同步**落盘。日志最后一条阶段就是断点，不用再猜。
+- 默认不再开 WAL。单机单进程，WAL 换来的并发收益很小，却要引入 `-shm` 这个内存映射
+  文件——杀软、透明加密、同步盘这类文件系统过滤驱动最爱在映射文件上把进程直接打没。
+  改成回滚日志（`journal_mode=DELETE`），要 WAL 拿 `OMNIPLAY_WAL=1` 打开。
+- 崩溃兜底再加一层向量异常处理器（第一手）：只认非法指令（Swift fatalError 走这条）、
+  `__fastfail`、栈溢出、边界检查失败这几种码，报一次，带模块名。
+
+还抓不到的话，Windows 事件日志里那条 Application Error 直接给答案（异常码 + 出错模块）：
+
+```powershell
+Get-WinEvent -FilterHashtable @{LogName='Application'} -MaxEvents 40 |
+  Where-Object { $_.Message -match 'OmniPlaySpike' } |
+  Select-Object -First 3 TimeCreated, Message | Format-List
+```
+
 
 ## 3. 排序一致性
 

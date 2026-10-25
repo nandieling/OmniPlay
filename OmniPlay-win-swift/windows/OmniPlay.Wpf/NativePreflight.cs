@@ -63,6 +63,9 @@ public static class NativePreflight
     private static extern IntPtr SetUnhandledExceptionFilter(ExceptionFilter filter);
 
     [DllImport("kernel32.dll")]
+    private static extern IntPtr AddVectoredExceptionHandler(uint first, ExceptionFilter handler);
+
+    [DllImport("kernel32.dll")]
     private static extern nuint VirtualQuery(IntPtr address, out MemoryBasicInformation info, nuint length);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -77,9 +80,26 @@ public static class NativePreflight
     /// 那个地址属于哪个 DLL 写进启动日志，至少下次能少猜一轮。
     public static void InstallCrashReporter()
     {
-        try { SetUnhandledExceptionFilter(CrashFilter); }
+        try
+        {
+            SetUnhandledExceptionFilter(CrashFilter);
+            // 第一手也看一眼：__fastfail 与栈溢出会跳过 unhandled filter，
+            // 只有向量处理器还来得及留一行字。
+            AddVectoredExceptionHandler(1, CrashFilter);
+        }
         catch (Exception error) { StartupLog.Write("崩溃兜底没挂上：" + error.Message); }
     }
+
+    // 这几种是「进程直接没了」的形态；普通访问违例不报，不然托管层的空引用也会混进来
+    private static readonly int[] Notable =
+    {
+        unchecked((int)0xC000001D),   // 非法指令：Swift 的 fatalError 走这条
+        unchecked((int)0xC0000409),   // __fastfail：CRT 参数校验、栈护检测
+        unchecked((int)0xC00000FD),   // 栈溢出
+        unchecked((int)0xC000041D),   // 数组边界检查失败
+    };
+
+    private static int _noted;
 
     private static int OnNativeCrash(ref ExceptionPointers pointers)
     {
@@ -87,6 +107,7 @@ public static class NativePreflight
         {
             var record = pointers.ExceptionRecord;
             var code = Marshal.ReadInt32(record);
+            if (!Notable.Contains(code) || Interlocked.Exchange(ref _noted, 1) != 0) return ContinueSearch;
             var address = Marshal.ReadIntPtr(record, IntPtr.Size == 8 ? 16 : 12);
             StartupLog.Write($"原生崩溃：异常码 0x{code:X8}，地址 0x{address:X}，模块 {ModuleOf(address)}");
         }

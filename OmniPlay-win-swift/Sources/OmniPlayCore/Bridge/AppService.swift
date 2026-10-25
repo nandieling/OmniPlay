@@ -61,7 +61,9 @@ public final class OmniPlayService {
         var failures: [String] = []
         for candidate in libraryCandidates {
             do {
+                stage("开库 \(candidate.path)")
                 let database = try SQLiteDatabase(fileURL: candidate)
+                stage("建表与建索引")
                 let opened = try LibraryStore(database: database)
                 store = opened
                 if !failures.isEmpty || !database.openNotes.isEmpty {
@@ -87,14 +89,23 @@ public final class OmniPlayService {
          URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("OmniPlay/library.db")]
     }
 
+    /// 走到哪一步了。宿主要能把它同步落到日志里：进程要是硬死了，最后一条阶段
+    /// 就是断点位置，比事后猜便宜得多。
+    private func stage(_ text: String) {
+        push(topic: "library.stage", payload: .object(["at": .string(text)]))
+    }
+
     /// library.* 的统一出口：开库、空库铺演示数据、异常翻成给人看的一句话。
     private func libraryCall(seeded: Bool = true, _ body: (LibraryStore) throws -> JSONValue) -> Data {
         do {
             let store = try library()
+            stage("查库统计")
             if seeded, try store.stats().movies == 0 {
+                stage("铺演示数据")
                 let inserted = try DemoSeed.run(in: store)
                 push(topic: "library.changed", payload: .object(["seeded": .int(inserted)]))
             }
+            stage("读分组与排序")
             return Self.ok(try body(store))
         } catch let failure as BridgeFailure {
             return Self.error(failure.message)
