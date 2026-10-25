@@ -341,26 +341,40 @@ public static class NativePreflight
             : "运行时来源不对头：" + string.Join("；", strays));
     }
 
-    /// 界面上一个窗都没有，用户就会再点一次图标，于是又多一个卡住的进程，日志也被
-    /// 两趟写在一起。把这事儿写在日志里，看的人不用猜为什么有两行。
+    /// 界面上一个窗都没有，用户就会再点一次图标，于是又多一个卡住的进程：日志被几趟写在
+    /// 一起，桌面广播消息还得等这些不泵消息的窗口超时（WPF 的 SystemEvents 就靠广播消息，
+    /// 最容易被这种僵尸拖住）。所以开跑前先收掉——只收「同一个 exe、活了 20 秒以上、
+    /// 始终没建出窗口」的，正常看得见窗口的实例不受影响。
     private static void LogLiveInstances()
     {
         try
         {
             var own = Environment.ProcessId;
             var path = Environment.ProcessPath ?? "";
-            var others = Process.GetProcessesByName(Process.GetCurrentProcess().ProcessName)
-                .Where(other => other.Id != own)
-                .Where(other =>
+            var reaped = new List<string>();
+            foreach (var other in Process.GetProcessesByName(Process.GetCurrentProcess().ProcessName))
+            {
+                using (other)
                 {
-                    try { return string.Equals(other.MainModule?.FileName, path, StringComparison.OrdinalIgnoreCase); }
-                    catch (Exception) { return true; }    // 读不到模块路径的也算上，宁可多报
-                })
-                .Select(other => other.Id)
-                .ToList();
-            if (others.Count > 0)
-                StartupLog.Write($"同一个程序还有 {others.Count} 个实例在跑（PID {string.Join("、", others)}）：" +
-                                 "它们大概也没画出窗口，任务管理器里收掉");
+                    if (other.Id == own) continue;
+                    try
+                    {
+                        if (!string.Equals(other.MainModule?.FileName, path, StringComparison.OrdinalIgnoreCase)) continue;
+                    }
+                    catch (Exception) { continue; }       // 路径读不准就当不是自己人
+                    if (other.MainWindowHandle != IntPtr.Zero) continue;
+                    if (DateTime.Now - other.StartTime < TimeSpan.FromSeconds(20)) continue;
+                    try
+                    {
+                        other.Kill();
+                        other.WaitForExit(2000);
+                        reaped.Add(other.Id.ToString());
+                    }
+                    catch (Exception) { }
+                }
+            }
+            if (reaped.Count > 0)
+                StartupLog.Write($"收掉了 {reaped.Count} 个没窗口的旧实例（PID {string.Join("、", reaped)}）");
         }
         catch (Exception) { /* 这一行少了不影响判断 */ }
     }
