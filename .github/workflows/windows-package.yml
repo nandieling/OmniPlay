@@ -64,6 +64,7 @@ jobs:
 
       - name: 产物清单
         run: Get-ChildItem artifacts | Format-Table Name, Length
+        working-directory: OmniPlay-win-swift
 
       - uses: actions/upload-artifact@v4
         with:
