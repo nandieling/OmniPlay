@@ -75,6 +75,15 @@ jobs:
             OmniPlay-win-swift/artifacts/*.sha256
           if-no-files-found: error
 
+      # 链接器符号表单独一份：日志里只有「omniplay-core.dll+0x…」这种偏移，
+      # 拿它一查就是函数名。没生成也不拦出包，少个诊断料而已。
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-${{ steps.ver.outputs.version }}-symbols
+          path: OmniPlay-win-swift/artifacts/*.map
+          if-no-files-found: ignore
+
       - name: 发 GitHub Release
         if: startsWith(github.ref, 'refs/tags/win-v')
         uses: softprops/action-gh-release@v2

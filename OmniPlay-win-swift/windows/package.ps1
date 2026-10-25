@@ -38,6 +38,9 @@ try {
 
 $core = Find-CoreLibrary -BuildDir (Join-Path $root '.build') -Configuration $Configuration
 Copy-Item $core (Join-Path $artifacts 'omniplay-core.dll') -Force
+# /MAP 出的符号表（和 DLL 同名换后缀）。用户机器上只能报回一个偏移，有这张表才查得出是谁
+$map = [IO.Path]::ChangeExtension($core, 'map')
+if (Test-Path $map) { Copy-Item $map (Join-Path $artifacts 'omniplay-core.map') -Force }
 $libmpv = Ensure-LibMpv -TargetDir (Join-Path $PSScriptRoot 'native')
 if ($libmpv) {
     Copy-Item $libmpv (Join-Path $artifacts 'libmpv-2.dll') -Force
@@ -104,18 +107,34 @@ Remove-Item $appLog, $appLogFallback -Force -ErrorAction SilentlyContinue
 $psi = New-Object System.Diagnostics.ProcessStartInfo((Join-Path $publish 'OmniPlaySpike.exe'), '--smoke')
 $psi.UseShellExecute = $false
 $psi.WorkingDirectory = $publish
+$psi.RedirectStandardError = $true
+$psi.RedirectStandardOutput = $true
 $psi.EnvironmentVariables['PATH'] = "$env:SystemRoot\System32;$env:SystemRoot"
 $app = [System.Diagnostics.Process]::Start($psi)
+# 异步读干净两条流：Fatal error / Internal CLR error 这类是直接打到 stderr 的，
+# 光看启动日志看不见（日志停在哪儿只能说明断点，说明不了死因）
+$errTask = $app.StandardError.ReadToEndAsync()
+$outTask = $app.StandardOutput.ReadToEndAsync()
 if (-not $app.WaitForExit(90000)) { $app.Kill(); throw '界面冒烟 90 秒没退出' }
+$stderr = $errTask.Result; $stdout = $outTask.Result
 $smokeCode = $app.ExitCode
+foreach ($line in ($stderr + "`n" + $stdout) -split "`r?`n") { if ($line) { Write-Host "  ! $line" } }
 $logHit = @($appLog, $appLogFallback) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($logHit) {
     Get-Content $logHit | ForEach-Object { Write-Host "  | $_" }
-    if ((Get-Content -Raw $logHit) -match '核心装载失败|界面搭建失败|本机自检有缺口|片库读取失败|原生崩溃') {
+    $raw = Get-Content -Raw $logHit
+    if ($raw -match '核心装载失败|界面搭建失败|本机自检有缺口|片库读取失败|原生崩溃') {
         throw '界面冒烟抓到装载问题，见上面的日志'
+    }
+    # 界面立起来了却没写下收尾那行 = 中途被硬带走，这种包发出去就是「点开闪退」
+    if ($raw -match '界面搭建完成' -and $raw -notmatch '退出（') {
+        throw '界面冒烟中途进程就没了：日志停在上面最后一行'
     }
 } else {
     Write-Warning '界面冒烟没留下启动日志：这台机器大概开不了窗口'
+}
+if ($stderr -match 'Fatal error|Internal CLR error|Unhandled exception') {
+    throw '界面冒烟抓到致命错误（stderr），见上面的输出'
 }
 if ($smokeCode -ne 0) { Write-Warning "界面冒烟退出码 $smokeCode（构建机开不了窗时属预期）" }
 

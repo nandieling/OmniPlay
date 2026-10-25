@@ -196,6 +196,7 @@ public partial class SpikeWindow : Window
         {
             StartupLog.Write("片库：开始读取");
             _home.Refresh();
+            StartupLog.Write("片库：读取完成");   // 日志里的这一行是「库这层走完了」的凭据
         }
         catch (Exception error)
         {

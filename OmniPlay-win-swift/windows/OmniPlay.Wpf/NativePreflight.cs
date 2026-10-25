@@ -28,6 +28,38 @@ public static class NativePreflight
     private static extern IntPtr GetCurrentProcess();
 
     [DllImport("kernel32.dll")]
+    private static extern int GetCurrentProcessId();
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    private const uint SnapshotModule = 0x0000_0008;
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool Module32First(IntPtr snapshot, ref ModuleEntry32 entry);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool Module32Next(IntPtr snapshot, ref ModuleEntry32 entry);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ModuleEntry32
+    {
+        public int Size;
+        public int ModuleID;
+        public int ProcessID;
+        public int GlobalUsage;
+        public int ProcessUsage;
+        public IntPtr ModuleBase;
+        public int ModuleSize;
+        public IntPtr Module;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string ModuleName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string ExePath;
+    }
+
+    [DllImport("kernel32.dll")]
     private static extern bool TerminateProcess(IntPtr process, uint exitCode);
 
     /// 装载失败或依赖有缺口时抛这个，界面能直接把原因显示出来。
@@ -90,9 +122,11 @@ public static class NativePreflight
         catch (Exception error) { StartupLog.Write("崩溃兜底没挂上：" + error.Message); }
     }
 
-    // 这几种是「进程直接没了」的形态；普通访问违例不报，不然托管层的空引用也会混进来
+    // 这几种是「进程直接没了」的形态。访问违例也算：Swift 的内联 incref 就是一条
+    // lock xadd，指针是空的就直接炸，托管层一行都看不见，必须在这一层留字。
     private static readonly int[] Notable =
     {
+        unchecked((int)0xC0000005),   // 访问违例
         unchecked((int)0xC000001D),   // 非法指令：Swift 的 fatalError 走这条
         unchecked((int)0xC0000409),   // __fastfail：CRT 参数校验、栈护检测
         unchecked((int)0xC00000FD),   // 栈溢出
@@ -100,6 +134,7 @@ public static class NativePreflight
     };
 
     private static int _noted;
+    private static readonly HashSet<string> Noted = new();
 
     private static int OnNativeCrash(ref ExceptionPointers pointers)
     {
@@ -107,9 +142,21 @@ public static class NativePreflight
         {
             var record = pointers.ExceptionRecord;
             var code = Marshal.ReadInt32(record);
-            if (!Notable.Contains(code) || Interlocked.Exchange(ref _noted, 1) != 0) return ContinueSearch;
-            var address = Marshal.ReadIntPtr(record, IntPtr.Size == 8 ? 16 : 12);
-            StartupLog.Write($"原生崩溃：异常码 0x{code:X8}，地址 0x{address:X}，模块 {ModuleOf(address)}");
+            if (!Notable.Contains(code)) return ContinueSearch;
+            var address = Marshal.ReadIntPtr(record, 16);
+            var line = $"原生崩溃：异常码 0x{code:X8}，指令 {WhereIs(address)}";
+            if (code == unchecked((int)0xC0000005))
+            {
+                // EXCEPTION_RECORD 里 ExceptionInformation 从偏移 32 开始，[1] 是被访问的地址
+                var touched = Marshal.ReadIntPtr(record, 40);
+                line += $"，被访问地址 0x{touched.ToInt64():X}";
+            }
+            lock (Noted)
+            {
+                if (Noted.Count >= 6 || !Noted.Add(line)) return ContinueSearch;
+            }
+            Interlocked.Increment(ref _noted);
+            StartupLog.Write(line);
         }
         catch (Exception)
         {
@@ -118,15 +165,16 @@ public static class NativePreflight
         return ContinueSearch;
     }
 
-    private static string ModuleOf(IntPtr address)
+    /// 这个地址落在哪个模块的哪个偏移。偏移是关键：把包里的 omniplay-core.map
+    /// （链接器 /MAP 出的符号表）按偏移一查就是函数名，不用等崩溃现场复现。
+    private static string WhereIs(IntPtr address)
     {
         if (address == IntPtr.Zero ||
             VirtualQuery(address, out var info, (nuint)Marshal.SizeOf<MemoryBasicInformation>()) == nuint.Zero)
             return "读不出来";
         var buffer = new System.Text.StringBuilder(1024);
-        return GetModuleFileNameW(info.AllocationBase, buffer, (uint)buffer.Capacity) == 0
-            ? "未知模块"
-            : Path.GetFileName(buffer.ToString());
+        if (GetModuleFileNameW(info.AllocationBase, buffer, (uint)buffer.Capacity) == 0) return "未知模块";
+        return $"{Path.GetFileName(buffer.ToString())}+0x{address.ToInt64() - info.AllocationBase.ToInt64():X}";
     }
 
     /// 把包内 redist\ 加进 DLL 搜索路径，并让后续所有装载都只看
@@ -150,6 +198,14 @@ public static class NativePreflight
         if (!File.Exists(core)) throw new StartupFailureException($"安装目录里没有 omniplay-core.dll：{core}");
 
         var flags = LoadLibrarySearchDllLoadDir | LoadLibrarySearchDefaultDirs | LoadLibrarySearchApplicationDir;
+        // 先把 Swift 运行时按全路径抢下来。这些 DLL 名字太通用（Foundation.dll、
+        // icu*.dll），输入法、杀软、网盘注入的同名模块只要抢在前头，表现就是
+        // 「构建机上好好的，装到这台机器上就没了」。先装载 = 我们这份一定赢。
+        var pinned = SwiftRuntimeDllNames.Count(name =>
+            File.Exists(Path.Combine(appDir, name)) &&
+            LoadLibraryExW(Path.Combine(appDir, name), IntPtr.Zero, flags) != IntPtr.Zero);
+        StartupLog.Write($"运行时预装载：{pinned} 个用的是包里的");
+
         var handle = LoadLibraryExW(core, IntPtr.Zero, flags);
         var error = (uint)Marshal.GetLastWin32Error();
 
@@ -173,13 +229,7 @@ public static class NativePreflight
     /// 核心已经起来了，顺手把包里其他原生 DLL 也扫一遍：真出问题至少要留下记录。
     private static void AuditShippedNativeLibraries(string appDir)
     {
-        var runtime = new[]
-        {
-            "swiftCore.dll", "swiftCRT.dll", "swiftWinSDK.dll", "swiftDispatch.dll", "dispatch.dll",
-            "Foundation.dll", "FoundationEssentials.dll", "FoundationInternationalization.dll",
-            "_FoundationICU.dll", "BlocksRuntime.dll", "swift_Concurrency.dll",
-            "swift_StringProcessing.dll", "swift_RegexParser.dll",
-        };
+        var runtime = SwiftRuntimeDllNames;
         var gaps = new List<string>();
         foreach (var name in runtime)
         {
@@ -191,6 +241,45 @@ public static class NativePreflight
         StartupLog.Write(gaps.Count == 0
             ? $"本机自检：Swift 运行时 {runtime.Length} 个 DLL 依赖齐"
             : "本机自检有缺口：" + string.Join("；", gaps));
+        LogForeignModules();
+    }
+
+    private static readonly string[] SwiftRuntimeDllNames =
+    {
+        "swiftCore.dll", "swiftCRT.dll", "swiftWinSDK.dll", "swiftDispatch.dll", "dispatch.dll",
+        "Foundation.dll", "FoundationEssentials.dll", "FoundationInternationalization.dll",
+        "_FoundationICU.dll", "BlocksRuntime.dll", "swift_Concurrency.dll",
+        "swift_StringProcessing.dll", "swift_RegexParser.dll",
+    };
+
+    /// 进程里实际装载的「既不在包里也不在 Windows 目录下」的模块。
+    /// 这是「同一份包，构建机上跑得掉、你这台机器跑不掉」最常见的解释：有人在
+    /// 进程里塞了自己的 DLL，或者同名模块被别处的版本抢先装载了。
+    private static void LogForeignModules()
+    {
+        var snapshot = CreateToolhelp32Snapshot(SnapshotModule, (uint)GetCurrentProcessId());
+        if (snapshot == IntPtr.Zero || (long)snapshot == -1) return;
+        try
+        {
+            var entry = new ModuleEntry32 { Size = Marshal.SizeOf<ModuleEntry32>() };
+            if (!Module32First(snapshot, ref entry)) return;
+            var appDir = AppContext.BaseDirectory;
+            var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            var foreign = new List<string>();
+            do
+            {
+                var path = entry.ExePath ?? "";
+                if (path.StartsWith(appDir, StringComparison.OrdinalIgnoreCase) ||
+                    path.StartsWith(windows, StringComparison.OrdinalIgnoreCase)) continue;
+                foreign.Add($"{Path.GetFileName(path)}（{path}）");
+            }
+            while (foreign.Count < 12 && Module32Next(snapshot, ref entry));
+            StartupLog.Write(foreign.Count == 0
+                ? "外来模块：没有，进程里全是包里和系统目录的东西"
+                : $"外来模块 {foreign.Count} 个：" + string.Join("；", foreign));
+        }
+        catch (Exception error) { StartupLog.Write("外来模块清单没列出来：" + error.Message); }
+        finally { CloseHandle(snapshot); }
     }
 
     /// 这个 DLL 的导入里，哪些既不在包里也不在系统目录里。

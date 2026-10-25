@@ -34,10 +34,16 @@ public partial class App : Application
                 ? "上次崩在首帧之前：本次改用软件渲染（不用显卡特效）"
                 : "按要求用软件渲染");
         }
-        if (StartupLog.PreviousRunDiedBeforeLibrary && !NoLibrary)
+        // 片库这条路上有岔子时，先再给一次机会（留得下阶段日志），连着两趟都断在
+        // 同一处就不再碰它：宁可海报是空的，也别让用户点开只剩一个「已停止工作」。
+        var forceLibrary = Environment.GetEnvironmentVariable("OMNIPLAY_LIBRARY") == "1";
+        if (!NoLibrary && !forceLibrary &&
+            (StartupLog.PreviousRunDiedBeforeLibrary || StartupLog.LibraryDeaths >= 2))
         {
             NoLibrary = true;
-            StartupLog.Write("上次崩在片库读取：本次先跳过片库");
+            StartupLog.Write(StartupLog.LibraryDeaths >= 2
+                ? $"片库连着 {StartupLog.LibraryDeaths} 趟断在读取里：本次跳过（OMNIPLAY_LIBRARY=1 可强行再试）"
+                : "上次崩在片库读取之前：本次先跳过片库");
         }
 
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>

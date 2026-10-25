@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
+using System.Windows.Interop;
 using System.Windows.Shapes;
 
 namespace OmniPlay.WpfSpike;
@@ -104,6 +105,10 @@ public sealed class GlassPlate : Grid
         Children.Add(_rim);
 
         Apply(spec, sampleSource);
+        // 采样得等板子真的进了视觉树。构造这会儿它还没挂上去，去问两个视觉之间的
+        // 变换等于问一个没有组合目标的视觉要坐标，milcore 抛的是 Internal CLR
+        // error（0x80131506）——不是异常，catch 不住，进程当场就没了。
+        Loaded += (_, _) => RefreshSample();
         SizeChanged += (_, _) => RefreshSample();
     }
 
@@ -156,6 +161,15 @@ public sealed class GlassPlate : Grid
         if (_sampler is null || _source is null) return;
         try
         {
+            // 先确认两边都还挂在窗口上：少这一眼，下面那句变换就会把 milcore
+            // 打进无效组合目标，直接带走进程（见构造函数里那段注释）。
+            if (VisualTreeHelper.GetParent(_sampled) is null ||
+                PresentationSource.FromVisual(_sampled) is null ||
+                PresentationSource.FromVisual(_source) is null)
+            {
+                _sampleClip.Visibility = Visibility.Collapsed;
+                return;
+            }
             var transform = _sampled.TransformToVisual(_source);
             var origin = transform.Transform(new Point(0, 0));
             var size = new Size(_sampled.ActualWidth, _sampled.ActualHeight);
@@ -168,8 +182,9 @@ public sealed class GlassPlate : Grid
             _sampler.Viewbox = new Rect(origin, size);
             _sampleClip.Visibility = _spec.Glass is null ? Visibility.Collapsed : Visibility.Visible;
         }
-        catch (InvalidOperationException)
+        catch (Exception)
         {
+            // 拿不到变换不碍事：玻璃退回纯染色，界面照常能用
             _sampleClip.Visibility = Visibility.Collapsed;
         }
     }

@@ -191,6 +191,39 @@ Get-WinEvent -FilterHashtable @{LogName='Application'} -MaxEvents 40 |
 ```
 
 
+## 2f. 构建机自己复现了：玻璃板问错了人要坐标（2026-10-25 第三轮）
+
+加了阶段事件那一版跑 CI，冒烟自己炸了，而且炸得明明白白：
+
+```
+Fatal error. Internal CLR error. (0x80131506)
+   at System.Windows.Media.Visual.TransformToVisual(System.Windows.Media.Visual)
+   at OmniPlay.WpfSpike.GlassPlate.RefreshSample()
+   at OmniPlay.WpfSpike.GlassPlate..ctor(...)
+   at SpikeWindow.EnsurePlates(ThemeSpec)  ←  OnLoaded 里第一次应用主题时
+```
+
+`GlassPlate` 构造函数末尾就调 `RefreshSample()`，可那会儿板子还没 `Children.Add` 进窗口：
+一个没有组合目标的视觉去问另一个视觉要坐标，milcore 返回 `E_UNEXPECTED`，CLR 把它
+升格成 **Internal CLR error**——这不是异常，`catch (Exception)` 拦不住，进程当场消失，
+日志就停在最后一行。用户端「点开没影、什么提示都没有」和构建机「日志断在
+`界面搭建完成`」是同一件事：那一步正是 `OnLoaded → ApplyTheme → EnsurePlates`。
+
+- 采样改到 `Loaded` 之后做，并且在问变换之前先确认两边都还挂在窗口上
+  （`VisualTreeHelper.GetParent` + `PresentationSource.FromVisual`）。拿不到就退回纯染色玻璃。
+- 冒烟门禁补两条：stderr 里有 `Fatal error|Internal CLR error|Unhandled exception` 拦下；
+  日志写了 `界面搭建完成` 却没写收尾的 `退出（`（= 中途被硬带走）也拦下。之前退出码
+  非零只告警，这一类炸法就是这么漏过去的。
+- 顺带：`0x80131506` 之外，访问违例现在也记进启动日志，并且写**模块+偏移**
+  （`omniplay-core.dll+0xF8770`）。链接器加了 `/MAP`，符号表随产物一起上传
+  （`windows-<版本>-symbols`），偏移一查就是函数名，不用等现场复现。
+- 再加一条外来模块清单：进程里既不在包里也不在 `C:\Windows` 下的 DLL 全部列出来。
+  `Foundation.dll`、`icu*.dll` 这类通用名字最容易被输入法、杀软、网盘的同名模块抢走，
+  「构建机上好好的」多半就是栽在这儿；核心装载前先按全路径把包内那 13 个抢下来。
+- 片库这条路的自愈改成有账本：`crash-state.txt` 记连续死了几趟，两趟都断在读库里
+  就不再碰它（`OMNIPLAY_LIBRARY=1` 强行再试），宁可海报是空的。
+
+
 ## 3. 排序一致性
 
 `Tests/OmniPlayCoreTests/HomeSortTests.swift` 里的拼音序断言在两个平台都必须绿。

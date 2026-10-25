@@ -11,7 +11,11 @@ let cdeclExports = [
 
 let bridgeLinkerSettings: [LinkerSetting] = cdeclExports.map {
     .unsafeFlags(["-Xlinker", "/EXPORT:\($0)"], .when(platforms: [.windows]))
-}
+} + [
+    // 出符号表（和 DLL 同名的 .map，列的是「偏移 符号 段」）。用户机器上只能拿到
+    // 「omniplay-core.dll+0xF8770」这样一个偏移，有这张表就能直接查到是哪个函数。
+    .unsafeFlags(["-Xlinker", "/MAP"], .when(platforms: [.windows])),
+]
 
 let package = Package(
     name: "OmniPlayCore",

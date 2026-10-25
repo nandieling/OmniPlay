@@ -32,24 +32,48 @@ public static class StartupLog
     public static bool PreviousRunDiedBeforeFirstFrame { get; private set; }
     public static bool PreviousRunDiedBeforeLibrary { get; private set; }
 
+    /// 上一趟是不是死在「片库：开始读取」之后、「片库：读取完成」之前。
+    /// 这个位置日志会断在半路，只能靠上一份日志缺哪一行反推。
+    public static int LibraryDeaths { get; private set; }
+
+    /// 死了几趟的账本。日志每趟重写，没有这个文件就没法知道「已经连着崩第三次了」。
+    private static string StatePath { get; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "OmniPlay", "crash-state.txt");
+
     public static void Reset()
     {
         writable.Clear();
+        var deaths = 0;
+        try { if (File.Exists(StatePath)) int.TryParse(File.ReadAllText(StatePath).Trim(), out deaths); }
+        catch (Exception) { }
         try
         {
             if (File.Exists(FilePath))
             {
                 var previous = File.ReadAllText(FilePath);
-                if (!previous.Contains("退出（"))
+                if (previous.Contains("退出（"))
+                {
+                    deaths = 0;       // 上一趟正常收工，账清零
+                }
+                else
                 {
                     PreviousRunDiedBeforeFirstFrame =
                         previous.Contains("界面搭建完成") && !previous.Contains("第一帧");
                     PreviousRunDiedBeforeLibrary =
                         previous.Contains("第一帧") && !previous.Contains("片库：");
+                    if (previous.Contains("片库：开始读取") && !previous.Contains("片库：读取完成")) deaths += 1;
                 }
             }
         }
         catch (Exception) { /* 上一份日志读不出来就按首次启动处理 */ }
+        LibraryDeaths = deaths;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(StatePath)!);
+            File.WriteAllText(StatePath, deaths.ToString());
+        }
+        catch (Exception) { }
         foreach (var path in new[] { FilePath, FallbackPath })
         {
             try
