@@ -159,6 +159,11 @@ function Invoke-UISmoke([string]$label, [string]$smokeArgs, [string]$require = '
         if ($raw -match '探针：' -and $raw -notmatch '核心这一层全通') {
             throw "界面冒烟（$label）：核心探针没走通，见上面的日志"
         }
+        # 冒烟走到的趟次必须留下线程名册：那是卡住时唯一能看穿「卡在哪个模块」的一行，
+        # 不能等到用户机器上才发现它没跑过
+        if ($raw -match '冒烟：界面活着' -and $raw -notmatch '线程名册') {
+            throw "界面冒烟（$label）：线程名册没写出来"
+        }
         if ($require -and $raw -notmatch [regex]::Escape($require)) {
             throw "界面冒烟（$label）：没看到「$require」这一行"
         }

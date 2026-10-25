@@ -179,6 +179,9 @@ public partial class App : Application
             {
                 timer.Stop();
                 StartupLog.Write(Failed ? "冒烟：期间出过错" : "冒烟：界面活着");
+                // 顺带跑一遍线程名册：这段 P/Invoke 只在卡住时才用，平时不跑等于没测，
+                // 真卡住那天才发现它自己先崩就本末倒置了
+                NativePreflight.LogThreadMap();
                 // 关窗而不是 Shutdown：Shutdown 要走到 AppDomain 卸载，那里得等 Swift
                 // 运行时各 DLL 的 DllMain 收尾，顺序一错就是 fastfail 或者干脆挂住。
                 // 关窗同样会触发 OnExit，那里写完收尾日志就直接结束进程。

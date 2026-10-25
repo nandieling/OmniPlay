@@ -155,6 +155,7 @@ public static class StartupLog
                 if (!_dumped)
                 {
                     _dumped = true;
+                    NativePreflight.LogThreadMap();
                     // 先喊一声再存：MiniDumpWriteDump 要冻结所有线程，卡点要是抱着
                     // 加载器锁不放，这一步自己就能挂住，那连这行都不会出现
                     Write("正在存现场…");

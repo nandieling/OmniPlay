@@ -83,17 +83,123 @@ public static class NativePreflight
             var name = $"hang-{DateTime.Now:HHmmss}-{(tag.Length > 28 ? tag[..28] : tag)}.dmp";
             var path = Path.Combine(Path.GetDirectoryName(StartupLog.FilePath)!, name);
             using var file = new FileStream(path, FileMode.Create);
-            const uint withThreadInfo = 0x0000_0200;
-            const uint ignoreInaccessible = 0x0000_4000;
-            const uint withModuleHeaders = 0x0001_0000;
+            // 走 WER 那种「小转储」的组合：线程信息带栈、进程线程数据、间接引用的内存、
+            // 句表、已卸载模块，再忽略读不到的页。几 MB，卡住的时候也写得动。
+            // （之前填的是 PrivateReadWriteMemory，量的是整个私有可写堆：又大又慢，
+            // 还漏了线程信息，等于把最该看的东西换成最不该看的东西。）
+            const uint withThreadInfo = 0x0000_1000;
+            const uint withProcessThreadData = 0x0000_0100;
+            const uint indirectlyReferenced = 0x0000_0040;
+            const uint withHandleData = 0x0000_0004;
+            const uint withUnloadedModules = 0x0000_0020;
+            const uint ignoreInaccessible = 0x0002_0000;
             var ok = MiniDumpWriteDump(GetCurrentProcess(), (uint)Environment.ProcessId,
                 file.SafeFileHandle.DangerousGetHandle(),
-                withThreadInfo | ignoreInaccessible | withModuleHeaders,
+                withThreadInfo | withProcessThreadData | indirectlyReferenced |
+                withHandleData | withUnloadedModules | ignoreInaccessible,
                 IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
             return ok ? path : null;
         }
         catch (Exception) { return null; }
     }
+
+    // ── 卡住时把线程名册打出来 ────────────────────────────────────────────────
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ThreadEntry32
+    {
+        public uint Size;
+        public uint Usage;
+        public uint ThreadId;
+        public uint OwnerProcessId;
+        public int BasePriority;
+        public int DeltaPriority;
+        public uint Flags;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool Thread32First(IntPtr snapshot, ref ThreadEntry32 entry);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool Thread32Next(IntPtr snapshot, ref ThreadEntry32 entry);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr OpenThread(uint access, bool inherit, uint threadId);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationThread(IntPtr thread, int infoClass,
+        byte[] info, int length, out int returned);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetThreadDescription(IntPtr thread, out IntPtr description);
+
+    /// 卡住的时候只报「停在第几格」不够：把每个线程的入口落在哪个模块里报出来，
+    /// 嫌疑人是谁一眼可见。WPF 建第一个窗口时要拉文本输入线程（PenImc）和渲染线程
+    /// （wpfgfx），中文系统上输入法那套就挂在这条路上——构建机的英文镜像上没这东西，
+    /// 所以这一行是唯一能在用户机器上看见真凶的地方。
+    public static void LogThreadMap()
+    {
+        try
+        {
+            var ranges = new List<(long start, long end, string name)>();
+            using (var self = Process.GetCurrentProcess())
+            {
+                foreach (ProcessModule module in self.Modules)
+                {
+                    try
+                    {
+                        ranges.Add((module.BaseAddress.ToInt64(),
+                            module.BaseAddress.ToInt64() + module.ModuleMemorySize, module.ModuleName));
+                    }
+                    catch (Exception) { /* 有的模块读不到基址，跳过 */ }
+                }
+            }
+
+            var lines = new List<string>();
+            var snapshot = CreateToolhelp32Snapshot(SnapshotThread, 0);
+            if (snapshot == IntPtr.Zero) return;
+            try
+            {
+                var entry = new ThreadEntry32 { Size = (uint)Marshal.SizeOf<ThreadEntry32>() };
+                if (!Thread32First(snapshot, ref entry)) return;
+                var selfId = (uint)Environment.ProcessId;
+                do
+                {
+                    if (entry.OwnerProcessId != selfId || lines.Count >= 40) continue;
+                    var thread = OpenThread(ThreadQueryLimited, false, entry.ThreadId);
+                    if (thread == IntPtr.Zero) continue;
+                    try
+                    {
+                        // THREAD_BASIC_INFORMATION：起点地址在第 40 字节（x64）
+                        var info = new byte[48];
+                        var label = "入口未知";
+                        if (NtQueryInformationThread(thread, 0, info, info.Length, out _) == 0)
+                        {
+                            var at = BitConverter.ToInt64(info, 40);
+                            var hit = ranges.FindIndex(r => at >= r.start && at < r.end);
+                            label = hit >= 0
+                                ? $"{ranges[hit].name}+0x{at - ranges[hit].start:x}"
+                                : $"0x{at:x}";
+                        }
+                        var description = IntPtr.Zero;
+                        var named = GetThreadDescription(thread, out description) == 0 && description != IntPtr.Zero;
+                        var text = Marshal.PtrToStringUni(description);
+                        lines.Add(named && text?.Length > 0 ? $"{entry.ThreadId} {text} <- {label}" : $"{entry.ThreadId} {label}");
+                    }
+                    finally { CloseHandle(thread); }
+                } while (Thread32Next(snapshot, ref entry));
+            }
+            finally { CloseHandle(snapshot); }
+            StartupLog.Write($"线程名册（{lines.Count} 个）：" + string.Join(" | ", lines));
+        }
+        catch (Exception error)
+        {
+            StartupLog.Write($"线程名册没拿到：{error.GetType().Name}");
+        }
+    }
+
+    private const uint SnapshotThread = 0x0000_0002;
+    private const uint ThreadQueryLimited = 0x0000_0040;
 
     /// 别再让系统在出事的正上方摆一个「已停止工作」对话框：它会把进程吊在那儿
     /// 等用户点，冒烟因此「90 秒不退出」，用户那边则是点了才没影。原因我们自己
