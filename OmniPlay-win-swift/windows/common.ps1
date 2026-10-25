@@ -76,11 +76,21 @@ function Find-InnoSetup {
 }
 
 # Swift 在 Windows 上永远动态链接 swiftCore 之类，装到用户机器上必须把这几个 DLL 一起带上。
-function Find-SwiftToolchainBin {
+# Swift 运行时 DLL 在 Windows 上的位置跟编译器不在一起：编译器在 Toolchains\<版本>\usr\bin，
+# 运行时在 SDKROOT\usr\bin。两处都试，再退回扫 PATH（安装器把运行时的目录加进去了）。
+function Find-SwiftRuntimeDir {
+    $candidates = @()
+    if ($env:SDKROOT) { $candidates += (Join-Path $env:SDKROOT 'usr\bin') }
     $cmd = Get-Command swift.exe -ErrorAction SilentlyContinue
-    if (-not $cmd) { return $null }
-    $bin = Split-Path -Parent $cmd.Source
-    if (Test-Path (Join-Path $bin 'swiftCore.dll')) { return $bin }
+    if ($cmd) {
+        $toolchain = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $cmd.Source))
+        $candidates += (Join-Path $toolchain 'usr\bin')
+    }
+    $candidates += ($env:Path -split ';' | Where-Object { $_ })
+    foreach ($candidate in $candidates) {
+        $probe = Join-Path $candidate 'swiftCore.dll'
+        if (Test-Path -LiteralPath $probe) { return (Split-Path -Parent $probe) }
+    }
     return $null
 }
 
@@ -137,9 +147,9 @@ function Copy-SwiftRuntime {
     param([Parameter(Mandatory = $true)][string]$CoreDll,
           [Parameter(Mandatory = $true)][string]$TargetDir)
 
-    $bin = Find-SwiftToolchainBin
+    $bin = Find-SwiftRuntimeDir
     if (-not $bin) {
-        Write-Warning '没找到工具链的 usr\bin：Swift 运行时没进包，换台没装 Swift 的机器会起不来'
+        Write-Warning '没找到 Swift 运行时目录（swiftCore.dll）：运行时没进包，换台没装 Swift 的机器会起不来'
         return @()
     }
     $queue = New-Object System.Collections.Generic.Queue[string]

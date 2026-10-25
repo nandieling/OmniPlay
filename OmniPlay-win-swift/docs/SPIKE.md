@@ -107,6 +107,13 @@ Windows 上若只有这条红，说明 ICU 排序与 mac 的 `localizedStandardC
 
 ## 4. 已知风险
 
+- `abi-probe` 在 Windows 上把每项检查都跑绿、打印完 `abi-probe: OK` 之后，进程仍可能带
+  `0xC0000409` 退出——卸载 Swift 运行时的收尾顺序问题，不是功能失败。`package.ps1` 因此以
+  探针打的结论行为准，退出码异常只告警。正式实现要在自己的退出路径上验一遍（mac 那边
+  ⌘Q 不落盘是同一类问题：收尾时机）。
+- Windows 上 Swift 运行时 DLL 不在编译器旁边的 `Toolchains\<版本>\usr\bin`，而在
+  `SDKROOT\usr\bin`。`Find-SwiftRuntimeDir` 两处都找，再退回扫 PATH。
+
 - 工具链由 `.github/actions/setup-swift` 从 swift.org 官方安装包静默安装（不是自建发行版），
   换版本改那里的 default；换 modulemap 的退路也在那里。
 - WPF 的 `HwndHost` 在窗口最小化/最大化时可能重建子窗口，届时 `wid` 要重新交给 mpv。

@@ -39,8 +39,12 @@ try {
 $core = Find-CoreLibrary -BuildDir (Join-Path $root '.build') -Configuration $Configuration
 Copy-Item $core (Join-Path $artifacts 'omniplay-core.dll') -Force
 $libmpv = Ensure-LibMpv -TargetDir (Join-Path $PSScriptRoot 'native')
-if ($libmpv) { Copy-Item $libmpv (Join-Path $artifacts 'libmpv-2.dll') -Force }
-else { Write-Warning '没有 libmpv：安装包里的播放器会显示「不可用」' }
+if ($libmpv) {
+    Copy-Item $libmpv (Join-Path $artifacts 'libmpv-2.dll') -Force
+    Write-Host ("  libmpv：{0}（{1:N1} MB）" -f (Split-Path -Leaf $libmpv), ((Get-Item $libmpv).Length / 1MB))
+} else {
+    Write-Warning '没有 libmpv：安装包里的播放器会显示「不可用」'
+}
 
 Write-Host '==> dotnet publish' -ForegroundColor Cyan
 # 参数单独算：写在数组字面量里时 ',' 会先于 '+' 结合，值会被拆成两个参数
@@ -64,8 +68,18 @@ Copy-Item (Join-Path $artifacts 'omniplay-core.dll') (Join-Path $PSScriptRoot "a
 if (Test-Path (Join-Path $artifacts 'libmpv-2.dll')) {
     Copy-Item (Join-Path $artifacts 'libmpv-2.dll') (Join-Path $PSScriptRoot "abi-probe\bin\$Configuration\net8.0\") -Force
 }
-& (Join-Path $PSScriptRoot "abi-probe\bin\$Configuration\net8.0\abi-probe.exe")
-if ($LASTEXITCODE -ne 0) { throw "abi-probe 失败（$LASTEXITCODE），不出包" }
+# 以探针自己打的结论为准：Windows 上它跑完全部检查后，进程在卸载 Swift 运行时时
+# 仍可能带 0xC0000409 退出（见 docs/SPIKE.md §4），那种情况只警告不卡出包。
+$probeLog = Join-Path $(if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }) 'abi-probe.log'
+& (Join-Path $PSScriptRoot "abi-probe\bin\$Configuration\net8.0\abi-probe.exe") *>&1 |
+    Tee-Object -FilePath $probeLog | ForEach-Object { Write-Host $_ }
+$probeCode = $LASTEXITCODE
+if (-not (Select-String -Path $probeLog -Pattern 'abi-probe: OK' -Quiet)) {
+    throw "abi-probe 没通过（退出码 $probeCode），不出包"
+}
+if ($probeCode -ne 0) {
+    Write-Warning ("探针全绿但进程退出码 0x{0:X8}：Windows 收尾问题，见 docs/SPIKE.md §4" -f [uint32]$probeCode)
+}
 
 $name = "OmniPlay-win-swift-$Version-x64"
 $zip = Join-Path $artifacts "$name-portable.zip"

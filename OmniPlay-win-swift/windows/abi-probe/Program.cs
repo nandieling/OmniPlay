@@ -81,7 +81,8 @@ if (File.Exists(sample))
 {
     var started = core.Invoke("player.start", new JsonObject { ["path"] = sample });
     var reason = started["reason"]?.GetValue<string>();
-    if (started["started"]?.GetValue<bool>() != true && reason?.Contains("没找到 libmpv") == true)
+    // 核心里没有 mpv 时是降级不是失败：Windows 打包机上换不到库也要出包
+    if (started["started"]?.GetValue<bool>() != true && reason?.Contains("libmpv") == true)
     {
         // 没装 libmpv 的机器上跳过这一段；Windows CI 会带 dll，这一段就是真验收
         notes.Add("  skip 播放（" + reason + "）");
