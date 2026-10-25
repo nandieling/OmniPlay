@@ -20,8 +20,10 @@ public sealed class HomeBoard : ContentControl
     private readonly StackPanel _root = new();
     private readonly ScrollViewer _scroll;
     private readonly List<Painted> _painted = new();
+    private readonly List<(Border Chip, TextBlock Text)> _chips = new();
     private ThemeSpec _spec = null!;
     private long? _selected;
+    private string _view = "home";
 
     /// 一行库状态（片库多少部、已看多少），给状态条用。
     public event Action<string>? StatusChanged;
@@ -56,31 +58,79 @@ public sealed class HomeBoard : ContentControl
         Content = _scroll;
     }
 
+    /// 换一页看。home = 继续播放 + 所有影视，watched / unwatched = 单个架子，
+    /// director / cast = 分类页（分桶由核心的 library.categories 算）。
+    public void Show(string view)
+    {
+        _view = view;
+        Refresh();
+    }
+
     /// 重新读库、重画。核心每次都会顺带把空库铺上演示数据，这里不用额外判断。
     public void Refresh()
     {
-        var result = _core.Invoke("library.sections");
         _root.Children.Clear();
         _painted.Clear();
+        _chips.Clear();
 
-        foreach (var node in result["sections"]?.AsArray() ?? new JsonArray())
-        {
-            var shelf = new Shelf(
-                node?["id"]?.GetValue<string>() ?? string.Empty,
-                node?["title"]?.GetValue<string>() ?? string.Empty,
-                ReadCards(node?["entries"]).ToList());
-            if (shelf.Cards.Count == 0) continue;
-            _root.Children.Add(BuildHeader(shelf));
-            _root.Children.Add(BuildRow(shelf));
-        }
+        if (_view is "director" or "cast") BuildCategoryPage();
+        else BuildShelves();
 
-        if (_painted.Count == 0)
-            _root.Children.Add(new TextBlock { Text = "片库还是空的", Margin = new Thickness(6, 10, 0, 0) });
+        if (_painted.Count == 0 && _chips.Count == 0)
+            _root.Children.Add(new TextBlock { Text = "这里还没有内容", Margin = new Thickness(6, 10, 0, 0) });
 
         Apply(_spec);
         var stats = _core.Invoke("library.stats");
         StatusChanged?.Invoke(
             $"片库 {Int(stats, "movies")} 部 · 文件 {Int(stats, "files")} · 已看 {Int(stats, "watched")} · 可续播 {Int(stats, "resumable")}");
+    }
+
+    private void BuildShelves()
+    {
+        var wanted = _view switch
+        {
+            "watched" => new[] { "watched" },
+            "unwatched" => new[] { "unwatched" },
+            "continue" => new[] { "continue" },
+            _ => new[] { "continue", "all" },
+        };
+        var result = _core.Invoke("library.sections");
+        foreach (var node in result["sections"]?.AsArray() ?? new JsonArray())
+        {
+            var id = node?["id"]?.GetValue<string>() ?? string.Empty;
+            if (!wanted.Contains(id)) continue;
+            var shelf = new Shelf(id, node?["title"]?.GetValue<string>() ?? string.Empty,
+                                  ReadCards(node?["entries"]).ToList());
+            if (shelf.Cards.Count == 0) continue;
+            _root.Children.Add(BuildHeader(shelf));
+            _root.Children.Add(BuildRow(shelf));
+        }
+    }
+
+    /// 分类页：导演 / 主演分桶由核心排好，这里只把「谁 + 几部」画成一排胶囊
+    private void BuildCategoryPage()
+    {
+        var mode = _view;
+        var title = mode == "director" ? "导演" : "主演";
+        _root.Children.Add(BuildHeader(new Shelf(mode, title, Array.Empty<Card>())));
+        var result = _core.Invoke("library.categories", new JsonObject { ["mode"] = mode });
+        var row = new WrapPanel { Margin = new Thickness(-6, 0, -6, 0) };
+        foreach (var group in result["groups"]?.AsArray() ?? new JsonArray())
+        {
+            var name = group?["name"]?.GetValue<string>() ?? "未标注";
+            var count = group?["count"]?.GetValue<double>() is double value ? (int)value : 0;
+            var text = new TextBlock { Text = name + " · " + count + " 部", FontSize = 13 };
+            var chip = new Border
+            {
+                CornerRadius = new CornerRadius(9),
+                Padding = new Thickness(11, 6, 11, 6),
+                Margin = new Thickness(6, 4, 6, 4),
+                Child = text,
+            };
+            _chips.Add((chip, text));
+            row.Children.Add(chip);
+        }
+        _root.Children.Add(row);
     }
 
     public void Apply(ThemeSpec spec)
@@ -114,6 +164,13 @@ public sealed class HomeBoard : ContentControl
             var on = _selected == painted.Card.FileId;
             painted.Frame.BorderBrush = new SolidColorBrush(on ? accent : ThemeSpec.Fade(spec.TextPrimary, 0.10));
             painted.Frame.BorderThickness = new Thickness(on ? 2 : 1);
+        }
+        foreach (var (chip, text) in _chips)
+        {
+            chip.Background = new SolidColorBrush(ThemeSpec.Fade(accent, 0.20));
+            chip.BorderBrush = new SolidColorBrush(ThemeSpec.Fade(accent, 0.55));
+            chip.BorderThickness = new Thickness(1);
+            text.Foreground = new SolidColorBrush(spec.TextPrimary);
         }
     }
 

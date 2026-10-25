@@ -27,6 +27,8 @@ public partial class SpikeWindow : Window
     private GlassPlate? _centerPlate;
     private GlassPlate? _logPlate;
     private HomeBoard _home = null!;
+    private NavRail _nav = null!;
+    private GlassPlate? _navPlate;
     private TextBlock? _selectionText;
     private TextBlock? _titleBlock;
     private TextBlock? _progressText;
@@ -119,7 +121,7 @@ public partial class SpikeWindow : Window
     /// 海报墙同时是玻璃板的采样源，滚到哪儿玻璃里的颜色就跟到哪儿。
     private void BuildHome()
     {
-        _home = new HomeBoard(_core);
+        _home = new HomeBoard(_core) { Margin = new Thickness(180, 0, 0, 0) };
         _home.StatusChanged += Log;
         _home.SelectionChanged += card =>
         {
@@ -128,6 +130,9 @@ public partial class SpikeWindow : Window
         };
         _home.Refresh();
         VideoArea.Children.Add(_home);
+
+        _nav = new NavRail();
+        _nav.ViewChosen += view => _home.Show(view);
     }
 
     /// 标记已看 / 未看：写完让核心重读一遍，界面不自己猜结果
@@ -235,6 +240,8 @@ public partial class SpikeWindow : Window
         _topPlate?.Apply(spec, Backdrop);
         _centerPlate?.Apply(spec, _home);
         _logPlate?.Apply(spec, Backdrop);
+        _navPlate?.Apply(spec, Backdrop);
+        _nav.Apply(spec);
 
         _home.Apply(spec);
         if (_titleBlock is not null) _titleBlock.Foreground = new SolidColorBrush(spec.TextPrimary);
@@ -269,6 +276,16 @@ public partial class SpikeWindow : Window
                 Margin = new Thickness(0, 0, 0, 26),
             };
             VideoArea.Children.Add(_centerPlate);
+        }
+        if (_navPlate is null && _nav is not null)
+        {
+            _navPlate = new GlassPlate(spec, _nav, Backdrop)
+            {
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(14, 14, 0, 0),
+            };
+            VideoArea.Children.Add(_navPlate);
         }
         if (_logPlate is null && _logContent is not null)
         {
