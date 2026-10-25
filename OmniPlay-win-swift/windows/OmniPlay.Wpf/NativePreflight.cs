@@ -65,22 +65,22 @@ public static class NativePreflight
     [DllImport("kernel32.dll")]
     private static extern uint SetErrorMode(uint mode);
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-    private static extern uint WerAddExcludedApplication(string appName, IntPtr reserved, bool doNotRestart);
-
     /// 别再让系统在出事的正上方摆一个「已停止工作」对话框：它会把进程吊在那儿
     /// 等用户点，冒烟因此「90 秒不退出」，用户那边则是点了才没影。原因我们自己
     /// 已经写进日志了，弹窗与 WER 采集都关掉。
+    ///
+    /// 用写注册表而不是 WerAddExcludedApplication：后者顺手把「崩了别重启」也写进去，
+    /// 内部同样要走注册表，多一次不确定。
     public static void SilenceErrorDialogs()
     {
-        const uint semFailCriticalErrors = 0x0001;   // 插盘没纸这类错误别弹框
         const uint semNoGpFaultErrorBox = 0x0002;    // 「已停止工作」对话框
-        SetErrorMode(semFailCriticalErrors | semNoGpFaultErrorBox);
+        SetErrorMode(semNoGpFaultErrorBox);
         try
         {
             var exe = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? "OmniPlaySpike");
-            // 再让 WER 整个跳过这个应用：它采集时会挂起进程，无人值守的机器上就是干等
-            WerAddExcludedApplication(exe, IntPtr.Zero, true);
+            using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                @"Software\Microsoft\Windows\Windows Error Reporting\AppExclusion");
+            key?.SetValue(exe, 1, Microsoft.Win32.RegistryValueKind.DWord);
         }
         catch (Exception) { /* 这层只是让失败好看点，可有可无 */ }
     }
@@ -127,45 +127,60 @@ public static class NativePreflight
     private static extern uint GetModuleFileNameW(IntPtr module, System.Text.StringBuilder buffer, uint size);
 
     // 委托必须被静态字段持有，否则 GC 一走，回调指针就成了野指针
-    private static readonly ExceptionFilter CrashFilter = OnNativeCrash;
+    private static readonly ExceptionFilter CrashFilter = OnFirstChance;
+    private static readonly ExceptionFilter DeathFilter = OnUnhandled;
     private const int ContinueSearch = -1;
+    private const int ContinueSearchFromFilter = 0;
 
     /// 原生崩溃（访问违例、栈溢出这类）不会走 .NET 的异常管道，进程直接没了，
-    /// 用户看到的就是「点开就闪退」。这里挂一个过滤器：把异常码、出错地址和
-    /// 那个地址属于哪个 DLL 写进启动日志，至少下次能少猜一轮。
+    /// 用户看到的就是「点开就闪退」。这里挂两道：
+    ///
+    /// * 未处理过滤器：进程确定要死了，怎么折腾都行，异常码、出错指令在哪个模块
+    ///   的哪个偏移、被访问的地址，全写下来。
+    /// * 向量处理器（第一手）：只对「一定是死」的异常码动手（__fastfail、栈溢出
+    ///   这类会跳过未处理过滤器）。**访问违例不在其列**——CLR、WPF、显卡驱动都拿
+    ///   它当正常控制流用，在第一手处理器里写文件等于在别人持锁的中间插一段磁盘 IO，
+    ///   装上杀软/输入法钩子的机器上能把进程直接吊住（实测症状：日志停在
+    ///   「主窗口已创建」，界面压根不出来，也没任何崩溃记录）。
     public static void InstallCrashReporter()
     {
         try
         {
-            SetUnhandledExceptionFilter(CrashFilter);
-            // 第一手也看一眼：__fastfail 与栈溢出会跳过 unhandled filter，
-            // 只有向量处理器还来得及留一行字。
+            SetUnhandledExceptionFilter(DeathFilter);
             AddVectoredExceptionHandler(1, CrashFilter);
         }
         catch (Exception error) { StartupLog.Write("崩溃兜底没挂上：" + error.Message); }
     }
 
-    // 这几种是「进程直接没了」的形态。访问违例也算：Swift 的内联 incref 就是一条
-    // lock xadd，指针是空的就直接炸，托管层一行都看不见，必须在这一层留字。
-    private static readonly int[] Notable =
+    // 「一定是死」：没人会接着处理这种异常，在第一手处理器里留字是安全的
+    private static readonly int[] AlwaysFatal =
     {
-        unchecked((int)0xC0000005),   // 访问违例
         unchecked((int)0xC000001D),   // 非法指令：Swift 的 fatalError 走这条
         unchecked((int)0xC0000409),   // __fastfail：CRT 参数校验、栈护检测
         unchecked((int)0xC00000FD),   // 栈溢出
         unchecked((int)0xC000041D),   // 数组边界检查失败
     };
 
+    // 未处理过滤器里额外报访问违例：Swift 的内联 incref 就是一条 lock xadd，
+    // 指针是空的直接炸，托管层一行都看不见。
+    private static readonly int[] Notable = AlwaysFatal.Concat([unchecked((int)0xC0000005)]).ToArray();
+
     private static int _noted;
     private static readonly HashSet<string> Noted = new();
 
-    private static int OnNativeCrash(ref ExceptionPointers pointers)
+    private static int OnFirstChance(ref ExceptionPointers pointers) =>
+        Describe(ref pointers, AlwaysFatal, ContinueSearch);
+
+    private static int OnUnhandled(ref ExceptionPointers pointers) =>
+        Describe(ref pointers, Notable, ContinueSearchFromFilter);
+
+    private static int Describe(ref ExceptionPointers pointers, int[] codes, int verdict)
     {
         try
         {
             var record = pointers.ExceptionRecord;
             var code = Marshal.ReadInt32(record);
-            if (!Notable.Contains(code)) return ContinueSearch;
+            if (!codes.Contains(code)) return verdict;
             var address = Marshal.ReadIntPtr(record, 16);
             var line = $"原生崩溃：异常码 0x{code:X8}，指令 {WhereIs(address)}";
             if (code == unchecked((int)0xC0000005))
@@ -176,7 +191,7 @@ public static class NativePreflight
             }
             lock (Noted)
             {
-                if (Noted.Count >= 6 || !Noted.Add(line)) return ContinueSearch;
+                if (Noted.Count >= 6 || !Noted.Add(line)) return verdict;
             }
             Interlocked.Increment(ref _noted);
             StartupLog.Write(line);
@@ -185,7 +200,7 @@ public static class NativePreflight
         {
             // 崩在这里也没关系，至少前面的阶段标记还在
         }
-        return ContinueSearch;
+        return verdict;
     }
 
     /// 这个地址落在哪个模块的哪个偏移。偏移是关键：把包里的 omniplay-core.map

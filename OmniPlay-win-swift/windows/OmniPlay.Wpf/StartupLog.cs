@@ -58,8 +58,10 @@ public static class StartupLog
                 }
                 else
                 {
+                    // 「主窗口已创建」之后没等到首帧 = 卡在建窗与首帧渲染这一段。
+                    // 上一趟就是死在「界面搭建完成」之前，判定条件从那一刻起放宽。
                     PreviousRunDiedBeforeFirstFrame =
-                        previous.Contains("界面搭建完成") && !previous.Contains("第一帧");
+                        previous.Contains("主窗口已创建") && !previous.Contains("第一帧");
                     PreviousRunDiedBeforeLibrary =
                         previous.Contains("第一帧") && !previous.Contains("片库：");
                     if (previous.Contains("片库：开始读取") && !previous.Contains("片库：读取完成")) deaths += 1;

@@ -99,75 +99,81 @@ foreach ($gap in ($gaps | Where-Object { $soft -contains $_.Dll })) {
 # 界面冒烟：把 PATH 缩到只剩系统目录再起一次，模拟「装了包但没有工具链」的机器。
 # 控制台探针看不见的那两件事——WPF 能不能起、Swift 运行时在干净 PATH 下能不能拉起来——
 # 在这里才看得见。开不了窗口的构建机只警告，依赖缺口才拦。
-Write-Host '==> 界面冒烟（干净 PATH）' -ForegroundColor Cyan
-# 界面会同时往 AppData 与 TEMP 写日志，读的时候两处都认
+# 界面同时往 AppData 与 TEMP 写日志，读的时候两处都认。
 $appLog = Join-Path $env:LOCALAPPDATA 'OmniPlay\startup.log'
 $appLogFallback = Join-Path $env:TEMP 'OmniPlay-startup.log'
-Remove-Item $appLog, $appLogFallback -Force -ErrorAction SilentlyContinue
-$psi = New-Object System.Diagnostics.ProcessStartInfo((Join-Path $publish 'OmniPlaySpike.exe'), '--smoke')
-$psi.UseShellExecute = $false
-$psi.WorkingDirectory = $publish
-$psi.RedirectStandardError = $true
-$psi.RedirectStandardOutput = $true
-$psi.EnvironmentVariables['PATH'] = "$env:SystemRoot\System32;$env:SystemRoot"
-$app = [System.Diagnostics.Process]::Start($psi)
-# 异步读干净两条流：Fatal error / Internal CLR error 这类是直接打到 stderr 的，
-# 光看启动日志看不见（日志停在哪儿只能说明断点，说明不了死因）
-$errTask = $app.StandardError.ReadToEndAsync()
-$outTask = $app.StandardOutput.ReadToEndAsync()
-if (-not $app.WaitForExit(90000)) {
-    $app.Kill()
-    # 先把手头能看到的都倒出来再报失败：只有「没退出」这一句等于白跑一轮
+
+function Show-SmokeLog([string]$when) {
     foreach ($path in @($appLog, $appLogFallback) | Where-Object { Test-Path $_ }) {
-        Write-Host "  | 超时时的启动日志（$path）："
+        Write-Host "  | $when 的启动日志（$path）："
         Get-Content $path | ForEach-Object { Write-Host "  | $_" }
         break
     }
-    Start-Sleep -Milliseconds 300
-    # 进程是 Kill 掉的，流会跟着关；再等两秒兜底，别卡在读流上
-    [void]$errTask.Wait(2000); [void]$outTask.Wait(2000)
-    Write-Host ("  ! 超时时的 stderr：`n" + $errTask.Result)
+}
+
+# 卡住的那一刻它到底在哪个调用里：dotnet-stack 直接打托管栈，比猜快
+function Show-ManagedStack([int]$targetPid) {
     try {
-        # 卡住的那一刻它到底在哪个调用里：把托管栈打出来，比猜快
         $dotnetRoot = Split-Path (Get-Command dotnet).Source
         $reporter = (Get-ChildItem (Join-Path $dotnetRoot 'sdk') -Recurse -Filter 'Stack.Core.dll' -ErrorAction SilentlyContinue |
                      Sort-Object FullName -Descending | Select-Object -First 1).FullName
-        if ($reporter -and -not $env:DOTNET_DbgEnableMiniDump) {
-            $env:DOTNET_DbgEnableMiniDump = '1'
-            $env:DOTNET_DbgMiniDumpType = '4'
-            $env:DOTNET_DbgMiniDumpName = (Join-Path $env:RUNNER_TEMP 'hang.dmp')
-            Write-Host (dotnet "$dotnetRoot/stack.dll" $app.Id 2>&1 | Out-String)
-        } else {
-            Write-Host '  ! 这台机器上没有 dotnet-stack，跳过托管栈'
-        }
+        if ($reporter) { Write-Host (dotnet (Join-Path $dotnetRoot 'stack.dll') $targetPid 2>&1 | Out-String) }
+        else { Write-Host '  ! 这台机器上没有 dotnet-stack，跳过托管栈' }
     } catch { Write-Host "  ! 托管栈没拿到：$_" }
-    try {
-        Get-Process -Name wermgr -ErrorAction SilentlyContinue | ForEach-Object {
-            Write-Host "  ! wermgr 在跑（$($_.Id)）：大概弹了「已停止工作」对话框" }
-    } catch { }
-    throw '界面冒烟 90 秒没退出'
 }
-$stderr = $errTask.Result; $stdout = $outTask.Result
-$smokeCode = $app.ExitCode
-foreach ($line in ($stderr + "`n" + $stdout) -split "`r?`n") { if ($line) { Write-Host "  ! $line" } }
-$logHit = @($appLog, $appLogFallback) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if ($logHit) {
-    Get-Content $logHit | ForEach-Object { Write-Host "  | $_" }
-    $raw = Get-Content -Raw $logHit
-    if ($raw -match '核心装载失败|界面搭建失败|本机自检有缺口|片库读取失败|原生崩溃') {
-        throw '界面冒烟抓到装载问题，见上面的日志'
+
+function Invoke-UISmoke([string]$label, [string]$smokeArgs) {
+    Write-Host "==> 界面冒烟：$label" -ForegroundColor Cyan
+    Remove-Item $appLog, $appLogFallback -Force -ErrorAction SilentlyContinue
+    $psi = New-Object System.Diagnostics.ProcessStartInfo((Join-Path $publish 'OmniPlaySpike.exe'), $smokeArgs)
+    $psi.UseShellExecute = $false
+    $psi.WorkingDirectory = $publish
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.EnvironmentVariables['PATH'] = "$env:SystemRoot\System32;$env:SystemRoot"
+    $app = [System.Diagnostics.Process]::Start($psi)
+    # 异步读干净两条流：Fatal error / Internal CLR error 这类只打到 stderr，
+    # 光看启动日志看不见（日志停在哪儿只能说明断点，说明不了死因）
+    $errTask = $app.StandardError.ReadToEndAsync()
+    $outTask = $app.StandardOutput.ReadToEndAsync()
+    if (-not $app.WaitForExit(90000)) {
+        $app.Kill()
+        Show-SmokeLog '超时时'                       # 只有「没退出」这一句等于白跑一轮
+        [void]$errTask.Wait(2000); [void]$outTask.Wait(2000)   # 进程是 Kill 的，流会跟着关
+        Write-Host ("  ! 超时时的 stderr：`n" + $errTask.Result)
+        Show-ManagedStack $app.Id
+        try {
+            Get-Process -Name wermgr -ErrorAction SilentlyContinue | ForEach-Object {
+                Write-Host "  ! wermgr 在跑（$($_.Id)）：大概弹了「已停止工作」对话框" }
+        } catch { }
+        throw "界面冒烟（$label）90 秒没退出"
     }
-    # 界面立起来了却没写下收尾那行 = 中途被硬带走，这种包发出去就是「点开闪退」
-    if ($raw -match '界面搭建完成' -and $raw -notmatch '退出（') {
-        throw '界面冒烟中途进程就没了：日志停在上面最后一行'
+    $stderr = $errTask.Result; $stdout = $outTask.Result
+    $smokeCode = $app.ExitCode
+    foreach ($line in ($stderr + "`n" + $stdout) -split "`r?`n") { if ($line) { Write-Host "  ! $line" } }
+    Show-SmokeLog '这一趟'
+    $logHit = @($appLog, $appLogFallback) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($logHit) {
+        $raw = Get-Content -Raw $logHit
+        if ($raw -match '核心装载失败|界面搭建失败|本机自检有缺口|片库读取失败|原生崩溃|没画出一帧') {
+            throw "界面冒烟（$label）抓到问题，见上面的日志"
+        }
+        # 界面立起来了却没写下收尾那行 = 中途被硬带走，这种包发出去就是「点开闪退」
+        if ($raw -match '界面搭建完成' -and $raw -notmatch '退出（') {
+            throw "界面冒烟（$label）中途进程就没了：日志停在上面最后一行"
+        }
+    } else {
+        Write-Warning "界面冒烟（$label）没留下启动日志：这台机器大概开不了窗口"
     }
-} else {
-    Write-Warning '界面冒烟没留下启动日志：这台机器大概开不了窗口'
+    if ($stderr -match 'Fatal error|Internal CLR error|Unhandled exception') {
+        throw "界面冒烟（$label）抓到致命错误（stderr），见上面的输出"
+    }
+    if ($smokeCode -ne 0) { Write-Warning "界面冒烟（$label）退出码 $smokeCode（构建机开不了窗时属预期）" }
 }
-if ($stderr -match 'Fatal error|Internal CLR error|Unhandled exception') {
-    throw '界面冒烟抓到致命错误（stderr），见上面的输出'
-}
-if ($smokeCode -ne 0) { Write-Warning "界面冒烟退出码 $smokeCode（构建机开不了窗时属预期）" }
+
+# 第二趟只把玻璃采样关掉：这是给用户留的排障档（--no-glass），CI 得替它验一遍能用
+Invoke-UISmoke '完整功能' '--smoke'
+Invoke-UISmoke '关掉玻璃采样' '--smoke --no-glass --no-library'
 
 $name = "OmniPlay-win-swift-$Version-x64"
 $zip = Join-Path $artifacts "$name-portable.zip"

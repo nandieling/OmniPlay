@@ -82,16 +82,21 @@ public sealed class GlassPlate : Grid
     private UIElement? _source;
     private ThemeSpec _spec = null!;
 
+    /// 排障档（--no-glass / OMNIPLAY_NO_GLASS=1）：玻璃板本身、圆角、染色、描边都留着，
+    /// 但不采样、不高斯模糊、不打投影。驱动或注入的 DLL 在作怪时，这一档能把
+    /// 「界面起不起来」和「玻璃好不好看」分开——不用为了试一次重新出包。
+    public static bool PlainOnly { get; set; }
+
     /// 只有显卡加速时才采样。VisualBrush 要把被采样的那棵子树重画一遍再高斯模糊，
     /// 没有 GPU（虚拟机、基础显示驱动、远程桌面、上次崩在渲染后自动退的软件模式）时
     /// 这一笔能把一帧拖成几秒——构建机上「点开之后 90 秒不退出」就是这么来的。
     /// 退回纯染色玻璃，玻璃板本身、描边、高光都还在。
-    public static bool CanSample => RenderCapability.Tier > 0;
+    public static bool CanSample => !PlainOnly && RenderCapability.Tier > 0;
 
     public GlassPlate(ThemeSpec spec, UIElement content, UIElement? sampleSource)
     {
         _sampled = new Rectangle();
-        _sampler = sampleSource is null ? null : new VisualBrush(sampleSource)
+        _sampler = sampleSource is null || PlainOnly ? null : new VisualBrush(sampleSource)
         {
             Stretch = Stretch.Fill,
             TileMode = TileMode.None,
@@ -157,7 +162,7 @@ public sealed class GlassPlate : Grid
         _rim.BorderBrush = new SolidColorBrush(glass.Border);
         _rim.BorderThickness = new Thickness(1);
         _shadow.Color = glass.Shadow;
-        Effect = _shadow;
+        Effect = PlainOnly ? null : _shadow;
         RefreshSample();
     }
 

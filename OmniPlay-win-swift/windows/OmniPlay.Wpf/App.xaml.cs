@@ -24,14 +24,21 @@ public partial class App : Application
         StartupLog.Write($"启动：.NET {Environment.Version}，参数「{string.Join(" ", e.Args)}」");
 
         // 上一趟崩在哪儿，这一趟就先绕开哪儿；手动开关留着给人工二分用。
+        GlassPlate.PlainOnly = e.Args.Contains("--no-glass") ||
+                               Environment.GetEnvironmentVariable("OMNIPLAY_NO_GLASS") == "1";
+        if (GlassPlate.PlainOnly) StartupLog.Write("按要求关掉玻璃采样与模糊（--no-glass）");
+
         var softRender = e.Args.Contains("--soft-render") ||
                          Environment.GetEnvironmentVariable("OMNIPLAY_SOFT_RENDER") == "1" ||
                          StartupLog.PreviousRunDiedBeforeFirstFrame;
         if (softRender)
         {
             RenderOptions.ProcessRenderMode = RenderMode.SoftwareOnly;
+            // 上一趟连一帧都没画出来，这一趟就把显卡特效全卸了：软件渲染 + 不采样不模糊。
+            // 少一层玻璃只是难看一点，界面起不来才是没法用。
+            GlassPlate.PlainOnly = true;
             StartupLog.Write(StartupLog.PreviousRunDiedBeforeFirstFrame
-                ? "上次崩在首帧之前：本次改用软件渲染（不用显卡特效）"
+                ? "上次没画到首帧：本次软件渲染 + 关掉玻璃采样与模糊"
                 : "按要求用软件渲染");
         }
         // 片库这条路上有岔子时，先再给一次机会（留得下阶段日志），连着两趟都断在

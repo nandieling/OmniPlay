@@ -48,11 +48,33 @@ public partial class SpikeWindow : Window
 
     public SpikeWindow()
     {
+        StartupLog.Write("界面：窗口开始构造");
+        ArmFirstFrameWatchdog(8);
         InitializeComponent();
         // 轮询里的异常不能带崩进程：停表并把原因写在状态行上
         _poll.Tick += (_, _) => PollTick();
         // 首帧这行是分隔线：日志停在这行之前 = 死在渲染，停在之后 = 死在读库
-        ContentRendered += (_, _) => StartupLog.Write("界面：第一帧已画出");
+        ContentRendered += (_, _) =>
+        {
+            _firstFrame = true;
+            StartupLog.Write("界面：第一帧已画出");
+        };
+    }
+
+    // 只有一个窗口，静态就够；看门狗在普通线程上读它
+    private static volatile bool _firstFrame;
+
+    /// 「点开没反应」有两种：进程当场没了，或者还活着但卡在哪儿。这两种在日志里必须
+    /// 长得不一样，否则只能靠用户盯任务管理器。走普通线程而不是计时器：界面线程本身
+    /// 就可能就是卡住的那个。
+    private static void ArmFirstFrameWatchdog(int seconds)
+    {
+        new Thread(() =>
+        {
+            Thread.Sleep(TimeSpan.FromSeconds(seconds));
+            if (!_firstFrame) StartupLog.Write($"界面：{seconds} 秒没画出一帧——进程还活着，卡在构造或首帧渲染里");
+        })
+        { IsBackground = true }.Start();
     }
 
     private void PollTick()
