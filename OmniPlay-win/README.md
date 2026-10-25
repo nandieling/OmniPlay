@@ -35,7 +35,7 @@
 - WebDAV 更复杂认证与远程媒体源稳定性
 - 播放器交互细节继续补齐
 
-> Windows 版改用 Swift 语言重构的可行性评估与分阶段计划（含 UI 路线四选一与工作量估算）见 [2026-10-24-swift-rewrite-assessment-and-plan.md](2026-10-24-swift-rewrite-assessment-and-plan.md)。
+> Windows 版改用 Swift 语言重构的评估见两份记录：[总体评估与分阶段计划](2026-10-24-swift-rewrite-assessment-and-plan.md)，以及按 box-send 那套「Swift 核心 + WPF」方案落地的[还原度与工作量评估](2026-10-24-swift-core-wpf-assessment.md)（推荐路线）。按推荐路线落地的骨架在 [`../OmniPlay-win-swift`](../OmniPlay-win-swift/README.md)：零依赖 Swift 核心 + C ABI/JSON 契约 + WPF 演示窗与探针。
 
 > 说明：Windows 版是 C# / .NET / Avalonia 独立重写，与 ARM mac 版功能持续对齐中；截至 2026-09-04 的差异扫描与移植记录见 [2026-09-04-win-vs-arm-mac-feature-diff.md](2026-09-04-win-vs-arm-mac-feature-diff.md)。Windows 版暂不支持接入 OmniPlay Docker 服务端做播放进度同步（ARM mac / 安卓 TV 已支持）。
 

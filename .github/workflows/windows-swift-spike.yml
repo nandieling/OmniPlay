@@ -1,0 +1,116 @@
+name: Windows 核心探针
+
+# Swift 核心 + WPF 路线的定点验收。这里跑的不是完整软件，而是三个结论：
+#   1) 零依赖的核心包在 Windows 上能编译、契约测试能过（含中文排序是否与 mac 一致）
+#   2) GRDB 能不能在 Windows 上跑 WAL + FTS5（spike-db 单独一步，红了不牵连别的结论）
+#   3) libmpv 能不能被核心装载、WPF 能不能构建（播放画面本身要人眼看，见 docs/SPIKE.md）
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "OmniPlay-win-swift/**"
+      - ".github/workflows/windows-swift-spike.yml"
+  pull_request:
+    paths:
+      - "OmniPlay-win-swift/**"
+      - ".github/workflows/windows-swift-spike.yml"
+
+concurrency:
+  group: windows-swift-spike-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # libmpv 共享库（含 libmpv-2.dll）。换版本只改这一行，见 docs/SPIKE.md。
+  LIBMPV_URL: https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-20240414-git-1ba6a3a.7z/download
+
+jobs:
+  core-macos:
+    name: 核心（macOS 参考实现）
+    runs-on: macos-14
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建核心库
+        run: swift build
+        working-directory: OmniPlay-win-swift
+
+      - name: 契约与规则测试
+        run: swift test
+        working-directory: OmniPlay-win-swift
+
+      - name: 跨语言宿主冒烟（ctypes 假扮 WPF）
+        run: python3 OmniPlay-win-swift/scripts/host_smoke.py
+
+      - name: GRDB 探针
+        id: db
+        continue-on-error: true
+        # 新构建引擎（swiftbuild）在 GRDB 的 C 目标上会报「Multiple input files」，
+        # 本地 Swift 6.4 实测要退回 native，CI 同样留这条退路
+        run: swift run db-spike || swift run --build-system native db-spike
+        working-directory: OmniPlay-win-swift/spike-db
+
+      - name: GRDB 结论
+        if: always()
+        run: |
+          if [ "${{ steps.db.outcome }}" = "failure" ]; then
+            echo "::error::GRDB 在 macOS 上就不行了，先修探针再谈 Windows"
+            exit 1
+          fi
+
+  spike-windows:
+    name: 核心 + WPF（Windows）
+    runs-on: windows-2022
+    env:
+      LIBMPV_URL: ${{ env.LIBMPV_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # windows 运行器不自带 Swift，用社区装的发行版；要换工具链改这两行
+      - name: 安装 Swift
+        uses: compnerd/gha-setup-swift@main
+        with:
+          branch: swift-6.0.3-release
+          tag: 6.0.3-RELEASE
+
+      - name: 构建核心库
+        run: swift build
+        working-directory: OmniPlay-win-swift
+
+      - name: 契约与规则测试
+        run: swift test
+        working-directory: OmniPlay-win-swift
+
+      - name: GRDB 探针
+        id: db
+        continue-on-error: true
+        run: swift run db-spike
+        working-directory: OmniPlay-win-swift/spike-db
+
+      - name: 探针 + WPF 构建
+        run: ./windows/build.ps1 -DotnetConfiguration Release
+        working-directory: OmniPlay-win-swift
+
+      - name: 打包产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-spike
+          path: |
+            OmniPlay-win-swift/artifacts
+            OmniPlay-win-swift/windows/OmniPlay.Wpf/bin
+            OmniPlay-win-swift/windows/abi-probe/bin
+          if-no-files-found: warn
+
+      - name: GRDB 结论
+        if: always()
+        run: |
+          if ( '${{ steps.db.outcome }}' -eq 'failure' ) {
+            Write-Host '::error::GRDB 在 Windows 上跑不动：持久化要么改用薄 SQLite 层，要么由宿主持库（见评估文档 §6）' -ForegroundColor Red
+            exit 1
+          }
+          Write-Host 'GRDB on Windows：可用' -ForegroundColor Green

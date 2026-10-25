@@ -62,6 +62,7 @@ Windows 现状（`OmniPlay-win`，Avalonia + .NET 10 + SQLite + libmpv）：
 | B OpenSwiftUI（2.5k star，提交到今天） | 最高：目标就是复刻 SwiftUI | README 自陈 early development、learning/research only；Windows 还需自接渲染器与事件循环 | 取决于接的渲染器 | 中高 | 押在生产 App 上是全项目最大不确定项 |
 | C WinUI 3 / Windows App SDK + swift-winrt 投影 | 无（XAML 重写），Swift 负责逻辑与 ViewModel | 微软官方，长期可依赖 | Windows 原生最佳：Mica、Acrylic、DPI、输入法、触摸 | 中高：XAML 全量重写 + WinRT 投影链小众、调试门槛高 | 若要求「Swift 写 App 且长期稳定」，这是最稳的一条 |
 | D 自绘（Skia/wgpu + 自研布局） | 可复用视图层结构，但要自己实现布局系统 | 全靠自研 | 唯一能像素级还原 mac 玻璃的路 | 最高 | 除非玻璃观感是硬需求，否则不建议 |
+| **F Swift 核心 + WPF（box-send 同款，推荐）** | 无（XAML 重写），但桥接模式已在 box-send 量产验证 | 高：WPF 成熟，桥已跑通 | 高：主题化模板可做到布局/主题/交互 1:1，仅真折射玻璃近似 | 中高（界面工作量为主） | 见 `2026-10-24-swift-core-wpf-assessment.md` |
 | E（对照）Swift 核心库 + 现有 Avalonia 壳 | 不适用（UI 不动） | 立即可用 | 现状 | 低 | 不是「全 Swift」，但最快拿到「一份逻辑两平台跑」，且是 A/B/C/D 失败时的回退点 |
 
 ## 4. 分阶段计划

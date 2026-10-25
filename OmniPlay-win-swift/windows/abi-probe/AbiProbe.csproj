@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- 不带 -windows：探针不碰 WPF，任何 Windows 机器（含 CI 容器）都能跑 -->
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>abi-probe</AssemblyName>
+    <RootNamespace>OmniPlayProbe</RootNamespace>
+    <RollForward>LatestMajor</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\OmniPlay.Wpf\CoreBridge.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition=" '$(OmniPlayNativeDir)' != '' ">
+    <None Include="$(OmniPlayNativeDir)/omniplay-core.dll" Condition="Exists('$(OmniPlayNativeDir)/omniplay-core.dll')"
+          Link="omniplay-core.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(OmniPlayNativeDir)/libmpv-2.dll" Condition="Exists('$(OmniPlayNativeDir)/libmpv-2.dll')"
+          Link="libmpv-2.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\testdata\sample.mp4" Link="testdata\sample.mp4" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

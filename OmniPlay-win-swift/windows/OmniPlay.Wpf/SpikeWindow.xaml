@@ -1,0 +1,81 @@
+<Window x:Class="OmniPlay.WpfSpike.SpikeWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:OmniPlay.WpfSpike"
+        Title="觅影 · Windows 核心演示" Height="740" Width="1180"
+        MinHeight="540" MinWidth="880" Loaded="OnLoaded" Closing="OnClosing">
+    <Window.Resources>
+        <!-- 圆角小胶囊：默认 Aero 按钮的 chrome 会把配色盖掉，这里换掉模板 -->
+        <Style x:Key="Pill" TargetType="Button">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+            <Setter Property="Background" Value="{DynamicResource ChipBrush}" />
+            <Setter Property="Padding" Value="13,6" />
+            <Setter Property="Margin" Value="6,0,0,0" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="SnapsToDevicePixels" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Plate" CornerRadius="9" Padding="{TemplateBinding Padding}"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{DynamicResource ChipBorderBrush}" BorderThickness="1">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Plate" Property="Opacity" Value="0.84" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Plate" Property="Opacity" Value="0.66" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="PillToggle" TargetType="ToggleButton">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+            <Setter Property="Background" Value="{DynamicResource ChipBrush}" />
+            <Setter Property="Padding" Value="13,6" />
+            <Setter Property="Margin" Value="6,0,0,0" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Plate" CornerRadius="9" Padding="{TemplateBinding Padding}"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{DynamicResource ChipBorderBrush}" BorderThickness="1">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Plate" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                                <Setter TargetName="Plate" Property="BorderThickness" Value="2" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid x:Name="PageRoot">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- 自绘底：三段斜向渐变 + 主题色光斑，玻璃板从它取色 -->
+        <local:GlassBackdrop x:Name="Backdrop" Grid.RowSpan="3" />
+
+        <Grid x:Name="TopHost" Grid.Row="0" />
+        <Grid x:Name="VideoArea" Grid.Row="1" ClipToBounds="True" />
+        <Grid x:Name="LogHost" Grid.Row="2" />
+
+        <!-- 控制条走 Popup：子 HWND 盖住 WPF 内容，只有独立顶层窗口能浮在播放画面之上 -->
+        <Popup x:Name="ControlPopup" PlacementTarget="{Binding ElementName=VideoArea}"
+               Placement="Center" AllowsTransparency="True" StaysOpen="True" AllowsTopMost="True" />
+    </Grid>
+</Window>

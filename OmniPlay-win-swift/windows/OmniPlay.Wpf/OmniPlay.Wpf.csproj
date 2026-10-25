@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- 定在 net8.0-windows：Win10 1903+ 都能装；要换 net10 只改这一行 -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>OmniPlaySpike</AssemblyName>
+    <RootNamespace>OmniPlay.WpfSpike</RootNamespace>
+    <RollForward>LatestMajor</RollForward>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <!-- 核心库与 libmpv 由 windows/build.ps1 放进输出目录，路径用属性传进来 -->
+  <ItemGroup Condition=" '$(OmniPlayNativeDir)' != '' ">
+    <None Include="$(OmniPlayNativeDir)/omniplay-core.dll" Condition="Exists('$(OmniPlayNativeDir)/omniplay-core.dll')"
+          Link="omniplay-core.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup Condition=" '$(OmniPlayNativeDir)' != '' AND Exists('$(OmniPlayNativeDir)/libmpv-2.dll') ">
+    <None Include="$(OmniPlayNativeDir)/libmpv-2.dll" Link="libmpv-2.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- 演示用的示例视频，播放器拿它验证「库能加载、文件能打开」 -->
+  <ItemGroup>
+    <None Include="..\testdata\sample.mp4" Link="testdata\sample.mp4" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

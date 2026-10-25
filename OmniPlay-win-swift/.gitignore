@@ -1,0 +1,10 @@
+# 构建产物与外部二进制；libmpv 由 windows/build.ps1 取到 windows/native/
+.build/
+artifacts/
+windows/native/
+windows/**/bin/
+windows/**/obj/
+*.xcodeproj
+
+# 根 .gitignore 屏蔽了 *.mp4（用户视频），这份是跨平台播放冒烟用的测试样本
+!windows/testdata/sample.mp4
