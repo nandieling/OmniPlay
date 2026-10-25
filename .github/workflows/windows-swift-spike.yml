@@ -67,8 +67,6 @@ jobs:
   spike-windows:
     name: 核心 + WPF（Windows）
     runs-on: windows-2022
-    env:
-      LIBMPV_URL: ${{ env.LIBMPV_URL }}
     steps:
       - uses: actions/checkout@v4
 
