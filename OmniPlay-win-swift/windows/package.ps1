@@ -127,6 +127,24 @@ if (-not $app.WaitForExit(90000)) {
     # 进程是 Kill 掉的，流会跟着关；再等两秒兜底，别卡在读流上
     [void]$errTask.Wait(2000); [void]$outTask.Wait(2000)
     Write-Host ("  ! 超时时的 stderr：`n" + $errTask.Result)
+    try {
+        # 卡住的那一刻它到底在哪个调用里：把托管栈打出来，比猜快
+        $dotnetRoot = (Split-Path (Get-Command dotnet)).FullName
+        $reporter = (Get-ChildItem (Join-Path $dotnetRoot 'sdk') -Recurse -Filter 'Stack.Core.dll' -ErrorAction SilentlyContinue |
+                     Sort-Object FullName -Descending | Select-Object -First 1).FullName
+        if ($reporter -and -not $env:DOTNET_DbgEnableMiniDump) {
+            $env:DOTNET_DbgEnableMiniDump = '1'
+            $env:DOTNET_DbgMiniDumpType = '4'
+            $env:DOTNET_DbgMiniDumpName = (Join-Path $env:RUNNER_TEMP 'hang.dmp')
+            Write-Host (dotnet "$dotnetRoot/stack.dll" $app.Id 2>&1 | Out-String)
+        } else {
+            Write-Host '  ! 这台机器上没有 dotnet-stack，跳过托管栈'
+        }
+    } catch { Write-Host "  ! 托管栈没拿到：$_" }
+    try {
+        Get-Process -Name wermgr -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "  ! wermgr 在跑（$($_.Id)）：大概弹了「已停止工作」对话框" }
+    } catch { }
     throw '界面冒烟 90 秒没退出'
 }
 $stderr = $errTask.Result; $stdout = $outTask.Result
