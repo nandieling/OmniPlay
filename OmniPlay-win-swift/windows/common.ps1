@@ -27,17 +27,29 @@ function Ensure-LibMpv {
     if (-not $Url) { return $null }
 
     try {
+        New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
         $archive = Join-Path $env:TEMP 'omniplay-libmpv-archive'
-        Invoke-WebRequest -Uri $Url -OutFile $archive
-        $sevenZip = Join-Path ${env:ProgramFiles} '7-Zip\7z.exe'
-        if (-not (Test-Path $sevenZip)) { throw '需要 7-Zip 才能解 libmpv 压缩包' }
-        $extract = Join-Path $env:TEMP 'omniplay-libmpv-extract'
-        if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
-        & $sevenZip x "-o$extract" $archive '-r' -y | Out-Null
-        $dll = Get-ChildItem -Path $extract -Recurse -Filter 'libmpv-2.dll' | Select-Object -First 1
-        if (-not $dll) { throw '压缩包里没找到 libmpv-2.dll' }
-        Copy-Item $dll.FullName $installed
-        return $installed
+        foreach ($one in ($Url -split ';' | Where-Object { $_ })) {
+            Invoke-WebRequest -Uri $one.Trim() -OutFile $archive -UserAgent 'OmniPlay-Packaging'
+            # 镜像有时会回一个页面而不是压缩包，先看魔数，别把 HTML 喂给 7z
+            $head = Get-Content -LiteralPath $archive -AsByteStream -TotalCount 6
+            if (-not (($head[0] -eq 0x37) -and ($head[1] -eq 0x7A) -and ($head[2] -eq 0xBC) -and
+                      ($head[3] -eq 0xAF) -and ($head[4] -eq 0x27) -and ($head[5] -eq 0x1C))) {
+                Write-Warning "拿到的不是 7z（前 6 字节 $($head -join ' ')），换下一个地址"
+                continue
+            }
+            $sevenZip = Join-Path ${env:ProgramFiles} '7-Zip\7z.exe'
+            if (-not (Test-Path $sevenZip)) { throw '需要 7-Zip 才能解 libmpv 压缩包' }
+            $extract = Join-Path $env:TEMP 'omniplay-libmpv-extract'
+            if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+            & $sevenZip x "-o$extract" $archive '-r' -y | Out-Null
+            $dll = Get-ChildItem -Path $extract -Recurse -Filter 'libmpv-2.dll' | Select-Object -First 1
+            if (-not $dll) { throw "压缩包里没找到 libmpv-2.dll（$one）" }
+            Copy-Item $dll.FullName $installed
+            return $installed
+        }
+        Write-Warning 'libmpv 地址全部不可用：播放器会以「不可用」启动'
+        return $null
     } catch {
         Write-Warning "libmpv 没取到（$($_.Exception.Message)）：播放器会以「不可用」启动"
         return $null

@@ -30,8 +30,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # libmpv 共享库直链，换版本只改这一行（docs/SPIKE.md 有说明）
-  LIBMPV_URL: https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-20240414-git-1ba6a3a.7z/download
+  # libmpv 共享库直链，换版本只改这一行。shinchiro 的 GitHub Release；SourceForge 那个源常年 403。
+  # 多个候选地址用分号隔开，package.ps1 会挨个试并先校验 7z 魔数。
+  LIBMPV_URL: https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261021/mpv-dev-x86_64-20261021-git-e471496c56.7z
 
 jobs:
   package:

@@ -43,9 +43,11 @@ if ($libmpv) { Copy-Item $libmpv (Join-Path $artifacts 'libmpv-2.dll') -Force }
 else { Write-Warning '没有 libmpv：安装包里的播放器会显示「不可用」' }
 
 Write-Host '==> dotnet publish' -ForegroundColor Cyan
+# 参数单独算：写在数组字面量里时 ',' 会先于 '+' 结合，值会被拆成两个参数
+$nativeDir = "-p:OmniPlayNativeDir=$artifacts"
 $publishArgs = @(
     (Join-Path $PSScriptRoot 'OmniPlay.Wpf\OmniPlay.Wpf.csproj'),
-    '-c', $Configuration, '-o', $publish, '-p:OmniPlayNativeDir=' + $artifacts, '--nologo'
+    '-c', $Configuration, '-o', $publish, $nativeDir, '--nologo'
 )
 if (-not $FrameworkDependent) { $publishArgs += @('-r', 'win-x64', '--self-contained', 'true') }
 dotnet publish @publishArgs
@@ -57,7 +59,7 @@ Copy-SwiftRuntime -CoreDll (Join-Path $artifacts 'omniplay-core.dll') -TargetDir
 
 # 冒烟：探针跑不过就不出包（与 mac 侧 pack_mac.sh 同一个态度）
 Write-Host '==> abi-probe 冒烟' -ForegroundColor Cyan
-dotnet build (Join-Path $PSScriptRoot 'abi-probe\AbiProbe.csproj') -c $Configuration -p:OmniPlayNativeDir=$artifacts | Out-Null
+dotnet build (Join-Path $PSScriptRoot 'abi-probe\AbiProbe.csproj') -c $Configuration $nativeDir | Out-Null
 Copy-Item (Join-Path $artifacts 'omniplay-core.dll') (Join-Path $PSScriptRoot "abi-probe\bin\$Configuration\net8.0\") -Force
 if (Test-Path (Join-Path $artifacts 'libmpv-2.dll')) {
     Copy-Item (Join-Path $artifacts 'libmpv-2.dll') (Join-Path $PSScriptRoot "abi-probe\bin\$Configuration\net8.0\") -Force

@@ -66,7 +66,9 @@ C# 探针在 mac 上也能干跑：`DllImport("omniplay-core")` 会去找 `libom
 
 手动触发即可。产物：`*setup.exe`（Inno 安装包，自包含，不依赖已装的 .NET）、`*.zip`（便携）、
 `.sha256`。流程在 `windows/package.ps1`：构建后先跑一遍 `abi-probe`，探针不过就不出包；
-libmpv 取不到只降级、不阻断。装完按第 2 节那九条看。
+libmpv 取不到只降级、不阻断。装完按第 2 节那九条看。libmpv 从 shinchiro 的 GitHub Release 取
+（SourceForge 那个老地址在 CI 里回回 403），`Ensure-LibMpv` 会先校验 7z 魔数再解压，
+`LIBMPV_URL` 可以用分号写多个候选。
 
 发布目录里除 `omniplay-core.dll` 外还会躺一串 Swift 运行时 DLL：核心在 Windows 上是动态链接
 `swiftCore` 的，`Copy-SwiftRuntime` 顺着 `omniplay-core.dll` 的 PE 导入表把工具链 `usr\bin`

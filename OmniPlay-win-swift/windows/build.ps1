@@ -31,9 +31,9 @@ if ($libmpv) { Copy-Item $libmpv (Join-Path $artifacts 'libmpv-2.dll') -Force }
 else { Write-Warning '没有 libmpv-2.dll：播放器会以「不可用」启动' }
 
 Write-Host '==> dotnet build（探针 + 演示）' -ForegroundColor Cyan
-dotnet build (Join-Path $PSScriptRoot 'abi-probe\AbiProbe.csproj') -c $DotnetConfiguration -p:OmniPlayNativeDir=$artifacts
+dotnet build (Join-Path $PSScriptRoot 'abi-probe\AbiProbe.csproj') -c $DotnetConfiguration "-p:OmniPlayNativeDir=$artifacts"
 if ($LASTEXITCODE -ne 0) { throw 'abi-probe 构建失败' }
-dotnet build (Join-Path $PSScriptRoot 'OmniPlay.Wpf\OmniPlay.Wpf.csproj') -c $DotnetConfiguration -p:OmniPlayNativeDir=$artifacts
+dotnet build (Join-Path $PSScriptRoot 'OmniPlay.Wpf\OmniPlay.Wpf.csproj') -c $DotnetConfiguration "-p:OmniPlayNativeDir=$artifacts"
 if ($LASTEXITCODE -ne 0) { throw '演示程序构建失败' }
 
 Write-Host '==> abi-probe' -ForegroundColor Cyan
