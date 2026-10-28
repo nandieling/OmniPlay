@@ -5458,17 +5458,25 @@ public final class MainActivity extends Activity {
         showPlayerChromeTemporarily();
         refreshRuntimeTracks();
         ArrayList<PlayerMenuOption> options = new ArrayList<>();
-        if (prefersRuntimeTracks(file) || shouldUseRuntimeSubtitleTracks(file)) {
-            for (RuntimeTrack track : activeRuntimeSubtitleTracks) {
-                boolean selected = isRuntimeSubtitleSelected(track);
-                options.add(new PlayerMenuOption(formatRuntimeSubtitleTrack(track), selected, () -> selectRuntimeSubtitleTrack(file, track)));
-            }
-        } else {
-            for (int index = 0; index < file.subtitleStreams.size(); index++) {
-                Models.VideoFileStream stream = file.subtitleStreams.get(index);
-                int ordinal = index;
-                boolean selected = isEmbeddedSubtitleSelected(index);
-                options.add(new PlayerMenuOption(formatSubtitleStream(stream, index), selected, () -> selectEmbeddedSubtitle(file, ordinal)));
+        // 内封字幕走 mpv 渲染，直出模式（vo=mediacodec_embed）里 mpv 根本不参与画面，
+        // 列出来点中也没任何反应。这一档只列覆盖层读得懂的那些（媒体源外挂字幕与 sidecar），
+        // 内封轨收起来，用下面那行说明条数并给出切回兼容模式的入口。
+        boolean runtimeSubtitles = prefersRuntimeTracks(file) || shouldUseRuntimeSubtitleTracks(file);
+        int embeddedCount = runtimeSubtitles
+                ? activeRuntimeSubtitleTracks.size() : file.subtitleStreams.size();
+        if (!activeDirectPlayback) {
+            if (runtimeSubtitles) {
+                for (RuntimeTrack track : activeRuntimeSubtitleTracks) {
+                    boolean selected = isRuntimeSubtitleSelected(track);
+                    options.add(new PlayerMenuOption(formatRuntimeSubtitleTrack(track), selected, () -> selectRuntimeSubtitleTrack(file, track)));
+                }
+            } else {
+                for (int index = 0; index < file.subtitleStreams.size(); index++) {
+                    Models.VideoFileStream stream = file.subtitleStreams.get(index);
+                    int ordinal = index;
+                    boolean selected = isEmbeddedSubtitleSelected(index);
+                    options.add(new PlayerMenuOption(formatSubtitleStream(stream, index), selected, () -> selectEmbeddedSubtitle(file, ordinal)));
+                }
             }
         }
         for (Models.SubtitleTrack track : activeExternalSubtitles) {
@@ -5486,11 +5494,10 @@ public final class MainActivity extends Activity {
         // 现成的外挂字幕在片子刚播起来时就自动认过一遍了（prefindSidecars），这里只留个手动重找。
         options.add(new PlayerMenuOption("再找一遍媒体源里的外挂字幕", false, () -> lookForSidecars(file, returnFocus)));
         options.add(new PlayerMenuOption("后台转档这条的内封字幕", false, () -> transcodeSidecarNow(file)));
-        boolean hasSubtitleTracks = !file.subtitleStreams.isEmpty()
-                || !activeRuntimeSubtitleTracks.isEmpty() || !activeExternalSubtitles.isEmpty();
-        if (activeDirectPlayback && hasSubtitleTracks) {
-            // 直出时视频直接进解码器，mpv 的字幕渲染根本不参与——这不是 bug，是这条链路的代价。
-            options.add(new PlayerMenuOption("直出不渲染内封字幕 · 改用兼容字幕播放", false,
+        if (activeDirectPlayback && embeddedCount > 0) {
+            // 不是 bug，是这条链路的代价：视频直接进解码器，mpv 的字幕渲染整个不参与。
+            options.add(new PlayerMenuOption("直出不渲染内封字幕（已收起 " + embeddedCount
+                    + " 条）· 改用兼容字幕播放", false,
                     () -> switchPlaybackModeDuringPlayback(false)));
         }
         if (options.isEmpty()) {

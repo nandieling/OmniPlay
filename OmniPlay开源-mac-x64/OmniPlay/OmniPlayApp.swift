@@ -37,6 +37,9 @@ struct OmniPlayApp: App {
     }
     
     var body: some Scene {
+        // 这里保持 WindowGroup：换成单窗口 Window 场景后，实测启动时不建窗口
+        // （要等下一次外部事件才补上），关掉播放页还会顺带把应用退出。
+        // 「多出来的那张首页」由 DirectPlaybackWindowManager.enforceSingleHomeWindow() 收掉。
         WindowGroup {
             // 启动后直接显示咱们的主测试界面
             // (注意：如果你把主界面的名字改成了 PosterWallView，请把下面的 ContentView() 改成 PosterWallView() )

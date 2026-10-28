@@ -702,6 +702,9 @@ struct MovieDetailView: View {
                 var eligibleEpisodeIDs = Set<String>()
                 var explicitSubtitleFileIDs = Set<String>()
                 var isShow = false
+                // 短剧分集标题用「第 N 集」，集号优先按文件名里的数字认；
+                // 目录带季号的多季短剧（S07 / 第7季）保留季号，不然分季信息就没了
+                let isShortDramaMovie = sortedFiles.contains { $0.mediaKind == ShortDrama.kindValue }
                 
                 for (index, file) in sortedFiles.enumerated() {
                     let parsed = MediaNameParser.parseEpisodeDescriptor(from: file.fileName, fallbackIndex: index)
@@ -713,10 +716,23 @@ struct MovieDetailView: View {
                             fallbackIndex: index
                         )
                         : nil
-                    let s = override?.season ?? preferredSeason ?? parsed.season
-                    let e = override?.episode ?? parsed.episode
+                    var s = override?.season ?? preferredSeason ?? parsed.season
+                    var e = override?.episode ?? parsed.episode
                     var dName = episodeBaseDisplayName(season: s, episode: e)
-                    if parsed.isTVShow {
+                    if isShortDramaMovie {
+                        isShow = true
+                        eligibleEpisodeIDs.insert(file.id)
+                    }
+                    if isShortDramaMovie, let numbered = ShortDramaClassifier.episodeNumber(from: file.fileName) {
+                        e = numbered
+                        if let shortSeason = ShortDramaClassifier.seasonNumber(inPath: file.relativePath) {
+                            s = shortSeason
+                            dName = episodeBaseDisplayName(season: shortSeason, episode: numbered)
+                        } else {
+                            dName = ShortDramaClassifier.episodeDisplayName(episode: numbered)
+                        }
+                    }
+                    if parsed.isTVShow || isShortDramaMovie {
                         isShow = true
                         eligibleEpisodeIDs.insert(file.id)
                         if let subtitle = override?.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines), !subtitle.isEmpty {
@@ -1311,6 +1327,12 @@ struct EpisodeThumbnailView: View {
     
     private func loadThumbnail() {
         let url = ThumbnailManager.shared.thumbnailURL(for: fileId)
-        if let img = NSImage(contentsOf: url) { self.thumbnail = img }
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        // 一百格的分集墙滚动时是每格一次磁盘解码，压在主线线程上就是掉帧，
+        // 解码丢给后台执行器，回来只赋个值。
+        Task(priority: .userInitiated) {
+            let image = await Task.detached(priority: .userInitiated) { NSImage(contentsOf: url) }.value
+            self.thumbnail = image
+        }
     }
 }

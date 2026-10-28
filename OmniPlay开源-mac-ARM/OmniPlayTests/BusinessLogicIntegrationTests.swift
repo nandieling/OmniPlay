@@ -659,6 +659,8 @@ struct BusinessLogicIntegrationTests {
                 t.column("fileSize", .integer).notNull().defaults(to: 0)
                 t.column("lastPlayedAt", .double)
             }
+            // 期望结构交给自愈补齐：以后再加列，这份夹具不用再手动跟
+            try AppDatabase.healSchemaGaps(db)
         }
     }
 

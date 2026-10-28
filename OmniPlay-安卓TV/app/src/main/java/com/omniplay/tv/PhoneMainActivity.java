@@ -62,7 +62,7 @@ public final class PhoneMainActivity extends Activity {
     private MpvVideoView playerView;
     private Models.VideoFile activePlaybackFile;
     private Runnable progressReporter;
-    private Screen screen = Screen.SETUP;
+    private Screen screen = Screen.HOME;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -77,25 +77,10 @@ public final class PhoneMainActivity extends Activity {
         root.setBackgroundColor(COLOR_BACKGROUND);
         setContentView(root);
 
-        if (api.hasServerUrl()) {
-            checkSession();
-        } else {
-            showSetup(null);
-        }
-    }
-
-    private void checkSession() {
-        showLoading("正在打开媒体库");
-        runAsync(
-                () -> api.authStatus(),
-                status -> {
-                    if (status.isAuthenticated) {
-                        showHome();
-                    } else {
-                        showSetup(status.requiresSetup ? "请先在网页端完成管理员初始化。" : null);
-                    }
-                },
-                error -> showSetup(error.getMessage()));
+        // 独立版没有服务端要问，也不该有第二个「首次运行页」：海报墙永远是首屏。
+        // 一个媒体源都没有时，墙上自带「添加媒体源」的入口（emptyLibraryCallToAction），
+        // 设置页退成二级页，从右上角「设置」或那个入口进来。
+        showHome();
     }
 
     private void showSetup(String message) {
@@ -113,8 +98,17 @@ public final class PhoneMainActivity extends Activity {
         page.setPadding(dp(22), dp(34), dp(22), dp(34));
         scroll.addView(page, matchWidth());
 
-        page.addView(title("OmniPlay"));
-        page.addView(body("独立版：添加本地目录、WebDAV 或 SMB 媒体源，自动扫描并用 TMDB 刮削海报。"));
+        LinearLayout setupHeader = new LinearLayout(this);
+        setupHeader.setGravity(Gravity.CENTER_VERTICAL);
+        page.addView(setupHeader, matchWidth());
+        LinearLayout setupHeading = new LinearLayout(this);
+        setupHeading.setOrientation(LinearLayout.VERTICAL);
+        setupHeader.addView(setupHeading, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        setupHeading.addView(title("OmniPlay"));
+        setupHeading.addView(body("独立版：添加本地目录、WebDAV 或 SMB 媒体源，自动扫描并用 TMDB 刮削海报。"));
+        Button backToHome = compactButton("返回");
+        setupHeader.addView(backToHome, new LinearLayout.LayoutParams(dp(88), dp(42)));
+        backToHome.setOnClickListener(view -> showHome());
 
         TextView sourceSummary = text(api.engine().sources().isEmpty()
                 ? "当前没有媒体源。"
@@ -158,7 +152,7 @@ public final class PhoneMainActivity extends Activity {
         TextView setupStatus = text("", 12, Typeface.BOLD, COLOR_MUTED);
         page.addView(setupStatus, margin(matchWidth(), 0, dp(8), 0, 0));
 
-        Button enter = button("进入");
+        Button enter = button("进入媒体库");
         page.addView(enter, margin(matchWidth(), 0, dp(14), 0, 0));
         enter.setOnClickListener(view -> showHome());
 
@@ -340,8 +334,32 @@ public final class PhoneMainActivity extends Activity {
         }
 
         if (items.isEmpty()) {
-            page.addView(body("媒体库为空，请添加媒体源并扫描。"));
+            page.addView(emptyLibraryCallToAction());
         }
+    }
+
+    /**
+     * 海报墙为空时自带的入口。以前一个媒体源都没有会先甩一整屏设置页，
+     * 现在首屏就是墙，这里用一颗按钮通向同一张表单。
+     */
+    private View emptyLibraryCallToAction() {
+        final boolean noSources = api.engine().sources().isEmpty();
+        LinearLayout block = new LinearLayout(this);
+        block.setOrientation(LinearLayout.VERTICAL);
+        block.setGravity(Gravity.CENTER_HORIZONTAL);
+        block.addView(body(noSources
+                ? "还没有媒体源。添加本地目录、WebDAV 或 SMB 后会自动扫描刮削。"
+                : "媒体库还是空的，可能正在扫描刮削。"), matchWidth());
+        Button action = button(noSources ? "添加媒体源" : "刷新");
+        block.addView(action, margin(new LinearLayout.LayoutParams(dp(188), dp(52)), 0, dp(12), 0, 0));
+        action.setOnClickListener(view -> {
+            if (noSources) {
+                showSetup(null);
+            } else {
+                showHome();
+            }
+        });
+        return block;
     }
 
     private View posterCard(Models.LibraryItem item) {
@@ -719,7 +737,8 @@ public final class PhoneMainActivity extends Activity {
             closePlayer();
             return;
         }
-        if (screen == Screen.DETAIL) {
+        if (screen == Screen.DETAIL || screen == Screen.SETUP) {
+            // 设置页现在是海报墙的二级页：返回键回墙，不是退出应用
             showHome();
             return;
         }

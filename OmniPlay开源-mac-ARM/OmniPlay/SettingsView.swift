@@ -15,6 +15,11 @@ struct SettingsView: View {
     @AppStorage("removeWebDAVCredentialsOnDelete") var removeWebDAVCredentialsOnDelete = false
     @AppStorage("enableLocalMetadataImport") var enableLocalMetadataImport = false
     @AppStorage("enableLocalMetadataExport") var enableLocalMetadataExport = false
+    @AppStorage("enableShortDramaScrape") var enableShortDramaScrape = true
+    @AppStorage("enableHongguoShortDramaSource") var enableHongguoShortDramaSource = true
+    @AppStorage("shortDramaSensitivity") var shortDramaSensitivity = "standard"
+    @AppStorage("shortDramaDoubanBudget") var shortDramaDoubanBudget = 20
+    @AppStorage(ContinueWatchingSettings.showDirectPlaybackKey) var showDirectPlaybackInContinueWatching = false
     @AppStorage("tmdbApiKey") var tmdbApiKey = ""
     @AppStorage("tmdbProxyURL") var tmdbProxyURL = ""
     
@@ -34,6 +39,7 @@ struct SettingsView: View {
     @State private var apiValidationMessage = ""
     @State private var apiValidationColor: Color = .primary
     @State private var isShowingOpenSourceInfo = false
+    @State private var isShowingUsageGuide = false
     @State private var isCheckingForUpdate = false
     @State private var updateStatusMessage = ""
     @State private var updateStatusColor: Color = .secondary
@@ -51,12 +57,24 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             Form {
                 // 标题挪进 Form 首行，与下面的分组内容共用同一条左缘
-                HStack {
-                    Text("偏好设置").font(.title2.bold()).foregroundColor(theme.textPrimary)
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("偏好设置").font(.title2.bold()).foregroundColor(theme.textPrimary)
+                        // 教程入口跟在标题下方：与右上角的关闭按钮错开，手指和指针都不容易误触
+                        Button(action: { isShowingUsageGuide = true }) {
+                            Label("使用教程", systemImage: "book.closed")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .accessibilityIdentifier("settings.usageGuide")
+                        .help("查看使用教程与 TMDB 反代网关配置")
+                    }
                     Spacer()
                     Button(action: { dismiss() }) {
                         Image(systemName: "xmark.circle.fill").font(.title2).foregroundColor(theme.textSecondary)
-                    }.buttonStyle(.plain)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("settings.close")
                 }
                 .padding(.vertical, 4)
 
@@ -106,6 +124,12 @@ struct SettingsView: View {
                     Toggle("媒体源显示真实路径", isOn: $showMediaSourceRealPath)
                     Toggle("移除 WebDAV 源时同时删除保存的登录凭据", isOn: $removeWebDAVCredentialsOnDelete)
                         .help("若开启，删除 WebDAV 源会连同钥匙串里的账号密码一并清理。关闭则保留以便下次自动填充。")
+
+                    Toggle("继续播放区显示直接播放文件的进度", isOn: $showDirectPlaybackInContinueWatching)
+                        .help("默认关闭。开启后，用访达双击或拖进海报墙直接播放的文件，也会带着播放进度出现在首页「继续播放」里。")
+                        .onChange(of: showDirectPlaybackInContinueWatching) { _, _ in
+                            NotificationCenter.default.post(name: .libraryUpdated, object: nil)
+                        }
 
                     VideoDefaultHandlerRow(theme: theme)
                 }
@@ -208,6 +232,35 @@ struct SettingsView: View {
                         .help("默认关闭。关闭时蓝光 BDMV 会按 STREAM 文件大小自动选择主电影；开启后会按文件编号播放包含花絮在内的所有 STREAM 视频。")
                 }
                 
+                Section(header: settingsHeader("短剧刮削").padding(.top, 10)) {
+                    Toggle("自动识别短剧，按整部刮削", isOn: $enableShortDramaScrape)
+                        .help("识别「一个目录几十上百集、单集几分钟」的资源，整部只查一次元数据，不按分集各刮一次。")
+
+                    Toggle("查询红果短剧，补充集数与简介", isOn: $enableHongguoShortDramaSource)
+                        .disabled(!enableShortDramaScrape)
+                        .help("红果是短剧自己的库，一条搜索就给齐权威集数、简介、竖版封面与分类标签。只往条目上补空字段，条目身份仍由豆瓣绑定或 TMDB 刮削决定。")
+
+                    Picker("识别灵敏度", selection: $shortDramaSensitivity) {
+                        ForEach(ShortDramaSensitivity.allCases) { sensitivity in
+                            Text(sensitivity.displayName).tag(sensitivity.rawValue)
+                        }
+                    }
+                    .disabled(!enableShortDramaScrape)
+                    .help("判据是同目录文件数、集号能否连号、中位文件大小与已知时长；单集文件或时长至少要给出一条体量证据，激进档不看这条。")
+
+                    Stepper(value: $shortDramaDoubanBudget, in: 1...200, step: 5) {
+                        HStack {
+                            Text("单次扫描的豆瓣查询上限")
+                            Spacer()
+                            Text("\(shortDramaDoubanBudget) 次")
+                                .foregroundColor(theme.textSecondary)
+                                .monospacedDigit()
+                        }
+                    }
+                    .disabled(!enableShortDramaScrape)
+                    .help("豆瓣请求之间有频控，用完的短剧留到下次扫描接着补。")
+                }
+
                 Section(header: settingsHeader("刮削服务 (TMDB)").padding(.top, 10)) {
                     Text("TMDB 代理网关地址")
                         .font(.subheadline.bold())
@@ -221,7 +274,7 @@ struct SettingsView: View {
                         Spacer(minLength: 0)
                     }
 
-                    Text("无法直连官方 API 时可填写反向代理地址，支持域名或带路径前缀的地址，例如 https://proxy.example.com/tmdb。")
+                    Text("无法直连官方 API 时可填写反向代理地址，支持域名或带路径前缀，例如 https://tmdb.example.com/tmdb。填了之后海报与剧照同样改走网关的 /t/p/ 路径。网关怎么搭，点本弹窗顶部的「使用教程」。")
                         .font(.caption)
                         .foregroundColor(theme.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -352,6 +405,9 @@ struct SettingsView: View {
         .environment(\.locale, .init(identifier: appLanguage))
         .sheet(isPresented: $isShowingOpenSourceInfo) {
             OpenSourceInfoSheet(theme: theme)
+        }
+        .sheet(isPresented: $isShowingUsageGuide) {
+            UsageGuideSheet(theme: theme)
         }
         .onAppear {
             restoreAutomaticUpdateStatusIfAvailable()

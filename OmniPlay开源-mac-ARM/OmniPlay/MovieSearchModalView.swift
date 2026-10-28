@@ -104,7 +104,8 @@ struct MovieSearchModalView: View {
             }
             .padding(20)
         }
-        .frame(width: 640, height: 650)
+        // 高度留够：豆瓣与红果的候选区最多 320pt，再压下去结果列表就要被挤没了
+        .frame(width: 640, height: 760)
         .background(theme.backdropLayer)
         .tint(theme.accent)
         .foregroundStyle(theme.textPrimary)
@@ -274,8 +275,9 @@ struct MovieSearchModalView: View {
                     return tempTasks
                 }
                 
-                if let path = resultPoster { PosterManager.shared.downloadPoster(posterPath: path) }
-                if !generatedTasks.isEmpty { ThumbnailManager.shared.startBatchWebFetch(tasks: generatedTasks) }
+                // 手动重新匹配：海报和剧照都绕过自动刮削失败账本
+                if let path = resultPoster { PosterManager.shared.downloadPoster(posterPath: path, force: true) }
+                if !generatedTasks.isEmpty { ThumbnailManager.shared.startBatchWebFetch(tasks: generatedTasks, forceRetry: true) }
                 await MainActor.run { NotificationCenter.default.post(name: .libraryUpdated, object: nil); dismiss() }
             } catch { await MainActor.run { self.errorMessage = "保存失败: \(error.localizedDescription)" } }
         }

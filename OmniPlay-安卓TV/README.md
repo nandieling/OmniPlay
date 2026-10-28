@@ -1,7 +1,7 @@
 # OmniPlay 安卓 TV 版
 
 安卓 TV / 手机客户端，技术栈为 Java + libmpv（NDK 编译 JNI 桥接层）。
-当前版本为独立版（versionName 1.42）：媒体库完全在本机工作，不依赖 OmniPlay Docker 服务端。
+当前版本为独立版（versionName 1.43）：媒体库完全在本机工作，不依赖 OmniPlay Docker 服务端。
 功能对齐 ARM mac 版（`OmniPlay开源-mac-ARM`），交互按遥控器 D-pad 逻辑重做，不照搬 macOS 布局。
 
 ## 功能范围
@@ -43,6 +43,7 @@
 - 手机辅助输入（`PhoneInputServer`）：遥控器打长串文本太慢时，TV 显示二维码与 `http://<TV-IP>:<随机端口>/p/<token>`，手机浏览器打开表单填写后 POST 回电视，直接写进对应输入框。详见下方“手机辅助输入”。
 - 离线缓存（`OfflineCacheManager`）：1.15 起 TV 界面不再提供这个功能（电视本来就接在 NAS 上，盒子内没有可看的大容量空间），详情页与设置里的缓存入口、状态条里的缓存进度一并撤下。下载与容量预检的实现仍留在 `local/` 里，播放时也会继续优先用已缓存的副本，历史数据不会突然换成网络流。
 - 4K DV/HDR 双播放模式（1.32 起开关从设置搬进播放页）：播放页工具条上一个按钮写着当前模式，点开在“字幕兼容播放模式”（色彩管理与字幕兼容性更好、负载更高）与“高性能直出播放模式”（仅针对 4K 或 DV/HDR 生效，其它格式仍走兼容模式）之间切换，切换时先记下进度再原地重开。直出走 `vo=mediacodec_embed`，视频直接进解码器，mpv 不再渲染内封字幕与 OSD，要看字幕就用兼容模式；蓝光 ISO 一律走兼容模式。兼容模式在 1.33 降过一轮负载（峰值探测改用文件元数据、FBO 退到 `rgb10_a2`、4K / HDR 改画 SurfaceView 少一层合成），但 4K HDR 的色调映射仍在电视 GPU 上跑，卡顿就切直出；1.34 起直出也能看字幕，把内封字幕后台转成贴着视频的 sidecar（见下）。
+- 手机端首屏也是海报墙（1.43）：`PhoneMainActivity.onCreate` 原来是「先问一句再进墙」——`LocalPlayApi.hasServerUrl()` 其实就是「有没有媒体源」，于是全新安装一进来先撞上整屏「添加媒体源」表单，库里已经有片子的也要先跑一次 `authStatus` 才轮到墙。现在启动直接 `showHome()`：墙空的时候入口长在墙上，一个媒体源都没有写「还没有媒体源。添加本地目录、WebDAV 或 SMB 后会自动扫描刮削。」配「添加媒体源」按钮，有源但还没刮出条目写「媒体库还是空的，可能正在扫描刮削。」配「刷新」。设置页退成二级页，页头右侧加了「返回」（表单很长，不该逼用户滚到底才能回墙），底部那颗「进入」改成「进入媒体库」，返回键从设置页也回墙而不是退出应用。做法与 1.21 起的电视端一致。
 - 撤下快进倍速（1.42）：1.41 加的「长按松手后连点右键 = 2 / 3 / 4 倍速」去掉——同一次右键按压既要当快进又要当倍速入口，遥控器上手感含混，`mpv speed` 与倍速角标那套代码一并撤走。快进的步长爬升（10× → 30× → 100× → 250×）保留。
 - 绑定豆瓣不再整屏抖一下（1.41）：绑定成功的回调里原先是「删缓存 + `showDetail`」，条目 id 又没变，于是每次绑完都先整屏盖一次「正在进入详情」再掀开——有人看见的是「卡一下」，有人因为详情查询快得几乎看不见就说没问题。现在改成原地 `refreshDetail`（删缓存、不盖整屏），解绑与同类型的 TMDB 关联一并改掉；只有跨类型改绑（条目 id 真变了）才走整页重开。
 - 豆瓣海报多一条兜底（1.41）：页面 meta 里那张 `og:image` 现在是 `qnmob3-sign.doubanio.com` 的签名地址（带 `sa_cv` / `sa_ct`，会过期），以前直接判成不可用。`normalizePoster` 把 `qnmob*` 主机换成 `img3.doubanio.com`——同一张图片在正规 CDN 上就有，签名只是临时门票。于是 `sub-cover` 那行万一哪天没了，海报还能从 meta 里拿到。（1.39 那个 `Referer` 才是「绑了豆瓣没海报」的主因，签名地址这条是补的第二个洞。）
@@ -447,6 +448,10 @@ WebDAV 地址里显示成 `%E4%B8%AD%E6%96%87` 这种一串符号的目录名，
 
 ## 模拟器与真机验证（1.12）
 
+> 2026-10-26：下面这套本机安卓虚拟机已经从项目里删掉了——`.avd`（两台 AVD，4.8G）、`.android-sdk/system-images`（android-34 android-tv arm64-v8a，8.1G）、`.android-sdk/emulator`（1.2G），合计约 14G。日常验证改用 Mac Android Subsystem（`/Applications/Mac Android Subsystem.app`）：它自带 qemu 与 `bridge.apk`，APK 装完在 `~/Applications/Android Apps/` 里生成 `OmniPlay.app` 这类启动项，不需要 AVD。项目里的 `.android-sdk` 只留打包要用的 `build-tools` / `platforms` / `platform-tools` / `cmdline-tools` / `ndk` / `cmake`（3.2G），`release.sh` 与 `harness.sh` 都不碰被删的三样，删完照常出包、JVM 用例全绿。要恢复模拟器，下面的命令原样跑一遍即可（`sdkmanager` 会重新拉那 8.1G 镜像）。
+>
+> 一个坑：MAS 里跑的是 Android 手机形态，`LauncherActivity` 按 `uiMode` / `FEATURE_LEANBACK` 分发，不报电视形态就会进 `PhoneMainActivity`。要看 TV 那一支就直接起 `MainActivity`（能拿到 adb 时：`adb shell am start -n com.omniplay.tv/.MainActivity`），或者上真机。
+
 Apple Silicon 上用官方 Android TV 镜像即可，arm64 镜像原生跑，不用转译：
 
 ```sh
@@ -570,7 +575,7 @@ GRADLE_USER_HOME="$PWD/.gradle" \
 发布到 Releases / 设备前的建议命名：
 
 ```sh
-cp app/build/outputs/apk/release/app-release.apk dist/OmniPlay-TV-v1.42-arm64.apk
+cp app/build/outputs/apk/release/app-release.apk dist/OmniPlay-TV-v1.43-arm64.apk
 ```
 
 ### 安装到设备
@@ -664,6 +669,7 @@ ANDROID_SDK_ROOT="$PWD/.android-sdk" "$ANDROID_SDK_ROOT/platform-tools/adb" inst
 - 播放中切换兼容字幕播放 / 高性能直出后画面重叠、发闷两路声音、甚至卡住，或者退出软件后电视还在放声音：1.36 修的是同一个漏——旧播放器没被释放。装这版即可；旧版临时办法是切模式前先退回详情页再进来。
 - 1080p 兼容模式里 PGS 字幕有、ASS 字幕没字：1.37 起覆盖层认识 ASS 了（转档出来的 `片名.zh.ass` 以前按 SRT 读，一行都读不出来）。
 - 字幕轨太多翻不到、或者看不出当前选的是哪条：1.37 起菜单限高可滚动，选中那行有勾，标题写着「已选 ××」。
+- 手机 / 平板界面一打开就是「添加媒体源」那张表单，得滚到底点「进入」才看见片子：1.43 起首屏就是海报墙，媒体源为空时墙上自带「添加媒体源」入口。电视端 1.21 起就是这样的。
 - 绑定豆瓣后整屏闪一次「正在进入详情」：1.41 起原地刷新，不再盖整屏 loading。老版本上这就是那条回调删缓存后重开详情页造成的。
 - 快进慢、跳不过片头：1.41 起长按左右键的步长会爬到 250× 实时速度，按住越久跳得越猛。（1.41 那套连点右键上倍速的做法 1.42 已撤下。）
 - 全屏播放时画面被拉伸（人物变胖、上下没黑边）：1.40 起播放页右下角那颗「画面比例」可选保持比例 / 拉伸，默认保持比例。直出模式下这问题是固有的（解码器直写 SurfaceView），旧版本只能退回兼容模式躲开。

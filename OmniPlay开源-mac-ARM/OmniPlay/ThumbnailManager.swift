@@ -106,10 +106,20 @@ class ThumbnailManager: ObservableObject {
     private func startBatchWebFetch(tasks: [EpisodeThumbnailTask], forceRetry: Bool = false) {
         DispatchQueue.global(qos: .background).async {
             var didAppend = false
+            var skippedGaveUp = 0
             for task in tasks {
                 // 核心防重复拦截：本地已存在，直接跳过
                 let localFileURL = self.thumbDirectory.appendingPathComponent("\(task.fileId).jpg")
                 if FileManager.default.fileExists(atPath: localFileURL.path) { continue }
+                // 抓取失败按分集记账：自动连续失败 3 次就收手。forceRetry 只有用户手动扫描
+                // 或手动重新匹配才会传进来（那时账本已经清零），它同时代表「用户要求再试一次」。
+                let failureTarget = ScrapeFailureTracker.Target.still(task.fileId)
+                if forceRetry {
+                    ScrapeFailureTracker.shared.clear(failureTarget)
+                } else if !ScrapeFailureTracker.shared.allowsAutoAttempt(failureTarget) {
+                    skippedGaveUp += 1
+                    continue
+                }
                 // TMDB 确认没有剧照的分集，不重试，避免每轮扫描重复打 API。
                 if self.confirmedNoStillFileIDs.contains(task.fileId) {
                     if forceRetry {
@@ -137,6 +147,9 @@ class ThumbnailManager: ObservableObject {
                 if !alreadyTracked { didAppend = true }
             }
             if didAppend { self.processNextWebFetch() }
+            if skippedGaveUp > 0 {
+                print("[OmniPlay][剧照] \(skippedGaveUp) 个分集剧照已连续失败 \(ScrapeFailureTracker.maxAutoAttempts) 次，本轮不再自动抓取。")
+            }
         }
     }
 
@@ -245,10 +258,12 @@ class ThumbnailManager: ObservableObject {
     private func applyFetchOutcome(_ outcome: EpisodeStillFetchOutcome, fileId: String) {
         switch outcome {
         case .success:
+            ScrapeFailureTracker.shared.clear(.still(fileId))
             if failedFetchFileIDs.remove(fileId) != nil || failedFetchReasons.removeValue(forKey: fileId) != nil {
                 persistFailedFetchSet()
             }
         case .confirmedNoStill:
+            ScrapeFailureTracker.shared.clear(.still(fileId))
             if confirmedNoStillFileIDs.insert(fileId).inserted {
                 persistNoStillSet()
             }
@@ -259,6 +274,7 @@ class ThumbnailManager: ObservableObject {
             failedFetchFileIDs.insert(fileId)
             failedFetchReasons[fileId] = reason
             persistFailedFetchSet()
+            ScrapeFailureTracker.shared.recordFailure(.still(fileId))
         }
     }
 
@@ -316,9 +332,19 @@ class ThumbnailManager: ObservableObject {
                 return lookup.sawTMDBResponse ? .confirmedNoStill : .fetchFailed(reason: "TMDB still request failed")
             }
 
-            let imageURL = URL(string: "https://image.tmdb.org/t/p/w500\(stillPath)")!
-            let (imageData, _) = try await URLSession.shared.data(from: imageURL)
-            
+            // 网关与官方各试一次：网关只反代 API 时，剧照仍能取到
+            var stillData: Data?
+            var lastStillError: Error = URLError(.unsupportedURL)
+            for attemptURL in TMDBService.imageURLAttempts(
+                officialURLString: TMDBService.officialImageURLString(forPath: stillPath)) {
+                do {
+                    stillData = try await URLSession.shared.data(from: attemptURL).0
+                    break
+                } catch {
+                    lastStillError = error
+                }
+            }
+            guard let imageData = stillData else { throw lastStillError }
             let localFileURL = thumbDirectory.appendingPathComponent("\(fileId).jpg")
             try imageData.write(to: localFileURL, options: .atomic)
 
@@ -502,6 +528,7 @@ class ThumbnailManager: ObservableObject {
         if confirmedNoStillFileIDs.remove(fileId) != nil { changed = true }
         if failedFetchFileIDs.remove(fileId) != nil { changed = true }
         if failedFetchReasons.removeValue(forKey: fileId) != nil { changed = true }
+        ScrapeFailureTracker.shared.clear(.still(fileId))
         if changed {
             persistNoStillSet()
             persistFailedFetchSet()
@@ -550,6 +577,7 @@ class ThumbnailManager: ObservableObject {
             if confirmedNoStillFileIDs.remove(fileId) != nil { changed = true }
             if failedFetchFileIDs.remove(fileId) != nil { changed = true }
             if failedFetchReasons.removeValue(forKey: fileId) != nil { changed = true }
+            ScrapeFailureTracker.shared.clear(.still(fileId))
         }
         if changed {
             persistNoStillSet()
@@ -571,7 +599,10 @@ class ThumbnailManager: ObservableObject {
         }
     }
     
-    func enqueueMissingEpisodeThumbnailsAcrossLibrary(orderedMovieIDs: [Int64] = []) {
+    /// 全库补抓缺失的分集剧照。
+    /// - Parameter forceRetry: 用户手动扫描刮削传 true（连「TMDB 已确认无剧照」一起作废重来）；
+    ///   开机自动扫描传 false，已经放弃的目标不再自动重试，否则每轮开机都重打一遍 API。
+    func enqueueMissingEpisodeThumbnailsAcrossLibrary(orderedMovieIDs: [Int64] = [], forceRetry: Bool = false) {
         DispatchQueue.global(qos: .userInitiated).async {
             guard let queue = AppDatabase.shared.dbQueue else { return }
             do {
@@ -610,10 +641,10 @@ class ThumbnailManager: ObservableObject {
 
                 let pendingRetry = self.failedFetchFileIDs.count
 
-                print("[OmniPlay][剧照] 补抓任务：\(tasks.count) 个缺失分集剧照待处理，已确认无剧照 \(skippedNoStill) 个，待重试 \(pendingRetry) 个。")
+                print("[OmniPlay][剧照] 补抓任务：\(tasks.count) 个缺失分集剧照待处理，已确认无剧照 \(skippedNoStill) 个，待重试 \(pendingRetry) 个，已放弃 \(ScrapeFailureTracker.shared.gaveUpTargetCount) 个（\(forceRetry ? "手动扫描，全部重新计数" : "自动扫描")）。")
 
                 if !tasks.isEmpty {
-                    self.startBatchWebFetch(tasks: tasks, forceRetry: true)
+                    self.startBatchWebFetch(tasks: tasks, forceRetry: forceRetry)
                 }
             } catch {
 

@@ -298,6 +298,58 @@ final class DirectFilePlaybackManager: ObservableObject {
     }
 }
 
+/// 主线程卡顿探针：定时器在主线程跑，被卡住的那一轮会在恢复后报出迟到了多久。
+/// 关闭播放页那条路径上的「卡好几秒」到底卡在哪一帧，靠它对时间轴。
+final class MainThreadWatchdog: @unchecked Sendable {
+    static let shared = MainThreadWatchdog()
+    private var timer: Timer?
+    nonisolated(unsafe) private static var lastTick = Date()
+    private init() {}
+
+    /// 可见窗口名册一变就记一行：查「首页什么时候没的」用。
+    private static var lastInventory = ""
+    private static var pollTimer: Timer?
+
+    func startWindowPolling() {
+        guard MainThreadWatchdog.pollTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0, repeats: true) { _ in
+            let snapshot = NSApp.windows.map { win -> String in
+                let flags = [
+                    win.isVisible ? "可见" : nil,
+                    win.isMiniaturized ? "最小化" : nil,
+                    win.isKeyWindow ? "键" : nil,
+                    win.isMainWindow ? "主" : nil,
+                    win.styleMask.contains(.fullScreen) ? "全屏" : nil
+                ].compactMap { $0 }
+                return "\(String(describing: type(of: win)))\"\(win.title)\"[\(flags.joined(separator: ","))]"
+            }.joined(separator: " | ")
+            if snapshot != MainThreadWatchdog.lastInventory {
+                MainThreadWatchdog.lastInventory = snapshot
+                print("[WindowRoster][\(Date())] active=\(NSApp.isActive) \(snapshot)")
+                fflush(stdout)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        MainThreadWatchdog.pollTimer = timer
+    }
+
+    func start() {
+        guard timer == nil else { return }
+        let timer = Timer(timeInterval: 0.2, repeats: true) { _ in
+            let now = Date()
+            let late = now.timeIntervalSince(MainThreadWatchdog.lastTick) - 0.2
+            MainThreadWatchdog.lastTick = now
+            if late > 0.35 {
+                print("[Watchdog][\(now)] 主线程被占 \(Int(late * 1000))ms")
+                fflush(stdout)
+            }
+        }
+        // 全屏动画与菜单追踪期间 RunLoop 不在 default mode，用 .common 才不会漏报
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+}
+
 /// 播放进度的「立刻落盘」登记处。
 ///
 /// ⌘Q 这条退出路径上没有下一轮 RunLoop：SwiftUI 的 onDisappear 不一定跑得到，
@@ -324,6 +376,35 @@ enum PlaybackProgressFlushCenter {
 }
 
 final class OmniPlayAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // 关掉 AppKit 的自动标签页：首页和播放窗都是普通带标题窗口，一旦被自动合进同一个标签组，
+        // 「关掉播放页」就变成了「关掉一个标签」，屏幕上留下的是新建的那张首页标签，
+        // 用户看到的既不是原来的详情页，也要多点一次才关得干净。
+        NSWindow.allowsAutomaticWindowTabbing = false
+#if DEBUG
+        // 这两个探针只为排查窗口问题而跑（0.2 s 定时器 + 每秒比对窗口名册），发行版不启动
+        MainThreadWatchdog.shared.start()
+        MainThreadWatchdog.shared.startWindowPolling()
+#endif
+        DirectPlaybackWindowManager.shared.enforceSingleHomeWindow("启动完成")
+        DirectPlaybackWindowManager.shared.traceWindows("启动完成")
+        // WindowGroup 会因为「用文件打开」这类外部事件再建一张首页；一冒头就收掉，
+        // 用户不会看到首页凭空多出一张标签/窗口
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { note in
+            // 只对「看起来像另一张首页」的窗口动手。设置弹窗的 sheet 承载窗也会拿到键盘，
+            // 以前每次都跑一遍清理，弹窗被当成重复首页关掉，SwiftUI 立刻重挂，弹窗来回闪。
+            guard let window = note.object as? NSWindow else { return }
+            Task { @MainActor in
+                guard DirectPlaybackWindowManager.shared.isMainContentWindow(window) else { return }
+                DirectPlaybackWindowManager.shared.enforceSingleHomeWindow("新窗口拿到键盘")
+            }
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         // 在这里同步写库；写完才轮到 iCloud 那份 willTerminate 通知推最新媒体库
         PlaybackProgressFlushCenter.flushAll()
@@ -331,6 +412,8 @@ final class OmniPlayAppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         NSApp.activate(ignoringOtherApps: true)
+        DirectPlaybackWindowManager.shared.traceWindows("收到打开文件")
+        DirectPlaybackWindowManager.shared.enforceSingleHomeWindow("收到打开文件")
         Task { @MainActor in
             DirectFilePlaybackManager.shared.handleOpen(urls: urls)
         }
@@ -355,7 +438,9 @@ final class OmniPlayAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if DirectPlaybackWindowManager.shared.focusPlaybackWindowIfVisible() {
+        // 关闭收尾期间别把播放窗口顶回来：那会儿它只是被退出全屏的动画翻回可见的残影。
+        if !DirectPlaybackWindowManager.shared.isPlaybackWindowClosing,
+           DirectPlaybackWindowManager.shared.focusPlaybackWindowIfVisible() {
             return false
         }
         if !flag, DirectPlaybackWindowManager.shared.restoreWindowForReopen() {
@@ -365,7 +450,8 @@ final class OmniPlayAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        if DirectPlaybackWindowManager.shared.focusPlaybackWindowIfVisible() {
+        if !DirectPlaybackWindowManager.shared.isPlaybackWindowClosing,
+           DirectPlaybackWindowManager.shared.focusPlaybackWindowIfVisible() {
             return
         }
         if !NSApp.windows.contains(where: { $0.isVisible }) {

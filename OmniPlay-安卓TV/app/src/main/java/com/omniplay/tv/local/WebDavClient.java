@@ -308,6 +308,15 @@ public final class WebDavClient {
         return streamUrl(relativePath);
     }
 
+    /**
+     * 丢掉某个目录的清单缓存。扫描期间缓存是对的一致性够用，但「认一认媒体源里现成的外挂字幕」
+     * 要的是此刻目录里有什么——NAS 刚写回来的那份不能还被旧清单挡着。
+     */
+    public void forgetDirectory(String url) {
+        directoryCache.remove(url);
+        directoryCache.remove(ensureTrailingSlash(url));
+    }
+
     private static String ensureTrailingSlash(String url) {
         return url.endsWith("/") ? url : url + "/";
     }

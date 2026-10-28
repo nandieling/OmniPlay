@@ -1045,6 +1045,8 @@ struct PlayerScreen: View {
     var initialSourceProtocolType: String? = nil
     var initialSourceAuthConfig: String? = nil
     var initialPlaylistFiles: [VideoFile]? = nil
+    /// 直开播放时的图层交接件：全屏动画落定前播放器只做探测与缓冲，不绑图层。
+    var videoOutputHandoff: DirectPlayerHandoff? = nil
     
     @StateObject private var playerManager = MPVPlayerManager()
     @AppStorage("seekDuration") var seekDuration: Int = 10
@@ -1131,6 +1133,7 @@ struct PlayerScreen: View {
         let queue = String(cString: __dispatch_queue_get_label(nil), encoding: .utf8) ?? "unknown"
         let thread = Thread.isMainThread ? "main" : "bg"
         print("[PlayerScreenClose][\(formatter.string(from: Date()))][\(thread)][q:\(queue)] \(message)")
+        fflush(stdout)
     }
     
     // 智能推算当前播放集数标题
@@ -1347,7 +1350,7 @@ struct PlayerScreen: View {
             Color.black.edgesIgnoringSafeArea(.all)
             
             if !videoURLs.isEmpty {
-                MPVVideoView(playerManager: playerManager)
+                MPVVideoView(playerManager: playerManager, handoff: videoOutputHandoff)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
                 .onTapGesture { withAnimation(.easeInOut(duration: 0.3)) { showControls.toggle() }; if showControls { resetHideTimer() } }

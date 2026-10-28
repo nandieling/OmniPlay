@@ -1752,21 +1752,56 @@ public final class LocalEngine {
      * ``片名.语言.格式``），登记进库就能直接在播放菜单里用。登记一条之后
      * {@code sidecarCandidates} 也不会再挑中这个文件，省下自己重抽一遍的带宽。
      *
-     * @param streams 这条文件的内封字幕轨，用来推要探哪些语言码；传 null 走兜底那几个
+     * <p>先列一次视频所在的目录，再从「同目录文件名」里挑：NAS 写的语言码跟着内封轨自带的标
+     * （{@code chs} / {@code cht} / {@code und} 都会出现），只拿几个码去 HEAD 就会漏；
+     * 而一次目录列举本来就比十几次 HEAD 便宜。源不会列举（返回 null）时才退回按名猜。
+     *
+     * @param streams 这条文件的内封字幕轨，只在源不会列举时用来推要探哪些语言码；传 null 走兜底那几个
      * @return 新登记了几条
      */
     public int discoverSidecars(String videoFileId, String relativePath,
                                 java.util.List<Models.VideoFileStream> streams) {
-        SubtitleSidecarService.Access access = sidecarAccessFor(relativePath);
+        SubtitleSidecarService.Access access = sidecarAccessFor(videoFileId, relativePath);
         if (access == null) {
             return 0;
+        }
+        java.util.Set<String> recorded = new java.util.HashSet<>();
+        int nextSlot = 1;
+        for (Sidecar sidecar : sidecarsFor(videoFileId)) {
+            recorded.add(sidecar.relativePath);
+            nextSlot = Math.max(nextSlot, sidecar.trackNumber - 899);
+        }
+        java.util.List<String> siblings;
+        try {
+            siblings = access.listFileNames(directoryOf(relativePath));
+        } catch (Exception ignored) {
+            siblings = null;
+        }
+        if (siblings != null) {
+            int listed = 0;
+            for (SubtitleSidecarService.SidecarName name
+                    : SubtitleSidecarService.sidecarNamesFor(relativePath, siblings)) {
+                if (recorded.contains(name.relativePath)) {
+                    continue;
+                }
+                recordExternalSidecar(videoFileId, 900 + nextSlot++,
+                        name.relativePath, name.language, name.format);
+                listed++;
+            }
+            return listed;
         }
         java.util.LinkedHashSet<String> languages = new java.util.LinkedHashSet<>();
         if (streams != null) {
             // 蓝光一张盘能有十几条字幕轨，探语言码探到十几轮就没必要了：挑前三条足够。
             for (Models.VideoFileStream stream : streams) {
-                if (languages.size() >= 3) {
+                if (languages.size() >= 6) {
                     break;
+                }
+                // 归一化后的码和轨道原始标的那个码都可能出现在文件名里，两个都试。
+                String raw = stream.language == null ? "" : stream.language.trim().toLowerCase(java.util.Locale.ROOT);
+                String primary = raw.split("[-_]", 2)[0];
+                if (primary.matches("[a-z][a-z0-9-]{0,7}")) {
+                    languages.add(primary);
                 }
                 String language = com.omniplay.tv.subtitle.MatroskaSubtitleExtractor
                         .normalizeLanguage(stream.language);
@@ -1775,17 +1810,12 @@ public final class LocalEngine {
                 }
             }
         }
-        // NAS 那台服务只会写「片名.偏好语言.格式」。文件里的字幕轨常常不标语言、或者标 und，
-        // 只按文件推出来的语言探就会漏掉现成的那份，所以偏好语言那几个码总探一遍。
+        // 只有列不出目录的源才走到这儿：按几个像样的语言码去 HEAD，认中一条算一条。
         java.util.Collections.addAll(languages, SIDECAR_FALLBACK_LANGS);
         String preferred = com.omniplay.tv.subtitle.MatroskaSubtitleExtractor
                 .normalizeLanguage(settings.defaultSubtitleLanguage());
         if (preferred != null && !preferred.isEmpty()) {
             languages.add(preferred);
-        }
-        java.util.Set<String> recorded = new java.util.HashSet<>();
-        for (Sidecar sidecar : sidecarsFor(videoFileId)) {
-            recorded.add(sidecar.relativePath);
         }
         int found = 0;
         int slot = 0;
@@ -1796,19 +1826,32 @@ public final class LocalEngine {
                 if (recorded.contains(path) || !access.exists(path)) {
                     continue;
                 }
-                LocalMediaLibrary.SidecarRow row = new LocalMediaLibrary.SidecarRow();
-                row.videoFileId = videoFileId;
-                row.trackNumber = 900 + slot;
-                row.relativePath = path;
-                row.language = language;
-                row.format = format;
-                row.status = "done";
-                library.recordSidecar(row);
+                recordExternalSidecar(videoFileId, 900 + nextSlot + slot, path, language, format);
                 recorded.add(path);
                 found++;
             }
         }
         return found;
+    }
+
+    /** 认现成外挂字幕时登记一条：状态直接写 done，轨位 900 以后表示「不是本机转的」。 */
+    private void recordExternalSidecar(String videoFileId, int trackNumber, String path,
+                                       String language, String format) {
+        LocalMediaLibrary.SidecarRow row = new LocalMediaLibrary.SidecarRow();
+        row.videoFileId = videoFileId;
+        row.trackNumber = trackNumber;
+        row.relativePath = path;
+        row.language = language;
+        row.format = format;
+        row.status = "done";
+        library.recordSidecar(row);
+    }
+
+    /** {@code Movies/A/B.mkv} → {@code Movies/A/}；根目录下的文件返回空串。 */
+    private static String directoryOf(String relativePath) {
+        String relative = relativePath == null ? "" : relativePath.replace('\\', '/');
+        int slash = relative.lastIndexOf('/');
+        return slash < 0 ? "" : relative.substring(0, slash + 1);
     }
 
     public java.util.List<Sidecar> sidecarsFor(String videoFileId) {
@@ -1820,6 +1863,63 @@ public final class LocalEngine {
     }
 
     /** 找一个能读写这条相对路径的媒体源。本地源看文件在不在，网络源按添加顺序取第一个。 */
+    /**
+     * 这条视频该用哪个媒体源读写。文件号形如 {@code local-3:...}（见 {@code fileId}），
+     * 先按号取源。
+     *
+     * <p>以前这里不看号，直接返回第一个启用的 WebDAV 源（没有 WebDAV 才看 SMB）。同时挂了
+     * WebDAV 和 SMB 的电视上，SMB 那条片子永远被拿去 WebDAV 根目录找 sidecar——NAS 明明已经把
+     * 字幕写在视频旁边，播放页还是「找不到」。
+     */
+    public SubtitleSidecarService.Access sidecarAccessFor(String videoFileId, String relativePath) {
+        Source source = sourceForFileId(videoFileId);
+        if (source != null && source.enabled) {
+            SubtitleSidecarService.Access access = accessFor(source);
+            if (access != null) {
+                return access;
+            }
+        }
+        return sidecarAccessFor(relativePath);
+    }
+
+    /** 从 {@code local-<源号>:<路径>} 这样的文件号里取出源；认不出来返回 null。 */
+    private Source sourceForFileId(String videoFileId) {
+        if (videoFileId == null || !videoFileId.startsWith("local-")) {
+            return null;
+        }
+        int colon = videoFileId.indexOf(':');
+        if (colon < 0) {
+            return null;
+        }
+        int id;
+        try {
+            id = Integer.parseInt(videoFileId.substring("local-".length(), colon));
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+        for (Source source : sources()) {
+            if (source.id == id) {
+                return source;
+            }
+        }
+        return null;
+    }
+
+    /** 给一个源配读写入口；认不出的类型返回 null。 */
+    private SubtitleSidecarService.Access accessFor(Source source) {
+        if ("local".equals(source.kind)) {
+            return new SubtitleSidecarService.LocalAccess(new File(source.path));
+        }
+        if ("webdav".equals(source.kind)) {
+            return new SubtitleSidecarService.WebDavAccess(source.path, source.username, source.password);
+        }
+        if ("smb".equals(source.kind)) {
+            return new SubtitleSidecarService.SmbAccess(smbClient(source));
+        }
+        return null;
+    }
+
+    /** 兜底：不知道这条视频属于哪个源时，谁先看得到这个文件就用谁。 */
     public SubtitleSidecarService.Access sidecarAccessFor(String relativePath) {
         SubtitleSidecarService.Access webDav = null;
         SubtitleSidecarService.Access smb = null;
@@ -1859,7 +1959,7 @@ public final class LocalEngine {
 
     /** 转一条视频文件里最该看的那条字幕轨。可以在任何后台线程上调。 */
     public SidecarReport transcodeSidecar(String videoFileId, String relativePath) {
-        SubtitleSidecarService.Access access = sidecarAccessFor(relativePath);
+        SubtitleSidecarService.Access access = sidecarAccessFor(videoFileId, relativePath);
         if (access == null) {
             return new SidecarReport(false, "这个媒体源现在读写不了。");
         }
@@ -1926,7 +2026,7 @@ public final class LocalEngine {
 
     /** 播放侧读产物：文本轨几十 KB，位图轨能有几百 MB，都直接流式读完再交给覆盖层。 */
     public byte[] readSidecar(Sidecar sidecar) throws java.io.IOException {
-        SubtitleSidecarService.Access access = sidecarAccessFor(sidecar.relativePath);
+        SubtitleSidecarService.Access access = sidecarAccessFor(sidecar.videoFileId, sidecar.relativePath);
         if (access == null) {
             throw new java.io.IOException("媒体源现在读写不了。");
         }

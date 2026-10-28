@@ -292,6 +292,10 @@ public final class MatroskaSubtitleExtractor {
             case "zho":
             case "cmn":
             case "yue":
+            // 压制组常标的简中 / 繁中，菜单里都该写「中文」
+            case "chs":
+            case "cht":
+            case "zhs":
                 return "zh";
             case "en":
             case "eng":

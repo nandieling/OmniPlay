@@ -1154,6 +1154,13 @@ class MediaLibraryManager {
         placeholderMovieID: Int64? = nil,
         exposeFailures: Bool = true
     ) async throws {
+        // 短剧支持之前入库的老库先按目录合并成整部，再进刮削队列
+        let reclassification = try await reclassifyExistingShortDramaEntries(sourceID: sourceID)
+        if reclassification.mergedDirectories > 0 || reclassification.taggedDirectories > 0
+            || reclassification.backfilledMetadataRows > 0 || reclassification.stampedEntries > 0 {
+            print("🧩 短剧重分类：合并 \(reclassification.mergedDirectories) 个旧目录，只补标签 \(reclassification.taggedDirectories) 个目录，补齐旁表 \(reclassification.backfilledMetadataRows) 条，形态落库 \(reclassification.stampedEntries) 个文件")
+        }
+
         let unmatchedFiles = try await dbQueue.read { db in
             if let sourceID, let placeholderMovieID {
                 return try VideoFile.fetchAll(
@@ -1209,6 +1216,10 @@ class MediaLibraryManager {
         print("🤖 递进刮削器：开始刮削 \(representativeFiles.count) 个影视条目（来自 \(unmatchedFiles.count) 个新文件）...")
         
         var tvAutoReuseCache: [String: TMDBResult] = [:]
+        // 豆瓣有 12 秒闸门，单轮扫描的短剧请求按配额发，用完的条目下次扫描接着补
+        var shortDramaDoubanBudget = ShortDrama.doubanBudgetPerScan()
+        // 连续失败满 3 次、本轮直接跳过的条目数（手动扫描刮削会清零账本，见 PosterWallView）
+        var skippedGaveUpEntries = 0
 
         for file in representativeFiles {
             try Task.checkCancellation()
@@ -1219,6 +1230,24 @@ class MediaLibraryManager {
             }
             guard isStillUnmatched else { continue }
             if let movieId = file.movieId { let isLocked = try await dbQueue.read { db in try Movie.fetchOne(db, key: movieId)?.isLocked ?? false }; if isLocked { continue } }
+
+            // 认不出的条目以前每轮扫描都要把 5 种查询全打一遍，整库一直空转。
+            // 现在按代表文件记账，自动连续失败 3 次就不再自动刮；手动点「扫描刮削」会清零账本。
+            let failureTarget = ScrapeFailureTracker.Target.scrape(file.id)
+            guard ScrapeFailureTracker.shared.allowsAutoAttempt(failureTarget) else {
+                skippedGaveUpEntries += 1
+                continue
+            }
+
+            if file.isShortDrama {
+                // 短剧按整部处理：一次目录一次来源查询，走完来源链就收尾
+                try await scrapeShortDramaEntry(
+                    for: file,
+                    doubanBudget: &shortDramaDoubanBudget,
+                    tvCache: &tvAutoReuseCache
+                )
+                continue
+            }
             
             if let reuseKey = tvAutoReuseKey(for: file),
                let cached = tvAutoReuseCache[reuseKey],
@@ -1377,7 +1406,13 @@ class MediaLibraryManager {
                     print("   ❌ 彻底未找到: [\(fullTitle)]")
                 }
             }
-            
+
+            // 走到这里说明 5 轮查询都没认出来，记一次失败
+            ScrapeFailureTracker.shared.recordFailure(failureTarget)
+        }
+
+        if skippedGaveUpEntries > 0 {
+            print("🤖 递进刮削器：\(skippedGaveUpEntries) 个条目已自动失败 \(ScrapeFailureTracker.maxAutoAttempts) 次，本轮跳过；点首页「扫描刮削」会重新计数。")
         }
 
         if exposeFailures {
@@ -1548,6 +1583,9 @@ class MediaLibraryManager {
         let extracted = extractTitlesAndYear(from: file)
         let chineseFallback = extracted.chineseTitle ?? extracted.parentChineseTitle
         let resultId = Int64(tmdbResult.id); let oldFakeMovieId = file.movieId; let rTitle = tmdbResult.preferredTitle(chineseFallback: chineseFallback); let rDate = tmdbResult.releaseDate ?? tmdbResult.firstAirDate; let rOverview = tmdbResult.overview; let rPoster = tmdbResult.posterPath; let rVoteAverage = tmdbResult.voteAverage; let rFileId = file.id
+        // 形态也在这一步落库：短剧条目保持 shortDrama，其余按来源给的类型记 movie / tv，
+        // 首页「只看电影 / 只看剧集」靠的就是这一列。
+        let rKind = tmdbResult.mediaType == "tv" ? MediaKindResolver.tv : MediaKindResolver.movie
 
         // 🌟 导演/主演：强制刮削——只要 TMDB 凭据可用就请求 credits 并更新名单（结果按 TMDB id 缓存，同剧集逐集刮削不重复耗配额；请求为空时保留原值）。
         var rDirectorInfos: [TMDBPersonInfo] = []
@@ -1595,6 +1633,7 @@ class MediaLibraryManager {
                 for var groupedFile in groupedFiles {
                     groupedFile.mediaType = "movie"
                     groupedFile.movieId = movie.id
+                    if groupedFile.mediaKind != ShortDrama.kindValue { groupedFile.mediaKind = rKind }
                     try groupedFile.update(db)
                 }
                 if var douban = try DoubanMetadata.fetchOne(db, key: fakeId),
@@ -1603,9 +1642,15 @@ class MediaLibraryManager {
                     douban.movieId = realMovieId
                     try douban.save(db)
                 }
+                if let realMovieId = movie.id, fakeId != realMovieId {
+                    // 只改主键，别先删后插：占位行马上要被删掉，
+                    // 外键级联会在删与插之间把整行带走。
+                    try? ShortDramaMetadata.rekey(db, from: fakeId, to: realMovieId)
+                }
             } else if var fileToUpdate = try VideoFile.fetchOne(db, key: rFileId) {
                 fileToUpdate.mediaType = "movie"
                 fileToUpdate.movieId = movie.id
+                if fileToUpdate.mediaKind != ShortDrama.kindValue { fileToUpdate.mediaKind = rKind }
                 try fileToUpdate.update(db)
             }
             if let fakeId = oldFakeMovieId, fakeId < 0 { _ = try Movie.deleteOne(db, key: fakeId) }
@@ -1699,12 +1744,496 @@ class MediaLibraryManager {
         }
     }
 
+    // MARK: - 短剧刮削
+    //
+    // 一个目录一次来源查询：豆瓣搜索一条请求就给齐标题、评分、竖版海报、别名和单集时长；
+    // 豆瓣没命中再退 TMDB；都没有就按本地目录入库，不标「刮削失败」。
+    // 在线库对国产短剧本来就是残缺覆盖，先让片子能看能搜比标红待补有用。
+
+    /// 已入库文件里已知的时长（播过才会有），按目录归组喂给短剧判定。
+    private func shortDramaKnownDurations() async throws -> [String: [Double]] {
+        try await dbQueue.read { db in
+            var grouped: [String: [Double]] = [:]
+            let rows = try Row.fetchAll(db, sql: "SELECT relativePath, duration FROM videoFile WHERE duration > 0")
+            for row in rows {
+                let path: String = row["relativePath"]
+                let duration: Double = row["duration"]
+                let key = ShortDramaClassifier.directoryKey(relativePath: path)
+                guard !key.isEmpty else { continue }
+                grouped[key, default: []].append(duration)
+            }
+            return grouped
+        }
+    }
+
+    nonisolated private func shortDramaAwarePlaceholderOverview(for group: PendingScannedMediaGroup) -> String {
+        if group.mediaKind == ShortDrama.kindValue {
+            return "已识别为短剧（\(group.items.count) 集），正在补充元数据…"
+        }
+        return group.shouldAttemptAutomaticScrape ? "正在排队等待刮削..." : "未能自动识别影视名称，可手动重新匹配。"
+    }
+
+/// 老库重分类的产出：合并了多少目录，以及多少目录只补了类型标签。
+struct ShortDramaReclassification {
+    var mergedDirectories = 0
+    var taggedDirectories = 0
+    /// 旁表行丢过（占位行换真实 id 时被级联删掉）后补齐的条数。
+    var backfilledMetadataRows = 0
+    /// 旧库补上 movie / tv 形态的文件数，首页类型筛选靠它有数据。
+    var stampedEntries = 0
+}
+
+/// 重分类要读的旧库行：一个文件一行，按目录归组后喂给判定。
+private struct ShortDramaLegacyRow {
+    let fileID: String
+    let relativePath: String
+    let fileName: String
+    let fileSize: Int64
+    let duration: Double
+    let movieId: Int64
+}
+
+    /// 老库重分类。短剧支持之前入库的目录，每个分集各占一条影片记录，
+    /// 这里把它们并成一条并补上短剧形态，交给随后的刮削按整部处理。
+    /// 用户手工整理过的目录（有海报、有评分、绑过豆瓣、打过 NeoDB 标记、锁过）一律不动，
+    /// 免得把人家理好的库冲掉。
+    @discardableResult
+    func reclassifyExistingShortDramaEntries(sourceID: Int64?) async throws -> ShortDramaReclassification {
+        var result = ShortDramaReclassification()
+        guard ShortDrama.isEnabled() else { return result }
+        let sourceClause = sourceID == nil ? "" : " AND sourceId = ?"
+        let sourceArguments = sourceID.map { StatementArguments([$0]) } ?? StatementArguments()
+        let rows: [ShortDramaLegacyRow] = try await dbQueue.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT id, relativePath, fileName, fileSize, duration, movieId
+                    FROM videoFile
+                    WHERE mediaKind IS NULL AND movieId IS NOT NULL\(sourceClause)
+                    """,
+                arguments: sourceArguments
+            ).map { row in
+                ShortDramaLegacyRow(
+                    fileID: row["id"],
+                    relativePath: row["relativePath"],
+                    fileName: row["fileName"],
+                    fileSize: row["fileSize"],
+                    duration: row["duration"],
+                    movieId: row["movieId"]
+                )
+            }
+        }
+        let relevantRows = rows
+
+        var filesByDirectory: [String: [ShortDramaLegacyRow]] = [:]
+        for row in relevantRows {
+            let key = ShortDramaClassifier.directoryKey(relativePath: row.relativePath)
+            guard !key.isEmpty else { continue }
+            filesByDirectory[key, default: []].append(row)
+        }
+        let candidates = filesByDirectory.filter { $0.value.count >= 10 }
+
+        let sensitivity = ShortDramaSensitivity.current()
+        let knownDurations = try await shortDramaKnownDurations()
+        // 形状像短剧、只是体量证据不足被闸门拦下的目录，留给灵敏度去救，
+        // 这一轮不贴电影/剧集标签（贴死了就救不回来了）
+        var gateBlockedDirectories: Set<String> = []
+        for (directoryPath, directoryRows) in candidates.prefix(200) {
+            let movieIDs = Set(directoryRows.map(\.movieId))
+            let durations = knownDurations[directoryPath] ?? []
+            let fileNames = directoryRows.map(\.fileName)
+            let fileSizes = directoryRows.map(\.fileSize)
+            let verdict = ShortDramaClassifier.evaluate(
+                directoryPath: directoryPath,
+                fileNames: fileNames,
+                fileSizes: fileSizes,
+                durations: durations,
+                sensitivity: sensitivity
+            )
+            guard verdict.isShortDrama else {
+                if verdict.blockedByContentGate { gateBlockedDirectories.insert(directoryPath) }
+                continue
+            }
+
+            // 整个目录本来就归成一条记录（走剧集分组刮好的多季短剧就在这一类，
+            // 标题海报简介都在），这类只补 mediaKind，让它进「只看短剧」，
+            // 不合并也不覆盖，免得把已经刮好的东西冲掉。
+            if movieIDs.count == 1,
+               ShortDramaClassifier.shouldTagExistingDirectory(verdict),
+               try await tagExistingShortDramaDirectory(directoryRows) {
+                result.taggedDirectories += 1
+                continue
+            }
+
+            let hasValuableMetadata = try await shortDramaDirectoryHasValuableMetadata(movieIDs)
+            guard ShortDramaClassifier.shouldMergeExistingDirectory(
+                verdict,
+                hasValuableMetadata: hasValuableMetadata
+            ) else { continue }
+
+            let merged = try await dbQueue.write { db -> Bool in
+                let targetID = movieIDs.min()!
+                guard let target = try Movie.fetchOne(db, key: targetID) else { return false }
+                let directoryName = directoryPath.split(separator: "/").last.map(String.init) ?? directoryPath
+                var updated = target
+                updated.title = sanitizedFallbackTitle(directoryName, fallback: target.title)
+                updated.overview = "已识别为短剧（\(directoryRows.count) 集），等待补充元数据…"
+                updated.isLocked = false
+                try updated.update(db)
+
+                for row in directoryRows {
+                    guard var file = try VideoFile.fetchOne(db, key: row.fileID) else { continue }
+                    file.movieId = targetID
+                    file.mediaKind = ShortDrama.kindValue
+                    try file.update(db)
+                }
+                for staleID in movieIDs where staleID != targetID {
+                    // 文件都已改指到合并后的条目，剩下的空行才删得掉
+                    guard try Int.fetchOne(
+                        db,
+                        sql: "SELECT COUNT(*) FROM videoFile WHERE movieId = ?",
+                        arguments: [staleID]
+                    ) == 0 else { continue }
+                    _ = try Movie.deleteOne(db, key: staleID)
+                }
+                try ShortDramaMetadata.save(
+                    db: db,
+                    movieId: targetID,
+                    source: "local",
+                    episodeCount: directoryRows.count
+                )
+                return true
+            }
+            if merged { result.mergedDirectories += 1 }
+        }
+        // 文件已经标了短剧、旁表却没有记录的（占位行换真实 id 时被级联删过），一并补齐
+        result.backfilledMetadataRows = try await dbQueue.write { db in
+            try ShortDramaMetadata.backfillMissingRows(db: db)
+        }
+        result.stampedEntries = await backfillLegacyMediaKind(rows: relevantRows, skippedDirectories: gateBlockedDirectories)
+        return result
+    }
+
+    /// 旧库形态补齐：`mediaKind` 还空着的条目按现有证据（文件名里的集号、片名里的季号）
+    /// 标成 movie / tv，首页「只看电影 / 只看剧集」才有数据。
+    /// 被体量闸门拦下的短剧候选目录跳过，别把形态贴死。
+    private func backfillLegacyMediaKind(
+        rows: [ShortDramaLegacyRow],
+        skippedDirectories: Set<String>
+    ) async -> Int {
+        var grouped: [Int64: [ShortDramaLegacyRow]] = [:]
+        for row in rows {
+            guard !skippedDirectories.contains(ShortDramaClassifier.directoryKey(relativePath: row.relativePath)) else {
+                continue
+            }
+            grouped[row.movieId, default: []].append(row)
+        }
+        // 写事务的闭包是并发执行的，捕获可变量在 Swift 6 里是错误，定成常量再交出去
+        let byEntry = grouped
+        guard !byEntry.isEmpty else { return 0 }
+        // 这只是给旧库补形态的收尾工作，事务本身出问题不该把整轮同步带崩
+        return (try? await dbQueue.write { db in
+            var updated = 0
+            for (movieID, entryRows) in byEntry.prefix(4000) {
+                let title = try? String.fetchOne(db, sql: "SELECT title FROM movie WHERE id = ?", arguments: [movieID])
+                let kind = MediaKindResolver.resolve(
+                    fileNames: entryRows.map(\.fileName),
+                    title: title ?? "")
+                for row in entryRows {
+                    guard var file = try? VideoFile.fetchOne(db, key: row.fileID), file.mediaKind == nil else { continue }
+                    file.mediaKind = kind
+                    try? file.update(db)
+                    updated += 1
+                }
+            }
+            return updated
+        }) ?? 0
+    }
+
+    /// 只给已有条目补 mediaKind。旁表记录在缺的时候补一条 local 的，
+    /// 已经带来源（douban / tmdb）的一律不覆盖。
+    @discardableResult
+    private func tagExistingShortDramaDirectory(_ rows: [ShortDramaLegacyRow]) async throws -> Bool {
+        guard let targetID = rows.map(\.movieId).min() else { return false }
+        return try await dbQueue.write { db in
+            var changed = false
+            for row in rows {
+                guard var file = try VideoFile.fetchOne(db, key: row.fileID) else { continue }
+                guard file.mediaKind != ShortDrama.kindValue else { continue }
+                file.mediaKind = ShortDrama.kindValue
+                try file.update(db)
+                changed = true
+            }
+            guard changed else { return false }
+            try ShortDramaMetadata.backfillMissing(db: db, movieId: targetID, episodeCount: rows.count)
+            return true
+        }
+    }
+
+    /// 这些影片记录上有没有值得保留的东西。
+    private func shortDramaDirectoryHasValuableMetadata(_ movieIDs: Set<Int64>) async throws -> Bool {
+        guard !movieIDs.isEmpty else { return false }
+        return try await dbQueue.read { db in
+            let ids = Array(movieIDs)
+            let arguments = StatementArguments(ids.map { $0 as (any DatabaseValueConvertible)? })
+            let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+            var sql = """
+                SELECT COUNT(*) FROM movie
+                WHERE id IN (\(placeholders))
+                  AND (posterPath IS NOT NULL OR voteAverage IS NOT NULL OR isLocked = 1
+                       OR EXISTS (SELECT 1 FROM doubanMetadata WHERE movieId = movie.id)
+            """
+            if MediaMarkStore.tableExists(db) {
+                sql += " OR EXISTS (SELECT 1 FROM mediaMark WHERE localId = movie.id)"
+            }
+            sql += ")"
+            return (try Int.fetchOne(db, sql: sql, arguments: arguments)) ?? 0 > 0
+        }
+    }
+
+    private func scrapeShortDramaEntry(
+        for file: VideoFile,
+        doubanBudget: inout Int,
+        tvCache: inout [String: TMDBResult]
+    ) async throws {
+        guard let fakeMovieID = file.movieId else { return }
+        let directoryKey = ShortDramaClassifier.directoryKey(relativePath: file.relativePath)
+        let query = ShortDramaClassifier.searchKeyword(directoryPath: directoryKey)
+        guard !query.isEmpty else { return }
+        let episodeCount = try await shortDramaFileCount(movieID: fakeMovieID)
+        let extraction = extractTitlesAndYear(from: file)
+        let wantedSeason = ShortDramaClassifier.seasonNumber(inPath: directoryKey)
+        // 红果只补字段、不决定条目身份，所以先拿到手，等来源链跑完再往最终那条上写
+        let hongguoHit = await hongguoHit(forQuery: query, season: wantedSeason)
+
+        if doubanBudget > 0 {
+            doubanBudget -= 1
+            do {
+                let hits = try await DoubanService.shared.searchSubjects(query: query)
+                let ranked = DoubanService.rankedShortDramaHits(hits, query: query)
+                if let best = ranked.first(where: { hit in
+                    let score = hit.matchScore(query: query, season: wantedSeason)
+                    return score >= 55 || (score >= 40 && hit.looksLikeShortDrama)
+                }) {
+                    if try await applyDoubanShortDramaHit(
+                        best,
+                        fakeMovieID: fakeMovieID,
+                        episodeCount: max(episodeCount, 1)
+                    ) {
+                        print("   ✅ [短剧] 豆瓣命中：\(best.title)（\(best.id)）")
+                        try await applyHongguoEnrichment(hongguoHit, movieID: ShortDramaClassifier.doubanLocalID(subjectID: best.id))
+                        await MainActor.run {
+                            NotificationCenter.default.post(name: .libraryUpdated, object: nil)
+                        }
+                        return
+                    }
+                } else {
+                    print("   ⚠️ [短剧] 豆瓣无同名条目：[\(query)]")
+                }
+            } catch {
+                print("   ⚠️ [短剧] 豆瓣查询失败，改试 TMDB：\(error.localizedDescription)")
+            }
+        } else {
+            print("   ⏳ [短剧] 本轮豆瓣配额已用完，[\(query)] 留到下次扫描")
+        }
+
+        if let result = try await TMDBService.shared.multiSearch(
+            query: query,
+            year: extraction.year,
+            preferredMediaType: "tv"
+        ), isYearPlausibleMatch(
+            result: result,
+            targetYear: extraction.year,
+            preferredMediaType: "tv",
+            preferredSeason: 1,
+            tolerance: 1
+        ) {
+            // 集数校验：本地一百集、TMDB 条目只有十二集，那是认错了片，宁可不认
+            let remoteEpisodes = await TMDBService.shared.tvSeasonEpisodeCount(tvId: result.id, season: 1)
+            if remoteEpisodes == nil || remoteEpisodes! >= max(5, episodeCount / 3) {
+                print("   ✅ [短剧] TMDB 命中：\(result.displayTitle)")
+                try await handleSuccessfulScrape(result, for: file, tvCache: &tvCache)
+                try await rekeyShortDramaMetadata(from: fakeMovieID, to: Int64(result.id))
+                try await applyHongguoEnrichment(hongguoHit, movieID: Int64(result.id))
+                return
+            }
+            print("   ⚠️ [短剧] TMDB 条目集数对不上（\(remoteEpisodes ?? 0) 集 / 本地 \(episodeCount) 集）：\(result.displayTitle)")
+        }
+
+        try await finalizeShortDramaLocal(file: file, episodeCount: episodeCount, reason: "未匹配到在线条目")
+        try await applyHongguoEnrichment(hongguoHit, movieID: fakeMovieID)
+    }
+
+    /// 红果查一次。它是单一平台的库，认不上是常态，认上了集数和简介就是真的。
+    private func hongguoHit(forQuery query: String, season wantedSeason: Int?) async -> HongguoHit? {
+        guard ShortDrama.hongguoEnabled() else { return nil }
+        do {
+            let hits = try await HongguoService.shared.search(query: query)
+            guard let best = HongguoService.rankedHits(hits, query: query, season: wantedSeason).first else {
+                print("   ⚠️ [短剧] 红果无同名条目：[\(query)]")
+                return nil
+            }
+            // 季号对不上会被罚到 20 分以下：认错季不如不补
+            guard best.matchScore(query: query, season: wantedSeason) >= 20 else { return nil }
+            return best
+        } catch {
+            print("   ⚠️ [短剧] 红果查询失败：\(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// 红果字段落到最终那条条目上：简介与海报只补空位，旁表按缺什么补什么。
+    private func applyHongguoEnrichment(_ hit: HongguoHit?, movieID: Int64) async throws {
+        guard let hit else { return }
+        if let cover = hit.coverURL { PosterManager.shared.downloadPoster(posterPath: cover) }
+        try await dbQueue.write { db in
+            try ShortDramaMetadata.enrich(
+                db: db,
+                movieId: movieID,
+                source: "hongguo",
+                externalId: hit.seriesID,
+                platform: "红果",
+                episodeCount: hit.episodeCount,
+                tags: hit.categories,
+                posterOrientation: "portrait"
+            )
+            // 这是自动补充，锁定的条目不动内容，出处与集数已经落在旁表了
+            guard var movie = try Movie.fetchOne(db, key: movieID), !movie.isLocked else { return }
+            var dirty = false
+            let overview = movie.overview ?? ""
+            let isPlaceholderOverview = overview.isEmpty
+                || overview.hasPrefix("已识别为短剧")
+                || overview.hasPrefix("已按本地目录入库")
+                || overview.hasPrefix("正在排队")
+                || overview.hasPrefix("短剧 · 共")
+            if isPlaceholderOverview, let intro = hit.intro, !intro.isEmpty {
+                movie.overview = intro + (hit.episodeCount.map { " · 共 \($0) 集" } ?? "")
+                dirty = true
+            }
+            if (movie.posterPath?.isEmpty ?? true), let cover = hit.coverURL {
+                movie.posterPath = cover
+                dirty = true
+            }
+            if dirty { try movie.update(db) }
+        }
+    }
+
+    private func shortDramaFileCount(movieID: Int64) async throws -> Int {
+        try await dbQueue.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM videoFile WHERE movieId = ?", arguments: [movieID]) ?? 0
+        }
+    }
+
+    /// 豆瓣条目落库：占位行改性成正条目。豆瓣 subject id 与 TMDB id 同号段，
+    /// 主键走 doubanLocalID 的独立偏移，详情页与重新匹配都靠它认出处。
+    private func applyDoubanShortDramaHit(
+        _ hit: DoubanSearchHit,
+        fakeMovieID: Int64,
+        episodeCount: Int
+    ) async throws -> Bool {
+        guard fakeMovieID < 0 else { return false }
+        let newID = ShortDramaClassifier.doubanLocalID(subjectID: hit.id)
+        let overview = "短剧 · 共 \(episodeCount) 集"
+            + (hit.rating.map { String(format: " · 豆瓣 %.1f 分", $0) } ?? "")
+        if let poster = hit.coverURL { PosterManager.shared.downloadPoster(posterPath: poster) }
+
+        try await dbQueue.write { db in
+            if var target = try Movie.fetchOne(db, key: newID) {
+                if !target.isLocked {
+                    target.title = hit.title
+                    target.releaseDate = hit.year.map(String.init)
+                    target.overview = overview
+                    target.posterPath = hit.coverURL ?? target.posterPath
+                    target.voteAverage = hit.rating ?? target.voteAverage
+                    try target.update(db)
+                }
+            } else if var placeholder = try Movie.fetchOne(db, key: fakeMovieID) {
+                placeholder.id = newID
+                placeholder.title = hit.title
+                placeholder.releaseDate = hit.year.map(String.init)
+                placeholder.overview = overview
+                placeholder.posterPath = hit.coverURL
+                placeholder.voteAverage = hit.rating
+                placeholder.isLocked = false
+                try placeholder.insert(db)
+            } else {
+                return
+            }
+
+            for var grouped in try VideoFile.filter(Column("movieId") == fakeMovieID).fetchAll(db) {
+                grouped.movieId = newID
+                // 已经认过源就别再算未匹配，否则每次扫描都要重花一次豆瓣配额
+                grouped.mediaType = "movie"
+                grouped.mediaKind = ShortDrama.kindValue
+                try grouped.update(db)
+            }
+
+            try ShortDramaMetadata.save(
+                db: db,
+                movieId: newID,
+                source: "douban",
+                externalId: String(hit.id),
+                episodeCount: episodeCount,
+                tags: hit.genres,
+                posterOrientation: "portrait",
+                lastError: hit.episodeMinutes == nil ? nil : "豆瓣标注单集 \(hit.episodeMinutes!) 分钟"
+            )
+            if var douban = try DoubanMetadata.fetchOne(db, key: fakeMovieID) {
+                _ = try DoubanMetadata.deleteOne(db, key: fakeMovieID)
+                douban.movieId = newID
+                try douban.save(db)
+            }
+            // 占位行最后才删：videoFile.movieId 是 ON DELETE SET NULL，
+            // 早删一步就会把整个目录的文件全削成没有条目的孤儿行，
+            // 扫描收尾的「删掉没人引用的条目」再顺带把刚插进来的正条目也带走。
+            _ = try Movie.deleteOne(db, key: fakeMovieID)
+        }
+        return true
+    }
+
+    private func rekeyShortDramaMetadata(from oldID: Int64, to newID: Int64) async throws {
+        guard oldID != newID else { return }
+        try await dbQueue.write { db in
+            try ShortDramaMetadata.rekey(db, from: oldID, to: newID)
+        }
+    }
+
+    /// 来源链走完仍没命中：按目录名入库、算已匹配，留手动重新匹配的口子。
+    private func finalizeShortDramaLocal(
+        file: VideoFile,
+        episodeCount: Int,
+        reason: String
+    ) async throws {
+        guard let movieID = file.movieId else { return }
+        try await dbQueue.write { db in
+            for var grouped in try VideoFile.filter(Column("movieId") == movieID).fetchAll(db) {
+                grouped.mediaType = "movie"
+                grouped.mediaKind = ShortDrama.kindValue
+                try grouped.update(db)
+            }
+            if var movie = try Movie.fetchOne(db, key: movieID) {
+                movie.overview = "已按本地目录入库（\(episodeCount) 集），\(reason)，可手动重新匹配。"
+                movie.isLocked = true
+                try movie.update(db)
+            }
+            try ShortDramaMetadata.save(
+                db: db,
+                movieId: movieID,
+                source: "local",
+                episodeCount: episodeCount,
+                lastError: reason
+            )
+        }
+    }
+
     private func handleSuccessfulScrape(
         _ tmdbResult: TMDBResult,
         for file: VideoFile,
         tvCache: inout [String: TMDBResult]
     ) async throws {
         try await saveScrapingResult(tmdbResult, for: file)
+        // 认上了就销账，别留着旧坏账
+        ScrapeFailureTracker.shared.clear(.scrape(file.id))
         guard shouldAutoReuseTVResult(tmdbResult, for: file),
               let key = tvAutoReuseKey(for: file) else { return }
         tvCache[key] = tmdbResult
@@ -1918,6 +2447,8 @@ private struct PendingScannedMediaGroup {
     var importedMetadata: LocalSidecarMetadata?
     let shouldAttemptAutomaticScrape: Bool
     var items: [PendingScannedMediaItem]
+    /// 短剧条目写 shortDrama，其余为 nil（形态仍由 mediaType 表达）。
+    var mediaKind: String? = nil
 }
 
 enum WebDAVScannerRuntimeOverrides {
@@ -3776,7 +4307,23 @@ extension MediaLibraryManager {
                 return localRemovedCount
             }
 
-            let existingPathSet = Set(existingFiles.filter { scannedPathSet.contains($0.relativePath) }.map(\.relativePath))
+            // 「已经入库」只算还有条目的行。条目被外键级联掉、只剩 movieId 为空的孤儿行时
+            // 要当作没入库，让它重新走一遍分组与刮削，否则这批文件会永远从首页消失。
+            let orphanPathSet = try await dbQueue.read { db in
+                Set(try String.fetchAll(
+                    db,
+                    sql: """
+                        SELECT relativePath FROM videoFile
+                        WHERE sourceId = ?
+                          AND (movieId IS NULL OR movieId NOT IN (SELECT id FROM movie))
+                        """,
+                    arguments: [sourceId]
+                ))
+            }
+            let existingPathSet = Set(existingFiles
+                .filter { scannedPathSet.contains($0.relativePath) && !orphanPathSet.contains($0.relativePath) }
+                .map(\.relativePath))
+            let shortDramaEnabledForScan = ShortDrama.isEnabled()
             let scannedByPath = Dictionary(uniqueKeysWithValues: scannedFiles.map { ($0.relativePath, $0) })
             try await dbQueue.write { db in
                 for var existingFile in existingFiles {
@@ -3795,11 +4342,13 @@ extension MediaLibraryManager {
                     }
                 }
             }
+            let knownDurationsByDirectory = shortDramaEnabledForScan ? try await shortDramaKnownDurations() : [:]
             let pendingGroups = buildPendingMediaGroups(
                 from: scannedFiles,
                 sourceId: sourceId,
                 existingPathSet: existingPathSet,
-                localSidecarImports: localSidecarImports
+                localSidecarImports: localSidecarImports,
+                knownDurationsByDirectory: knownDurationsByDirectory
             )
             let groupsToInsert: [PendingScannedMediaGroup]
             if deferUnidentifiedGroups {
@@ -3932,11 +4481,40 @@ extension MediaLibraryManager {
         from scannedFiles: [ScannedMediaFile],
         sourceId: Int64,
         existingPathSet: Set<String>,
-        localSidecarImports: [String: LocalSidecarImport]
+        localSidecarImports: [String: LocalSidecarImport],
+        knownDurationsByDirectory: [String: [Double]]
     ) -> [PendingScannedMediaGroup] {
         var seenRelativePaths = existingPathSet
         var orderedKeys: [String] = []
         var groups: [String: PendingScannedMediaGroup] = [:]
+
+        // 短剧判定按目录做：纯数字分集文件名不带任何剧集特征，逐文件看会被当成
+        // 一百部独立电影，每张卡各刮一次。scannedFiles 是全量清单，不是增量，
+        // 所以增量扫描时同目录的老文件也算得进来。
+        let shortDramaEnabled = ShortDrama.isEnabled()
+        var verdictsByDirectory: [String: ShortDramaVerdict] = [:]
+        if shortDramaEnabled {
+            var namesByDirectory: [String: [String]] = [:]
+            var sizesByDirectory: [String: [Int64]] = [:]
+            var durationsByDirectory: [String: [Double]] = [:]
+            for item in scannedFiles {
+                let key = ShortDramaClassifier.directoryKey(relativePath: item.relativePath)
+                guard !key.isEmpty else { continue }
+                namesByDirectory[key, default: []].append(item.fileName)
+                sizesByDirectory[key, default: []].append(item.fileSize)
+            }
+            durationsByDirectory = knownDurationsByDirectory
+            let sensitivity = ShortDramaSensitivity.current()
+            for (key, names) in namesByDirectory {
+                verdictsByDirectory[key] = ShortDramaClassifier.evaluate(
+                    directoryPath: key,
+                    fileNames: names,
+                    fileSizes: sizesByDirectory[key] ?? [],
+                    durations: durationsByDirectory[key] ?? [],
+                    sensitivity: sensitivity
+                )
+            }
+        }
 
         for item in scannedFiles {
             let relativePath = item.relativePath
@@ -3952,8 +4530,14 @@ extension MediaLibraryManager {
                 ?? parsedTitle
                 ?? fallbackDisplayTitle(relativePath: relativePath, fileName: item.fileName)
             let isEpisode = MediaNameParser.isLikelyTVEpisodePath(relativePath) || MediaNameParser.isLikelyTVEpisodePath(item.fileName)
+            let directoryKey = ShortDramaClassifier.directoryKey(relativePath: relativePath)
+            let directoryVerdict = directoryKey.isEmpty ? nil : verdictsByDirectory[directoryKey]
+            let isShortDramaItem = directoryVerdict?.isShortDrama == true
+                && !ShortDramaClassifier.isCompilationFile(item.fileName)
             let groupingKey: String
-            if shouldAttemptAutomaticScrape {
+            if isShortDramaItem {
+                groupingKey = "\(sourceId)#short-drama#\(directoryKey.lowercased())"
+            } else if shouldAttemptAutomaticScrape {
                 groupingKey = isEpisode ? "\(sourceId)#tv#\(displayTitleBase.lowercased())" : "\(sourceId)#movie#\(relativePath)"
             } else {
                 groupingKey = isEpisode ? "\(sourceId)#unidentified-tv#\(displayTitleBase.lowercased())" : "\(sourceId)#unidentified#\(relativePath)"
@@ -3970,6 +4554,9 @@ extension MediaLibraryManager {
             } else if (displayTitle.count <= 2 && displayTitle.allSatisfy { $0.isNumber }) || displayTitle == "00000" {
                 if comps.count >= 2 { displayTitle = comps[comps.count - 2] }
             }
+            if isShortDramaItem, let directoryName = directoryKey.split(separator: "/").last {
+                displayTitle = sanitizedFallbackTitle(String(directoryName), fallback: displayTitle)
+            }
 
             let pendingItem = PendingScannedMediaItem(file: item, sidecar: sidecar)
             if var group = groups[groupingKey] {
@@ -3985,7 +4572,8 @@ extension MediaLibraryManager {
                     displayTitle: displayTitle,
                     importedMetadata: sidecar?.metadata,
                     shouldAttemptAutomaticScrape: shouldAttemptAutomaticScrape,
-                    items: [pendingItem]
+                    items: [pendingItem],
+                    mediaKind: isShortDramaItem ? ShortDrama.kindValue : nil
                 )
             }
         }
@@ -4025,7 +4613,7 @@ extension MediaLibraryManager {
             || value.range(of: #"^第\s*[一二三四五六七八九十零〇两\d]{1,3}\s*季$"#, options: .regularExpression) != nil
     }
 
-    private func sanitizedFallbackTitle(_ value: String, fallback: String) -> String {
+    nonisolated private func sanitizedFallbackTitle(_ value: String, fallback: String) -> String {
         let cleaned = value
             .replacingOccurrences(of: #"[._]+"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
@@ -4052,7 +4640,7 @@ extension MediaLibraryManager {
                 id: group.fakeMovieId,
                 title: group.displayTitle,
                 releaseDate: imported?.date,
-                overview: imported?.overview ?? (group.shouldAttemptAutomaticScrape ? "正在排队等待刮削..." : "未能自动识别影视名称，可手动重新匹配。"),
+                overview: imported?.overview ?? shortDramaAwarePlaceholderOverview(for: group),
                 posterPath: imported?.posterPath,
                 voteAverage: imported?.voteAverage,
                 isLocked: imported != nil || !group.shouldAttemptAutomaticScrape,
@@ -4070,32 +4658,60 @@ extension MediaLibraryManager {
 
             var insertedCount = 0
             for item in group.items {
-                let newVideo = VideoFile(
-                    id: UUID().uuidString,
-                    sourceId: sourceId,
-                    relativePath: item.file.relativePath,
-                    fileName: item.file.fileName,
-                    mediaType: group.shouldAttemptAutomaticScrape ? "unmatched" : "movie",
-                    movieId: group.fakeMovieId,
-                    episodeId: nil,
-                    playProgress: 0.0,
-                    duration: 0.0,
-                    fileSize: item.file.fileSize
-                )
-                do {
-                    try newVideo.insert(db)
-                } catch {
-                    throw MediaSourceScanError.databaseWriteFailed("视频文件记录写入失败：\(error.localizedDescription)")
+                let stored: VideoFile
+                // 同一路径可能已经留了一条孤儿记录（所属条目被外键级联删过）：
+                // 改原行而不是再插一条，既不留重复行，也保住播放进度与缩略图缓存。
+                if var row = try VideoFile.fetchOne(
+                    db,
+                    sql: "SELECT * FROM videoFile WHERE sourceId = ? AND relativePath = ? LIMIT 1",
+                    arguments: [sourceId, item.file.relativePath]
+                ) {
+                    row.movieId = group.fakeMovieId
+                    row.mediaType = group.shouldAttemptAutomaticScrape ? "unmatched" : "movie"
+                    row.mediaKind = group.mediaKind
+                    row.fileName = item.file.fileName
+                    row.fileSize = item.file.fileSize
+                    try row.update(db)
+                    stored = row
+                } else {
+                    let newVideo = VideoFile(
+                        id: UUID().uuidString,
+                        sourceId: sourceId,
+                        relativePath: item.file.relativePath,
+                        fileName: item.file.fileName,
+                        mediaType: group.shouldAttemptAutomaticScrape ? "unmatched" : "movie",
+                        mediaKind: group.mediaKind,
+                        movieId: group.fakeMovieId,
+                        episodeId: nil,
+                        playProgress: 0.0,
+                        duration: 0.0,
+                        fileSize: item.file.fileSize
+                    )
+                    do {
+                        try newVideo.insert(db)
+                    } catch {
+                        throw MediaSourceScanError.databaseWriteFailed("视频文件记录写入失败：\(error.localizedDescription)")
+                    }
+                    stored = newVideo
                 }
                 if let thumbnailPath = item.sidecar?.episodeMetadata?.thumbnailPath {
                     let sourceURL = URL(fileURLWithPath: thumbnailPath)
-                    let destinationURL = localEpisodeThumbnailURL(for: newVideo.id)
+                    let destinationURL = localEpisodeThumbnailURL(for: stored.id)
                     if FileManager.default.fileExists(atPath: sourceURL.path) {
                         try? FileManager.default.removeItem(at: destinationURL)
                         try? FileManager.default.copyItem(at: sourceURL, to: destinationURL)
                     }
                 }
                 insertedCount += 1
+            }
+            if group.mediaKind == ShortDrama.kindValue {
+                // 先按本地记一行，刮到在线条目后由 scrapeShortDramaEntry 覆盖来源
+                try ShortDramaMetadata.save(
+                    db: db,
+                    movieId: group.fakeMovieId,
+                    source: "local",
+                    episodeCount: group.items.count
+                )
             }
             return insertedCount
         }

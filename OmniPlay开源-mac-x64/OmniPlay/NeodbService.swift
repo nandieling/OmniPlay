@@ -141,7 +141,7 @@ nonisolated final class NeodbService: @unchecked Sendable {
     static let oauthScopes = "read write"
 
     private let session: URLSession
-    private let userAgent = "OmniPlay/1.9 (+https://github.com/nandieling/OmniPlay)"
+    private let userAgent = "OmniPlay/1.10 (+https://github.com/nandieling/OmniPlay)"
 
     private init() {
         let config = URLSessionConfiguration.ephemeral

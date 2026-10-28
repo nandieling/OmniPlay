@@ -243,11 +243,14 @@ struct MovieCardView: View {
 
     private var continueWatchingProgressRatio: Double? {
         guard isContinueWatchingContext else { return nil }
+        // 关闭开关时，直接播放的文件不参与进度计算，卡片上的进度条只反映库内文件
+        let showsDirectPlayback = ContinueWatchingSettings.showsDirectPlayback
         let sortedFiles = movieFiles.enumerated().sorted {
             MediaNameParser.episodeSortKey(for: $0.element.fileName, fallbackIndex: $0.offset) <
             MediaNameParser.episodeSortKey(for: $1.element.fileName, fallbackIndex: $1.offset)
         }.map(\.element)
         let unfinishedFiles = sortedFiles.filter { file in
+            if !showsDirectPlayback && file.mediaType == "direct" { return false }
             guard file.duration > 0 else { return false }
             let ratio = file.playProgress / file.duration
             return file.playProgress > 5.0 && ratio < 0.95

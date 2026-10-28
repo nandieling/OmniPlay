@@ -213,7 +213,8 @@ final class LocalMetadataSidecarStore {
         if posterPath.hasPrefix("http://") || posterPath.hasPrefix("https://") {
             url = URL(string: posterPath)
         } else {
-            url = URL(string: "https://image.tmdb.org/t/p/w500\(posterPath)")
+            // 填了 TMDB 网关时海报也走网关；没填或不是 TMDB 外链就照原样
+            url = TMDBService.proxiedImageURL(TMDBService.officialImageURLString(forPath: posterPath))
         }
         guard let url else { return }
         do {

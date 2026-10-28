@@ -471,7 +471,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				LIBRARY_SEARCH_PATHS = "$(inherited)";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.9;
+				MARKETING_VERSION = 1.10;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
@@ -548,7 +548,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				LIBRARY_SEARCH_PATHS = "$(inherited)";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.9;
+				MARKETING_VERSION = 1.10;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
@@ -589,7 +589,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.9;
+				MARKETING_VERSION = 1.10;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
@@ -621,7 +621,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.9;
+				MARKETING_VERSION = 1.10;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
@@ -652,7 +652,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.9;
+				MARKETING_VERSION = 1.10;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
@@ -682,7 +682,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.9;
+				MARKETING_VERSION = 1.10;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",

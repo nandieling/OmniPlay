@@ -163,6 +163,7 @@ class TMDBService {
     private var baseURL: String { Self.officialAPIBaseURL.absoluteString }
     private var tvSeasonCountCache: [Int: Int] = [:]
     private var tvSeasonAirYearCache: [String: Int] = [:]
+    private var episodeCountCache: [String: Int] = [:]
     private let seasonCacheQueue = DispatchQueue(label: "nan.omniplay.tmdb.season-cache")
     private var localizedResultCache: [String: TMDBResult] = [:]
     private let localizedCacheQueue = DispatchQueue(label: "nan.omniplay.tmdb.localized-cache")
@@ -248,6 +249,71 @@ class TMDBService {
         destination.percentEncodedPath = basePath + endpointPath
         destination.percentEncodedQuery = source.percentEncodedQuery
         return destination.url
+    }
+
+    // MARK: - 图片服务器（海报 / 剧照）走不走网关
+
+    nonisolated static let officialImageHost = "image.tmdb.org"
+
+    /// TMDB 只回 `/abc123.jpg` 这样的后缀，官方前缀由这里拼出来。
+    nonisolated static func officialImageURLString(forPath path: String, size: String = "w500") -> String {
+        "https://\(officialImageHost)/t/p/\(size)\(path)"
+    }
+
+    /// 网关的图片根地址：与 API 同一个主机、同一个路径前缀，只把末尾补上的 `/3` 去掉。
+    /// 没填网关就返回 nil，让图片继续走官方 `image.tmdb.org`。
+    nonisolated static func proxyImageBaseURL(
+        customProxyURL: String? = nil,
+        defaults: UserDefaults = .standard
+    ) -> URL? {
+        let input = (customProxyURL ?? defaults.string(forKey: proxyURLDefaultsKey) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty,
+              let apiBase = proxyAPIBaseURL(customProxyURL: input, defaults: defaults),
+              var components = URLComponents(url: apiBase, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        var path = components.percentEncodedPath
+        if path.hasSuffix("/3") { path = String(path.dropLast(2)) }
+        components.percentEncodedPath = path.isEmpty ? "/" : path
+        return components.url
+    }
+
+    /// 把官方图片地址换成网关地址。
+    ///
+    /// 只改主机与路径前缀，`/t/p/{尺寸}{路径}` 原样保留，Worker 或 nginx 按路径转发就能对上；
+    /// 豆瓣、NFO 自带的外链不是 `image.tmdb.org`，一律原样返回，不跟着改道。
+    nonisolated static func proxiedImageURL(
+        _ officialURLString: String,
+        customProxyURL: String? = nil,
+        defaults: UserDefaults = .standard
+    ) -> URL? {
+        guard let sourceURL = URL(string: officialURLString),
+              let source = URLComponents(url: sourceURL, resolvingAgainstBaseURL: false),
+              source.host == officialImageHost,
+              let proxyBase = proxyImageBaseURL(customProxyURL: customProxyURL, defaults: defaults),
+              var destination = URLComponents(url: proxyBase, resolvingAgainstBaseURL: false) else {
+            return URL(string: officialURLString)
+        }
+        let basePath = destination.percentEncodedPath.hasSuffix("/")
+            ? String(destination.percentEncodedPath.dropLast())
+            : destination.percentEncodedPath
+        destination.scheme = proxyBase.scheme
+        destination.percentEncodedPath = basePath + source.percentEncodedPath
+        destination.percentEncodedQuery = source.percentEncodedQuery
+        return destination.url ?? URL(string: officialURLString)
+    }
+
+    /// 先试网关，网关不通再回官方：网关只反代了 API 没管图片时，海报不该就此消失。
+    nonisolated static func imageURLAttempts(
+        officialURLString: String,
+        customProxyURL: String? = nil,
+        defaults: UserDefaults = .standard
+    ) -> [URL] {
+        guard let official = URL(string: officialURLString) else { return [] }
+        guard let proxied = proxiedImageURL(officialURLString, customProxyURL: customProxyURL, defaults: defaults),
+              proxied != official else { return [official] }
+        return [proxied, official]
     }
 
     /// 连通性探测：URLSession、URL 拼装与超时控制都在全局执行器上跑，
@@ -597,6 +663,25 @@ class TMDBService {
         if let count {
             seasonCacheQueue.sync { tvSeasonCountCache[tvId] = count }
         }
+        return count
+    }
+
+    /// 某一季的集数。短剧候选要拿它校验：本地 100 个分集，
+    /// 对上一条只有 12 集的条目就是认错片，宁可不认。
+    func tvSeasonEpisodeCount(tvId: Int, season: Int) async -> Int? {
+        let cacheKey = "ep#\(tvId)#\(season)"
+        if let cached = seasonCacheQueue.sync(execute: { episodeCountCache[cacheKey] }) {
+            return cached
+        }
+        let urlString = "\(baseURL)/tv/\(tvId)/season/\(season)?language=en-US"
+        guard let (data, response) = try? await requestTMDB(urlString: urlString),
+              response.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let episodes = json["episodes"] as? [Any] else {
+            return nil
+        }
+        let count = episodes.count
+        seasonCacheQueue.sync { episodeCountCache[cacheKey] = count }
         return count
     }
 

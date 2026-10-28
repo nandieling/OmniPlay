@@ -111,8 +111,10 @@ class PosterManager {
         return FileManager.default.fileExists(atPath: fileURL.path) ? fileURL : nil
     }
     
-    // 异步下载海报
-    func downloadPoster(posterPath: String) {
+    /// 异步下载海报。
+    /// - Parameter force: 用户主动动作（手动匹配、换海报）传 true，绕过失败账本强行重下。
+    ///   自动刮削失败满 3 次的海报会被 `ScrapeFailureTracker` 挡下来，等手动扫描刮削清零后再试。
+    func downloadPoster(posterPath: String, force: Bool = false) {
         if posterPath.hasPrefix("/"), FileManager.default.fileExists(atPath: posterPath) {
             return
         }
@@ -121,34 +123,46 @@ class PosterManager {
         
         // 防重复拦截：如果本地已经有了，直接跳过
         if FileManager.default.fileExists(atPath: destinationURL.path) { return }
-        
-        let remoteURL: URL?
-        if posterPath.hasPrefix("http://") || posterPath.hasPrefix("https://") {
-            remoteURL = URL(string: posterPath)
-        } else {
-            remoteURL = URL(string: "https://image.tmdb.org/t/p/w500\(posterPath)")
+
+        // 卡片每次出现都会补下缺失的海报，源站 404 时就是「反复刮削」的来源，先问账本。
+        if !force {
+            let target = ScrapeFailureTracker.Target.poster(safeName)
+            guard ScrapeFailureTracker.shared.allowsAutoAttempt(target) else { return }
         }
-        guard let url = remoteURL else { return }
         
+        let officialImageString = posterPath.hasPrefix("http://") || posterPath.hasPrefix("https://")
+            ? posterPath
+            : TMDBService.officialImageURLString(forPath: posterPath)
+        // 填了 TMDB 网关就先走网关（图片在网关同一个主机下的 /t/p/），网关没管图片时自动回官方
+        let candidateURLs = TMDBService.imageURLAttempts(officialURLString: officialImageString)
+        guard !candidateURLs.isEmpty else { return }
+
         // 校验与落盘也放后台：刮削时几十张海报连着写，主线程一张都不该替它解码。
         Task.detached(priority: .utility) {
-            do {
-                let (data, response) = try await URLSession.shared.data(from: url)
-                if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                    throw URLError(.badServerResponse)
-                }
-                guard PosterImageLoader.isValidImage(data) else {
-                    throw URLError(.cannotDecodeContentData)
-                }
-                try data.write(to: destinationURL)
+            var lastError: Error = URLError(.unsupportedURL)
+            for attemptURL in candidateURLs {
+                do {
+                    let (data, response) = try await URLSession.shared.data(from: attemptURL)
+                    if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                        throw URLError(.badServerResponse)
+                    }
+                    guard PosterImageLoader.isValidImage(data) else {
+                        throw URLError(.cannotDecodeContentData)
+                    }
+                    try data.write(to: destinationURL)
 
-                // 🌟 魔法：下载完成后，精准通知 UI 瞬间刷新这张海报
-                await MainActor.run {
-                    NotificationCenter.default.post(name: NSNotification.Name("PosterUpdated_\(safeName)"), object: nil)
+                    ScrapeFailureTracker.shared.clear(.poster(safeName))
+                    // 🌟 魔法：下载完成后，精准通知 UI 瞬间刷新这张海报
+                    await MainActor.run {
+                        NotificationCenter.default.post(name: NSNotification.Name("PosterUpdated_\(safeName)"), object: nil)
+                    }
+                    return
+                } catch {
+                    lastError = error
                 }
-            } catch {
-                print("❌ 下载海报失败: \(error)")
             }
+            let failures = ScrapeFailureTracker.shared.recordFailure(.poster(safeName))
+            print("❌ 下载海报失败(\(failures)/\(ScrapeFailureTracker.maxAutoAttempts)): \(lastError)")
         }
     }
     
@@ -156,6 +170,8 @@ class PosterManager {
         PosterImageLoader.shared.forgetAll()
         try? FileManager.default.removeItem(at: cacheDirectory)
         try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        // 缓存都清了，失败账本也该重来，否则被挡下的海报永远等不到重试
+        ScrapeFailureTracker.shared.resetAll()
     }
 }
 

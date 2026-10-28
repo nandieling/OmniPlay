@@ -69,12 +69,23 @@ class MPVPlayerManager: ObservableObject {
     private static let trackPreferenceDefaultsKey = "omniplay.trackPreferences.v1"
     private static let disabledSubtitlePreference = "__off__"
 
-    var mpv: OpaquePointer?
+    // mpv 核心句柄。收播时在控制队列上销毁它，销毁前先把句柄从属性上摘走（takeMPVHandle），
+    // 这样实例之后什么时候被释放都不会再碰已经销毁的核心。
+    private var mpv: OpaquePointer?
+    private let mpvHandleLock = NSLock()
     private let mpvControlQueue = DispatchQueue(label: "nan.omniplay.mpv.control")
     private let controlQueueKey = DispatchSpecificKey<Bool>()
     private var lastDrawablePointer: Int64?
     private var pendingDrawablePointer: Int64?
     private var retainedDrawableLayer: CAMetalLayer?
+    // 直开播放：播放器先装进窗口把探测与缓冲跑起来，图层等全屏动画落定再绑（见 DirectPlayerHandoff）。
+    // 期间来的绑定请求先攒着，落定时一次性补上，mpv 的视频输出就只按最终尺寸建一次。
+    weak var drawableHandoff: DirectPlayerHandoff?
+    private weak var deferredDrawableView: NSView?
+
+    /// mpv 是否已经拿到图层在出画。还没绑图层时屏幕上根本没有画面，
+    /// 尺寸变化不值得为它按一次暂停（直开播放等全屏动画落定期间就是这个状态）。
+    var isRenderingVideoOutput: Bool { lastDrawablePointer != nil }
     private var isStopping = false
     private var isRebuildingVideoOutput = false
     // 窗口尺寸切换（拖拽、进出全屏）期间的自动暂停：等视频输出按新尺寸重建完成再自动续播
@@ -152,6 +163,7 @@ class MPVPlayerManager: ObservableObject {
         let queue = String(cString: __dispatch_queue_get_label(nil), encoding: .utf8) ?? "unknown"
         let thread = Thread.isMainThread ? "main" : "bg"
         print("[MPVLifecycle][\(formatter.string(from: Date()))][\(thread)][q:\(queue)] \(message)")
+        fflush(stdout)
     }
 
     private func updatePlaybackActivity() {
@@ -221,6 +233,15 @@ class MPVPlayerManager: ObservableObject {
         } else {
             mpvControlQueue.async(execute: block)
         }
+    }
+
+    /// 取走 mpv 句柄并清空属性：调用方从此独占核心并负责销毁它。
+    private func takeMPVHandle() -> OpaquePointer? {
+        mpvHandleLock.lock()
+        defer { mpvHandleLock.unlock() }
+        let handle = mpv
+        mpv = nil
+        return handle
     }
 
     private func mpvLoadArgument(for url: URL, stripUserInfo: Bool = false) -> String {
@@ -453,6 +474,16 @@ class MPVPlayerManager: ObservableObject {
             ProcessInfo.processInfo.endActivity(activity)
             playbackActivity = nil
         }
+        // stop() 已经把句柄摘走并在控制队列上销毁了，这里只会是空转；
+        // 兜的是「从没走到 stop 就被释放」那种情况。
+        guard let mpv = takeMPVHandle() else { return }
+        // 播放页一拆，那层 CAMetalLayer 就没了，而 mpv 是按裸指针（wid）认它的。
+        // 不销毁核心，MoltenVK 的 swapchain 还指着已释放的图层，下一次 GPU 完成回调
+        // 就踩在脏内存上（崩溃点固定在 MVKCommandEncoder::finishQueries）。
+        // 收的顺序：停播 → 摘掉视频输出 → 销毁核心，顺带不再漏一整个 mpv 实例。
+        mpv_command_string(mpv, "stop")
+        mpv_set_property_string(mpv, "vo", "null")
+        mpv_terminate_destroy(mpv)
     }
     
     func setDrawable(_ view: NSView, force: Bool = false) {
@@ -469,6 +500,11 @@ class MPVPlayerManager: ObservableObject {
             return
         }
         guard let layer = view.layer as? CAMetalLayer else { return }
+        if let handoff = drawableHandoff, !handoff.isSettled {
+            deferredDrawableView = view
+            traceLifecycle("setDrawable 延后：等全屏动画落定再绑图层")
+            return
+        }
         let pointer = Unmanaged.passUnretained(layer).toOpaque()
         let wid = Int64(Int(bitPattern: pointer))
         retainedDrawableLayer = layer
@@ -490,10 +526,15 @@ class MPVPlayerManager: ObservableObject {
             self.log("setDrawable wid=\(wid) result=\(result)")
             if result >= 0 {
                 self.isDrawableBoundOnControlQueue = true
-                if self.pendingVideoTrackAfterDrawable != nil {
+                // 账本和引擎实际状态认一个就行：视频轨还摘着就必须放回来。
+                // 只认账本的话，起播时那次续播进度 seek 会顺手把账本清掉，
+                // 结果图层绑上了、视频轨却没放回来，整场只有声音和黑屏。
+                let vidBeforeBind = Self.stringProperty(mpv, "vid")
+                if self.pendingVideoTrackAfterDrawable != nil
+                    || (vidBeforeBind == "no" && !self.isRebuildingVideoOutput) {
                     self.pendingVideoTrackAfterDrawable = nil
                     mpv_set_property_string(mpv, "vid", "auto")
-                    self.log("图层已绑定，补上视频轨")
+                    self.log("图层已绑定，补上视频轨（绑定前 vid=\(vidBeforeBind ?? "nil")）")
                 }
             }
             DispatchQueue.main.async {
@@ -508,6 +549,14 @@ class MPVPlayerManager: ObservableObject {
         }
     }
     
+    /// 全屏动画落定（或超时兜底）：补上之前延后的图层绑定。
+    func allowDeferredDrawableBinding() {
+        guard let view = deferredDrawableView else { return }
+        deferredDrawableView = nil
+        traceLifecycle("全屏动画落定，补绑图层")
+        setDrawable(view, force: true)
+    }
+
     /// 全屏与窗口来回切时，gpu-next 在「只有一层 CAMetalLayer、没有真窗口」这条嵌入路径上
     /// 只在视频输出初始化那一刻读一次图层尺寸：之后光改 drawableSize、甚至把同一个 wid 再设一遍
     /// 它都不理，于是退出全屏后仍按全屏尺寸出画（画面只剩一角），从小窗进全屏又只画左上角。
@@ -527,7 +576,15 @@ class MPVPlayerManager: ObservableObject {
             let expected = Self.drawablePixelSize(layer)
             // mpv 还没画面（没加载、刚 eof）：没有需要纠偏的视频输出
             guard let rendered = Self.renderedOutputSize(mpv) else {
-                self.log("重建视频输出 \(reason) 跳过：mpv 暂无输出尺寸")
+                // 图层明明绑上了却拿不到输出尺寸，八成是视频轨还摘着（延后绑图层时先按
+                // 「无视频轨」打开）：就地补回轨道，别留下「有声音 + 黑屏」的一整场。
+                if !self.isRebuildingVideoOutput, self.isDrawableBoundOnControlQueue,
+                   Self.stringProperty(mpv, "vid") == "no" {
+                    mpv_set_property_string(mpv, "vid", "auto")
+                    self.log("重建视频输出 \(reason)：图层已绑但视频轨还摘着，补回 vid=auto")
+                } else {
+                    self.log("重建视频输出 \(reason) 跳过：mpv 暂无输出尺寸")
+                }
                 return
             }
             // 尺寸本来就对（刚 loadfile 完、或上一次重建已生效）就别白折腾一次解码器重建
@@ -787,6 +844,9 @@ class MPVPlayerManager: ObservableObject {
             || firstName.contains("profile 5")
         runOnControlQueue { [weak self] in
             guard let self else { return }
+            // stop() 会把视频输出摘掉（播放页拆了不能还往旧图层画），复用同一个实例
+            // 再播时先装回来；值没变时 mpv 内部会自己比掉，不会多重建一次
+            mpv_set_property_string(self.mpv, "vo", "gpu-next")
             self.playbackEndTracker.reset()
             // 单文件播放才让 mpv 停在结尾（保住最后一帧和结尾的 time-pos）；
             // 多文件播放表和蓝光标题要照常自动切下一个，不能被 keep-open 拦下。
@@ -919,23 +979,47 @@ class MPVPlayerManager: ObservableObject {
         isStopping = true
         timer?.invalidate()
         timer = nil
-        runOnControlQueue { [weak self] in
-            guard let self else { return }
-            guard let mpv = self.mpv else { return }
-            self.traceLifecycle("stop on control queue: stop command")
-            mpv_command_string(mpv, "stop")
+
+        // 句柄先摘走：之后这个实例什么时候被释放都跟 mpv 核心无关了。
+        guard let handle = takeMPVHandle() else {
+            DispatchQueue.main.async { self.releaseDrawableReferences() }
+            return
+        }
+
+        // 停播 → 摘视频输出 → 销毁核心，整段留在控制队列上做强引用执行。
+        // mpv_terminate_destroy 要等 mpv 自己的线程收工，网络源的 demuxer 能拖上百毫秒，
+        // 以前这事发生在主线程的 deinit 里（播放页拆掉的那一刻同步执行），
+        // 表现就是「关掉播放页先卡一下，首页才回来」。
+        mpvControlQueue.async { [self] in
+            let stoppedAt = Date()
+            mpv_command_string(handle, "stop")
+            // 先让 mpv 不再碰图层，再放掉我们手里的图层强引用；反过来就有一段
+            // 「vo 还在画、图层已经被 AppKit 收走」的空档，崩的就是那里
+            let unloadResult = mpv_set_property_string(handle, "vo", "null")
+            let unloadedAt = Date()
+            mpv_terminate_destroy(handle)
+            traceLifecycle("stop 控制队列收尾：stop+vo=null result=\(unloadResult) 耗时 \(Int(unloadedAt.timeIntervalSince(stoppedAt) * 1000))ms，销毁核心耗时 \(Int(Date().timeIntervalSince(unloadedAt) * 1000))ms")
+            DispatchQueue.main.async { [weak self] in
+                self?.releaseDrawableReferences()
+            }
         }
 
         DispatchQueue.main.async {
             self.pendingIsPlayingOverride = nil
             self.isRecoveringVideoGeometry = false
             self.geometryRecoveryResumePlay = false
-            self.lastDrawablePointer = nil
-            self.pendingDrawablePointer = nil
-            self.retainedDrawableLayer = nil
+            self.pendingVideoTrackAfterDrawable = nil
             self.isPlaying = false
             self.traceLifecycle("stop main-thread cleanup done")
         }
+    }
+
+    /// vo 已经摘掉之后才放掉图层的强引用：图层是播放页的 backing layer，
+    /// mpv 拿的是裸指针，我们必须保证它比视频输出活得久。
+    private func releaseDrawableReferences() {
+        lastDrawablePointer = nil
+        pendingDrawablePointer = nil
+        retainedDrawableLayer = nil
     }
     
     func captureCurrentFrameAsThumbnail(for fileId: String) {
@@ -995,7 +1079,8 @@ class MPVPlayerManager: ObservableObject {
     }
 
     private func clearPendingInitialSeek() {
-        pendingVideoTrackAfterDrawable = nil
+        // 「图层绑上之后要把视频轨放回来」不属于 seek 的账：延后绑图层期间，
+        // 起播进度 seek 往往比图层绑定先到，在这里清掉就等于永远不放视频轨了。
         loadIssuedAt = nil
         pendingInitialSeekPosition = nil
         pendingInitialSeekFilename = nil

@@ -181,7 +181,9 @@ private final class MPVContainerView: NSView {
         resumeAfterLiveResizeWorkItem?.cancel()
         resumeAfterLiveResizeWorkItem = nil
         isLiveResizing = true
-        if !autoPausedForLiveResize, playerManager?.isPlaying == true {
+        // 视频输出还没拿到图层（直开播放正等全屏动画落定）：屏幕上没有画面会被拉变形，
+        // 为这次尺寸变化按暂停就是白等一秒多。
+        if !autoPausedForLiveResize, playerManager?.isRenderingVideoOutput == true, playerManager?.isPlaying == true {
             autoPausedForLiveResize = true
             // 暂停与续播都交给播放器：它会在视频输出按新尺寸重建完成后自己续播
             playerManager?.pauseForGeometryChange(reason: "live-resize")
@@ -255,6 +257,8 @@ private final class MPVContainerView: NSView {
 
 struct MPVVideoView: NSViewRepresentable {
     let playerManager: MPVPlayerManager
+    /// 直开播放的图层交接件。有值且全屏动画还没落定时先不绑图层。
+    var handoff: DirectPlayerHandoff? = nil
 
     final class Coordinator {
         var lastSize: CGSize = .zero
@@ -275,7 +279,7 @@ struct MPVVideoView: NSViewRepresentable {
         context.coordinator.lastSize = view.bounds.size
 
         print("[MPVVideoView] makeNSView created")
-        // Bind immediately so PlayerScreen can wait for drawable-ready before loadFiles.
+        handoff?.attach(playerManager)
         playerManager.setDrawable(view)
 
         return view

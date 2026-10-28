@@ -693,6 +693,8 @@ struct VideoFile: Codable, FetchableRecord, PersistableRecord {
     var relativePath: String
     var fileName: String
     var mediaType: String
+    /// 条目形态：movie / tv / shortDrama。老库里为 nil，此时按 mediaType 推断。
+    var mediaKind: String? = nil
     var movieId: Int64?
     var episodeId: Int64?
     
@@ -703,6 +705,11 @@ struct VideoFile: Codable, FetchableRecord, PersistableRecord {
     var lastPlayedAt: Double?
     
     static let mediaSource = belongsTo(MediaSource.self)
+}
+
+extension VideoFile {
+    /// 是否为短剧条目。
+    var isShortDrama: Bool { mediaKind == ShortDrama.kindValue }
 }
 
 nonisolated private func trimmingLeadingPathSeparators(_ value: String) -> String {
@@ -772,6 +779,16 @@ nonisolated private func isMediaServerPlaybackEndpointPath(_ value: String) -> B
 
 private enum LibraryVisibilitySQL {
     static let enabledSourcePredicate = "COALESCE(mediaSource.isEnabled, 1) = 1"
+}
+
+/// 首页「继续播放」区的显示偏好。
+enum ContinueWatchingSettings {
+    nonisolated static let showDirectPlaybackKey = "showDirectPlaybackInContinueWatching"
+
+    /// 直接播放（访达双击、拖进海报墙）的文件要不要带进度出现在继续播放里，默认不显示。
+    nonisolated static var showsDirectPlayback: Bool {
+        UserDefaults.standard.bool(forKey: showDirectPlaybackKey)
+    }
 }
 
 extension MediaSource {
@@ -852,7 +869,39 @@ extension Movie {
         )
     }
 
-    static func fetchVisibleContinueWatching(in db: Database) throws -> [Movie] {
+    /// 按形态（movie / tv / shortDrama）分组的条目 id，首页类型筛选用。
+    /// 认的是 videoFile.mediaKind，不认 movie 表，这样 TMDB / 豆瓣两种来源都能认出来。
+    static func fetchMovieIDsByKind(in db: Database) throws -> [String: Set<Int64>] {
+        var grouped: [String: Set<Int64>] = [:]
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+            SELECT DISTINCT videoFile.movieId AS movieId, videoFile.mediaKind AS mediaKind
+            FROM videoFile
+            JOIN mediaSource ON mediaSource.id = videoFile.sourceId
+            WHERE videoFile.mediaKind IS NOT NULL
+              AND videoFile.movieId IS NOT NULL
+              AND \(LibraryVisibilitySQL.enabledSourcePredicate)
+            """
+        )
+        for row in rows {
+            let kind: String = row["mediaKind"]
+            let movieId: Int64 = row["movieId"]
+            grouped[kind, default: []].insert(movieId)
+        }
+        return grouped
+    }
+
+    /// 短剧条目的 id 集合，首页「只看短剧」筛选用。
+    static func fetchShortDramaIDs(in db: Database) throws -> Set<Int64> {
+        try fetchMovieIDsByKind(in: db)[ShortDrama.kindValue] ?? []
+    }
+
+    /// 「继续播放」区的数据源。直接播放的文件默认不进来，开关在设置的「基础设置」里。
+    static func fetchVisibleContinueWatching(
+        in db: Database,
+        includeDirectPlayback: Bool = ContinueWatchingSettings.showsDirectPlayback
+    ) throws -> [Movie] {
         try Movie.fetchAll(
             db,
             sql: """
@@ -863,7 +912,9 @@ extension Movie {
             WHERE \(LibraryVisibilitySQL.enabledSourcePredicate)
               AND videoFile.playProgress > 5
               AND (videoFile.duration = 0 OR (videoFile.playProgress / videoFile.duration) < 0.95)
-            """
+              AND (? OR videoFile.mediaType != 'direct')
+            """,
+            arguments: [includeDirectPlayback]
         )
     }
 }

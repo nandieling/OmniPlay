@@ -266,6 +266,9 @@ struct PosterWallView: View {
     // 删除了关于网络别名的复杂状态变量
     @State private var isShowingManageSources = false
     @State private var needsRescanAfterCurrentRun = false
+    // 本轮扫描是不是用户手动点的：手动扫描会清零自动刮削失败账本，
+    // 后续补抓剧照和链接续扫描都要沿用这个标记。
+    @State private var lastScanRunWasManual = false
     @State private var isShowingRenameSourceSheet = false
     @State private var isShowingSourceInfoSheet = false
     @State private var sourceInfoTarget: MediaSource?
@@ -417,6 +420,9 @@ struct PosterWallView: View {
     /// filter 加 `localizedStandardCompare` 重排一遍（分类视图还要再遍历分桶+排序一次），
     /// 而滚动相位翻转、搜索框动一下都会重估 body，慢机器上一帧全砸在这里，掉帧之外还会把
     /// 滚动位置顶回去，看起来就是卡顿加回弹。改成输入不变直接复用上次结果。
+    /// 按形态（movie / tv / shortDrama）分组的条目 id，首页类型筛选用；随媒体库一起刷新。
+    @State private var movieIDsByKind: [String: Set<Int64>] = [:]
+    @State private var libraryKindFilter: LibraryKindFilter = .all
     @State private var cachedDisplayedMovies: [Movie] = []
     @State private var cachedCategoryFolderGroups: [CategoryFolderGroup] = []
 
@@ -425,6 +431,13 @@ struct PosterWallView: View {
     /// 输入变了才重算；调用点：媒体库载入/变更后、搜索词、排序方式与方向、分类模式切换。
     private func rebuildWallCaches() {
         var result = movies
+        if let kind = libraryKindFilter.kindValue {
+            let ids = movieIDsByKind[kind] ?? []
+            result = result.filter { movie in
+                guard let id = movie.id else { return false }
+                return ids.contains(id)
+            }
+        }
         if !searchText.isEmpty {
             result = result.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
         }
@@ -570,7 +583,7 @@ struct PosterWallView: View {
         let current = categoryFolderRecords[group.id]?.posterPath
         if current == posterPath { return }
         if let posterPath {
-            PosterManager.shared.downloadPoster(posterPath: posterPath)
+            PosterManager.shared.downloadPoster(posterPath: posterPath, force: true)
         }
         let kind = group.folder.kind
         let name = group.folder.name
@@ -617,6 +630,22 @@ struct PosterWallView: View {
         }
     }
 
+    private var isMenuFilterActive: Bool { activeCategoryMode != .none || libraryKindFilter != .all }
+
+    private var menuButtonIcon: String {
+        if activeCategoryMode != .none { return "person.2.fill" }
+        return libraryKindFilter.symbolName
+    }
+
+    private var menuButtonHelp: String {
+        var parts: [String] = []
+        if activeCategoryMode != .none { parts.append("分类：\(activeCategoryMode.displayName)") }
+        if let kind = libraryKindFilter.kindValue {
+            parts.append("类型：\(libraryKindFilter.label)（\(movieIDsByKind[kind]?.count ?? 0) 部）")
+        }
+        return parts.isEmpty ? "首页分类与类型筛选" : parts.joined(separator: " · ")
+    }
+
     private var categoryMenuButton: some View {
         Menu {
             Picker("首页分类", selection: Binding(
@@ -635,23 +664,35 @@ struct PosterWallView: View {
                 }
             }
             .pickerStyle(.inline)
+
+            // 类型筛选和首页分类合成一颗按钮：两档维度放同一个菜单的两个分区，
+            // 再多一颗长得一样的胶囊，看着就知道是重复控件
+            Picker("类型", selection: $libraryKindFilter) {
+                ForEach(LibraryKindFilter.allCases) { filter in
+                    Text(filter.label).tag(filter)
+                }
+            }
+            .pickerStyle(.inline)
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: activeCategoryMode == .none ? "square.grid.2x2" : "person.2.fill")
+                Image(systemName: menuButtonIcon)
                     .font(.system(size: 13, weight: .semibold))
-                // 当前分类只在弹窗里显示，按钮上只留图标与上下箭头
+                if libraryKindFilter != .all {
+                    Text(libraryKindFilter.shortLabel)
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                // 当前选择只在弹窗里显示，按钮上只留图标与上下箭头
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 10, weight: .bold))
             }
-            .foregroundColor(activeCategoryMode == .none ? Color.secondary : theme.accent)
+            .foregroundColor(isMenuFilterActive ? theme.accent : Color.secondary)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .themeVibrant(theme, capsule: true, tint: activeCategoryMode == .none ? theme.chipFill : theme.accent.opacity(0.12))
-            .overlay(Capsule().stroke(activeCategoryMode == .none ? Color.secondary.opacity(0.25) : theme.accent.opacity(0.5), lineWidth: 1))
+            .themeVibrant(theme, capsule: true, tint: isMenuFilterActive ? theme.accent.opacity(0.12) : theme.chipFill)
+            .overlay(Capsule().stroke(isMenuFilterActive ? theme.accent.opacity(0.5) : Color.secondary.opacity(0.25), lineWidth: 1))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .conditionalHelp("切换首页分类方式（导演/主演）", show: enableFastTooltip)
     }
 
     @ViewBuilder
@@ -1059,6 +1100,7 @@ struct PosterWallView: View {
                                     .font(.title2).fontWeight(.bold)
                                     .foregroundColor(theme.textPrimary)
                                 categoryMenuButton
+                                    .conditionalHelp(menuButtonHelp, show: enableFastTooltip)
                                 if isSearchActive {
                                     TextField("搜索...", text: $searchText)
                                         .textFieldStyle(.roundedBorder).frame(width: 160).transition(.opacity.combined(with: .move(edge: .trailing)))
@@ -1172,7 +1214,7 @@ struct PosterWallView: View {
                         .conditionalHelp("查看已挂载媒体源，并添加本地文件夹、SMB 共享或 WebDAV 媒体源", show: enableFastTooltip)
                         .popover(isPresented: $isShowingManageSources, arrowEdge: .top) { folderMenuPanel }
                     
-                        Button(action: { triggerScanAndScrape() }) {
+                        Button(action: { triggerScanAndScrape(manual: true) }) {
                             Image(systemName: "arrow.triangle.2.circlepath")
                                 .font(.system(size: 21, weight: .medium))
                                 .foregroundColor(isProcessing ? topToolbarDisabledIconColor : topToolbarInactiveIconColor)
@@ -1264,11 +1306,11 @@ struct PosterWallView: View {
             .alert("TMDB API 无法连接", isPresented: $isShowingTMDBConnectionAlert) {
                 Button("本次不刮削", role: .cancel) {
                     // 不刮元数据，但缺失的分集剧照仍然要补抓。
-                    Task { await enqueueEpisodeStillBackfill(runID: UUID(), movieIDs: []) }
+                    Task { await enqueueEpisodeStillBackfill(runID: UUID(), movieIDs: [], forceRetry: true) }
                 }
                 Button("重试扫描") {
                     isShowingTMDBConnectionAlert = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { triggerScanAndScrape() }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { triggerScanAndScrape(manual: true) }
                 }
                 Button("添加 API / 设置代理", role: .cancel) {
                     settingsFocusTMDBApi = true
@@ -1316,7 +1358,7 @@ struct PosterWallView: View {
                 luckyStunRules = rules
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TriggerScanAndScrape"))) { _ in triggerScanAndScrape() }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TriggerScanAndScrape"))) { _ in triggerScanAndScrape(manual: true) }
         .onChange(of: enableFastTooltip) { _, isFast in
             UserDefaults.standard.set(isFast ? 50 : 1000, forKey: "NSInitialToolTipDelay")
         }
@@ -1325,6 +1367,7 @@ struct PosterWallView: View {
             refreshCategoryRandomPosters()
         }
         .onChange(of: searchText) { _, _ in rebuildWallCaches() }
+        .onChange(of: libraryKindFilter) { _, _ in rebuildWallCaches() }
         .onChange(of: selectedSortOption) { _, _ in rebuildWallCaches() }
         .onChange(of: isAscending) { _, _ in rebuildWallCaches() }
         .onChange(of: categoryFolderSortAsc) { _, _ in rebuildWallCaches() }
@@ -1386,7 +1429,7 @@ struct PosterWallView: View {
                             needsRescanAfterCurrentRun = true
                             processingMessage = "扫描中，新增文件夹已加入下一轮队列..."
                         } else {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { triggerScanAndScrape() }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { triggerScanAndScrape(manual: true) }
                         }
                     }
                 } catch { print("❌ 添加媒体源失败: \(error)") }
@@ -1887,7 +1930,7 @@ struct PosterWallView: View {
                     processingMessage = "扫描中，标星的 SMB 共享已加入下一轮队列..."
                 } else if !sourceIDs.isEmpty {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                        triggerScanAndScrape(sourceIDs: sourceIDs)
+                        triggerScanAndScrape(sourceIDs: sourceIDs, manual: true)
                     }
                 }
             }
@@ -3584,7 +3627,7 @@ struct PosterWallView: View {
                         processingMessage = "扫描中，标星的媒体源已加入下一轮队列..."
                     } else {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                            triggerScanAndScrape(sourceIDs: sourceIDs)
+                            triggerScanAndScrape(sourceIDs: sourceIDs, manual: true)
                         }
                     }
                 }
@@ -4088,7 +4131,7 @@ struct PosterWallView: View {
                         needsRescanAfterCurrentRun = true
                         processingMessage = "扫描中，新增 WebDAV 源已加入下一轮队列..."
                     } else {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { triggerScanAndScrape() }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { triggerScanAndScrape(manual: true) }
                     }
                 }
             } catch {
@@ -4289,16 +4332,26 @@ struct PosterWallView: View {
                     try MediaSource.fetchManageableSources(in: db)
                 }
                 let fetchedContinueWatching = try AppDatabase.shared.dbQueue.read { db in
-                    try Movie.fetchVisibleContinueWatching(in: db)
+                    try Movie.fetchVisibleContinueWatching(
+                        in: db,
+                        includeDirectPlayback: ContinueWatchingSettings.showsDirectPlayback
+                    )
+                }
+                let fetchedMovieIDsByKind = try AppDatabase.shared.dbQueue.read { db in
+                    try Movie.fetchMovieIDsByKind(in: db)
                 }
                 DispatchQueue.main.async {
+                    let appliedAt = Date()
                     self.movies = fetchedMovies
                     self.rebuildWallCaches()
                     self.mediaSources = fetchedSources
                     self.webDAVBrowserMountedURLs = self.mountedRemoteBrowserKeys(from: fetchedSources)
                     self.continueWatchingMovies = fetchedContinueWatching
+                    self.movieIDsByKind = fetchedMovieIDsByKind
                     self.refreshCategoryFolderState()
                     self.completeLoadDataCycle()
+                    let cost = Int(Date().timeIntervalSince(appliedAt) * 1000)
+                    if cost > 80 { print("[PosterWall] 首页数据落主线程 \(cost)ms（影视 \(fetchedMovies.count) 条）") }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -4433,7 +4486,7 @@ struct PosterWallView: View {
                             processingMessage = "扫描中，重新开启的媒体源已加入下一轮同步..."
                         } else {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                triggerScanAndScrape(sourceID: sid)
+                                triggerScanAndScrape(sourceID: sid, manual: true)
                             }
                         }
                     }
@@ -4457,7 +4510,7 @@ struct PosterWallView: View {
         withAnimation { isProcessing = false }
         if shouldChainRescan {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                triggerScanAndScrape()
+                triggerScanAndScrape(manual: lastScanRunWasManual)
             }
         }
     }
@@ -4484,10 +4537,10 @@ struct PosterWallView: View {
 
     // 统一入口：按首页显示顺序补抓缺失的分集剧照。
     // 剧照下载是后台长任务，这里不阻塞扫描流程；进度通过 ThumbnailManager.progressMessage 展示。
-    private func enqueueEpisodeStillBackfill(runID: UUID, movieIDs: [Int64]) async {
+    private func enqueueEpisodeStillBackfill(runID: UUID, movieIDs: [Int64], forceRetry: Bool = false) async {
         if !movieIDs.isEmpty, await MainActor.run(body: { self.currentScanRunID == runID }) {
             // 显式传入的剧集优先，其余影片按首页顺序补在后面。
-            ThumbnailManager.shared.enqueueMissingEpisodeThumbnailsAcrossLibrary(orderedMovieIDs: movieIDs)
+            ThumbnailManager.shared.enqueueMissingEpisodeThumbnailsAcrossLibrary(orderedMovieIDs: movieIDs, forceRetry: forceRetry)
         } else {
             await MainActor.run {
                 guard self.currentScanRunID == runID else { return }
@@ -4496,12 +4549,18 @@ struct PosterWallView: View {
             let orderedMovieIDs = await MainActor.run {
                 self.displayedMovies.compactMap(\.id)
             }
-            ThumbnailManager.shared.enqueueMissingEpisodeThumbnailsAcrossLibrary(orderedMovieIDs: orderedMovieIDs)
+            ThumbnailManager.shared.enqueueMissingEpisodeThumbnailsAcrossLibrary(orderedMovieIDs: orderedMovieIDs, forceRetry: forceRetry)
         }
     }
 
-    private func triggerScanAndScrape(sourceID: Int64? = nil, sourceIDs: [Int64]? = nil, skipTMDBScrape: Bool = false) {
+    /// 扫描 + 刮削统一入口。
+    /// - Parameter manual: 用户主动触发（工具栏按钮、重试弹窗、增删或启停媒体源）传 true：
+    ///   先把自动刮削失败账本清零，海报、剧照、元数据都重新获得 3 次机会；
+    ///   开机自动扫描传 false，已经放弃的目标不再自动重试。
+    private func triggerScanAndScrape(sourceID: Int64? = nil, sourceIDs: [Int64]? = nil, skipTMDBScrape: Bool = false, manual: Bool = false) {
         guard !isProcessing else { return }
+        lastScanRunWasManual = manual
+        if manual { ScrapeFailureTracker.shared.resetAll() }
         currentScanTask?.cancel()
         let runID = UUID()
         currentScanRunID = runID
@@ -4659,7 +4718,7 @@ struct PosterWallView: View {
                         withAnimation { self.processingMessage = "没有需要 TMDB 刮削的内容，检查缺失的分集剧照..." }
                     }
                     // 库已经全部刮削过时不能直接 return，否则缺失的分集剧照永远不会补抓。
-                    await self.enqueueEpisodeStillBackfill(runID: runID, movieIDs: [])
+                    await self.enqueueEpisodeStillBackfill(runID: runID, movieIDs: [], forceRetry: manual)
                     await MainActor.run {
                         guard self.currentScanRunID == runID else { return }
                         finishScanRun(runID: runID, reloadData: true)
@@ -4704,7 +4763,7 @@ struct PosterWallView: View {
                     await MainActor.run { finishScanRun(runID: runID, reloadData: true) }
                     return
                 }
-                await self.enqueueEpisodeStillBackfill(runID: runID, movieIDs: [])
+                await self.enqueueEpisodeStillBackfill(runID: runID, movieIDs: [], forceRetry: manual)
 
                 await MainActor.run {
                     guard self.currentScanRunID == runID else { return }

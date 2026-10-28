@@ -30,8 +30,8 @@ QQ交流群：951690884， 加群答案：鱼佬。 有使用教程、功能建�
 
 | 目录 | 平台 | 技术栈 | 版本 | 说明 |
 | --- | --- | --- | --- | --- |
-| `OmniPlay开源-mac-ARM` | macOS 14+（Apple Silicon） | Swift / SwiftUI + MPVKit-GPL / libmpv / FFmpeg | 1.9 | 功能基准版，工程 `OmniPlay.xcodeproj`，App 名「觅影」，Bundle ID `nan.OmniPlay` |
-| `OmniPlay开源-mac-x64` | macOS 14+（Intel） | 同上 | 1.9 | 同一套工程的 x86_64 版本，已同步 ARM 版 1.9 |
+| `OmniPlay开源-mac-ARM` | macOS 14+（Apple Silicon） | Swift / SwiftUI + MPVKit-GPL / libmpv / FFmpeg | 1.10 | 功能基准版，工程 `OmniPlay.xcodeproj`，App 名「觅影」，Bundle ID `nan.OmniPlay` |
+| `OmniPlay开源-mac-x64` | macOS 14+（Intel） | 同上 | 1.10 | 同一套工程的 x86_64 版本，与 ARM 版逐文件一致（仅 entitlements 保留 Intel 差异） |
 | `OmniPlay-win` | Windows 10 / 11 x64 | Avalonia + .NET 10 + SQLite + libmpv | — | 独立重写，App 名「览影」，方案入口 `OmniPlay.Windows.slnx` |
 | `OmniPlay-安卓TV` | Android TV / 手机（minSdk 26） | Java + libmpv（NDK / JNI） | 1.17 | 双入口启动器：TV 遥控器 D-pad 导航 + 手机触摸海报网格 |
 
@@ -39,7 +39,7 @@ QQ交流群：951690884， 加群答案：鱼佬。 有使用教程、功能建�
 
 - [macOS ARM 版 README](OmniPlay开源-mac-ARM/README.md)：完整功能清单、使用教程、Xcode 编译归档与打包、常见问题。
 - [macOS x64 版同步记录](OmniPlay开源-mac-x64/2026-10-07-sync-with-arm-1.8.md)：与 ARM 版的差异收敛过程。
-- [macOS x64 版 1.9 同步记录](OmniPlay开源-mac-x64/2026-10-24-sync-with-arm-1.9.md)：本轮从 ARM 版移植的功能与保留的 Intel 专属适配。
+- [macOS x64 版 1.10 同步记录](OmniPlay开源-mac-x64/2026-10-28-sync-with-arm-1.10.md)：本轮从 ARM 版移植的功能与保留的 Intel 专属适配；[1.9 同步记录](OmniPlay开源-mac-x64/2026-10-24-sync-with-arm-1.9.md) 见上一轮。
 - [Windows 版 README](OmniPlay-win/README.md)：构建、打包、日志与播放诊断、TMDB 配置、离线环境说明。
 - [安卓 TV 版 README](OmniPlay-安卓TV/README.md)：遥控器焦点导航、自研 WebDAV 传输层、主题体系、逐版本演进记录。
 
@@ -173,14 +173,71 @@ TV 与手机共用一个 APK，双启动入口由 `LauncherActivity` 分发。ND
 
 ## TMDB 与反向代理网关
 
-第一步：
-1. 登录 [Cloudflare 控制台](https://dash.cloudflare.com/)，进入 Compute (Workers & Pages) -> Workers。
-2. 点击 Create application -> Create Worker，命名为 `tmdb-proxy` 并点击 Deploy。
+`api.themoviedb.org` 与 `image.tmdb.org` 在国内直连经常超时甚至不通，表现就是刮削卡住、海报墙一片灰。各端都支持把 TMDB 的全部请求改道到自建网关（设置里的「TMDB 代理网关地址」），留空即直连官方。mac 版偏好设置顶部的「使用教程」里有同样的图文说明。
 
-第二步：配置反代代码
+推荐用免费域名 + Cloudflare Worker 撑起这张网关：不需要服务器，也不花钱。
 
-1. 点击 Edit code，将默认代码全部清空，替换为以下脚本：
+### 1. 领一个免费域名
+
+在 [DNSHE](https://my.dnshe.com) 注册账号，免费领取一个 `de5.net` 域名，例如 `myname.de5.net`。
+
+### 2. 接入 Cloudflare 做 DNS 解析
+
+在 Cloudflare 添加这个站点，拿到 Cloudflare 分配的两个 NS 地址，回 DNSHE 把域名的 DNS 服务器改成这两个。若这个免费域不允许改 NS，就保留 DNSHE 的解析，直接加一条 CNAME 指向你的 Worker 域名。
+
+### 3. 建 Worker 反代 API 与图片服务器
+
+登录 [Cloudflare 控制台](https://dash.cloudflare.com/)，进入 Compute (Workers & Pages) -> Create -> Create Worker，命名为 `tmdb-proxy`，点 Edit code 把默认代码全部换成下面这段，再点 Deploy。
+
+```js
+export default {
+  async fetch(request) {
+    const url = new URL(request.url)
+    // /t/p/ 开头是海报与剧照，其余都当作 TMDB API
+    const upstream = url.pathname.startsWith('/t/p/')
+      ? 'image.tmdb.org'
+      : 'api.themoviedb.org'
+
+    const target = new URL(url.pathname + url.search, 'https://' + upstream)
+    const headers = new Headers(request.headers)
+    headers.set('host', upstream)
+    headers.delete('accept-encoding')
+
+    // 海报是公开且不变的内容，让 CDN 缓存一天，重复打开首页不再回源
+    const init = { method: request.method, headers, body: request.body, redirect: 'follow' }
+    const response = await fetch(new Request(target, init))
+    if (upstream === 'image.tmdb.org') {
+      const cached = new Response(response.body, response)
+      cached.headers.set('cache-control', 'public, max-age=86400')
+      return cached
+    }
+    return response
+  }
+}
 ```
+
+### 4. 绑定自定义域名（关键）
+
+`.workers.dev` 默认子域名在国内通常无法直连，因此进入该 Worker 的 Settings -> Domains & Routes -> Add -> Custom Domain，绑定 `tmdb.myname.de5.net`。域名已托管在 Cloudflare 时会自动签发证书。
+
+### 5. 回到软件填地址
+
+网关地址填 `https://tmdb.myname.de5.net`。网关要提供两条路径，路径结构原样保留：
+
+- `/3/…` 转发到 `api.themoviedb.org`（刮削、详情、演职员）
+- `/t/p/…` 转发到 `image.tmdb.org`（海报与剧照）
+
+觅影填域名即可，末尾的 `/3` 自己补，也支持带路径前缀（例如 `https://example.com/tmdb`）。MoviePilot / TMM / NASTool 这类工具通常要自己写全 `/3` 前缀。
+
+API Key 仍是你自己的：网关只做转发，不代替凭据，请求头与查询串原样透传即可。
+
+自查两条请求：`https://你的域名/3/configuration?api_key=你的Key` 返回 JSON 说明 API 通了；`https://你的域名/t/p/w500/某张海报路径` 出图说明图片通了。
+
+### 可选：给网关加一层访问暗号
+
+网关是个公开地址，怕被人蹭流量可以在路径最前面加一段暗号，并把暗号一起填进软件（例如 `https://tmdb.yourdomain.com/mySecret888`）。脚本开头多做一次前缀校验并剥掉它，剩下的分流逻辑与上面一致：
+
+```js
 // 自定义你的访问密码/暗号（建议字母+数字）
 const SECRET_TOKEN = "mySecret888"; 
 
@@ -224,16 +281,8 @@ export default {
   },
 };
 ```
-点击右上角 **Deploy** 保存。
 
-第三步：绑定自定义域名（关键）
-
-- 由于 `.workers.dev` 默认子域名在国内通常无法直连，进入该 Worker 的 Settings -> Domains & Routes。
-- 点击 Add -> Custom Domain，绑定你托管在 Cloudflare 上的二级域名（例如 `tmdb.yourdomain.com`）。
-
-刮削软件中的填法：
-在 MoviePilot / TMM / NASTool 中，将 TMDB API 地址填为：
-https://tmdb.yourdomain.com/mySecret888
+不想用 Cloudflare 也行：nginx、Caddy、群晖或 NAS 上的容器都能当网关，只要保持上面那两条路径结构不变。
 
 ## 数据与日志位置
 

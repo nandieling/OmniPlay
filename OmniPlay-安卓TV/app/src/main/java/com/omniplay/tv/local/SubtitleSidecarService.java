@@ -16,8 +16,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 内封字幕转档：把 MKV 里的内封字幕抽成贴着视频放的 sidecar（{@code 片名.zh.srt} /
@@ -37,6 +39,14 @@ public final class SubtitleSidecarService {
         void writeFile(String relativePath, File file) throws IOException;
 
         boolean exists(String relativePath);
+
+        /**
+         * 列一个目录里的文件名（不含子目录本身）。返回 {@code null} 表示这个源不会列举，
+         * 调用方改用逐个探名的老办法；空列表则是「列出来了，目录里就这些」。
+         */
+        default List<String> listFileNames(String directoryRelativePath) throws IOException {
+            return null;
+        }
 
         byte[] read(String relativePath) throws IOException;
 
@@ -81,6 +91,73 @@ public final class SubtitleSidecarService {
         String fileName = slash < 0 ? relative : relative.substring(slash + 1);
         int dot = fileName.lastIndexOf('.');
         return directory + (dot <= 0 ? fileName : fileName.substring(0, dot)) + "." + language + "." + format;
+    }
+
+    /** 从目录列举里认出来的一条现成 sidecar。 */
+    public static final class SidecarName {
+        public final String relativePath;
+        public final String language;
+        public final String format;
+
+        SidecarName(String relativePath, String language, String format) {
+            this.relativePath = relativePath;
+            this.language = language;
+            this.format = format;
+        }
+    }
+
+    /**
+     * 从「同目录里躺着的文件名」里挑出属于这部视频的 sidecar。
+     *
+     * <p>只能按前缀匹配再解语言码：NAS 那台服务写的是 ``片名.内封轨自带语言.格式``，
+     * 语言码按轨道自己标的（``chs`` / ``cht`` / ``und`` / ``zh-CN`` 都会出现），
+     * 拿几个固定码去猜就会漏。后缀只认 srt / ass / sup，语言码得像个语言码，
+     * ``片名.1080p.srt`` 这类不会误收。
+     */
+    public static List<SidecarName> sidecarNamesFor(String videoRelativePath, List<String> siblingNames) {
+        List<SidecarName> found = new ArrayList<>();
+        if (siblingNames == null || videoRelativePath == null) {
+            return found;
+        }
+        String relative = videoRelativePath.replace('\\', '/');
+        int slash = relative.lastIndexOf('/');
+        String directory = slash < 0 ? "" : relative.substring(0, slash + 1);
+        String fileName = slash < 0 ? relative : relative.substring(slash + 1);
+        int dot = fileName.lastIndexOf('.');
+        String stem = dot <= 0 ? fileName : fileName.substring(0, dot);
+        if (stem.isEmpty()) {
+            return found;
+        }
+        String prefix = stem.toLowerCase(java.util.Locale.ROOT) + ".";
+        Set<String> seen = new HashSet<>();
+        for (String candidate : siblingNames) {
+            if (candidate == null) {
+                continue;
+            }
+            String lower = candidate.toLowerCase(java.util.Locale.ROOT);
+            if (!lower.startsWith(prefix) || lower.length() <= prefix.length()) {
+                continue;
+            }
+            String rest = lower.substring(prefix.length());
+            int tail = rest.lastIndexOf('.');
+            if (tail <= 0) {
+                continue;
+            }
+            String language = rest.substring(0, tail);
+            String format = rest.substring(tail + 1);
+            if (!format.equals("srt") && !format.equals("ass") && !format.equals("sup")) {
+                continue;
+            }
+            if (!language.matches("[a-z][a-z0-9-]{0,7}")) {
+                continue;
+            }
+            String normalized = MatroskaSubtitleExtractor.normalizeLanguage(language);
+            if (!seen.add(normalized + "." + format)) {
+                continue;
+            }
+            found.add(new SidecarName(directory + candidate, normalized, format));
+        }
+        return found;
     }
 
     /** 探一下这个文件里有哪些能转的字幕轨（只读文件头，开销几十 KB）。 */
@@ -303,6 +380,21 @@ public final class SubtitleSidecarService {
         }
 
         @Override
+        public List<String> listFileNames(String directoryRelativePath) {
+            File[] children = file(directoryRelativePath == null ? "" : directoryRelativePath).listFiles();
+            if (children == null) {
+                return Collections.emptyList();
+            }
+            List<String> names = new ArrayList<>();
+            for (File child : children) {
+                if (child.isFile()) {
+                    names.add(child.getName());
+                }
+            }
+            return names;
+        }
+
+        @Override
         public byte[] read(String relativePath) throws IOException {
             requirePlayableSize(file(relativePath).length());
             return readAll(file(relativePath));
@@ -344,6 +436,20 @@ public final class SubtitleSidecarService {
             } catch (IOException ignored) {
                 return false;
             }
+        }
+
+        @Override
+        public List<String> listFileNames(String directoryRelativePath) throws IOException {
+            String url = client.streamUrl(directoryRelativePath == null ? "" : directoryRelativePath);
+            // NAS 刚写回来的那份得看得见，别拿旧清单回答。
+            client.forgetDirectory(url);
+            List<String> names = new ArrayList<>();
+            for (WebDavClient.Entry entry : client.list(url)) {
+                if (!entry.isCollection && !entry.name.isEmpty()) {
+                    names.add(entry.name);
+                }
+            }
+            return names;
         }
 
         private long length(String relativePath) {
@@ -404,6 +510,18 @@ public final class SubtitleSidecarService {
         @Override
         public boolean exists(String relativePath) {
             return client.exists(client.absoluteUrl(relativePath));
+        }
+
+        @Override
+        public List<String> listFileNames(String directoryRelativePath) throws IOException {
+            List<String> names = new ArrayList<>();
+            for (BrowseEntry entry : client.list(client.absoluteUrl(
+                    directoryRelativePath == null ? "" : directoryRelativePath))) {
+                if (!entry.directory && !entry.name.isEmpty()) {
+                    names.add(entry.name);
+                }
+            }
+            return names;
         }
 
         @Override

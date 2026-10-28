@@ -137,6 +137,55 @@ final class DoubanService {
         return try parseSubject(html: html, subjectId: subject.id, subjectURL: subject.url.absoluteString)
     }
 
+    /// 关键词搜索。一次请求返回候选列表（标题、评分、海报、别名、单集时长都在里面），
+    /// 短剧刮削靠这一条把「搜索 + 取详情」压成一次请求。受 `DoubanRequestGate` 频控。
+    func searchSubjects(query: String) async throws -> [DoubanSearchHit] {
+        let keyword = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !keyword.isEmpty else { return [] }
+        try await gate.acquire()
+
+        guard let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://search.douban.com/movie/subject_search?search_text=\(encoded)") else {
+            throw DoubanServiceError.invalidSubject
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("zh-CN,zh-Hans;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        request.setValue("https://www.douban.com/", forHTTPHeaderField: "Referer")
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw error
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw DoubanServiceError.invalidResponse
+        }
+        if http.url?.host?.contains("sec.douban.com") == true {
+            await gate.pause(hours: 12)
+            throw DoubanServiceError.blocked("豆瓣返回了验证页面，已暂停豆瓣请求 12 小时。")
+        }
+        if http.statusCode == 403 || http.statusCode == 429 {
+            await gate.pause(hours: 12)
+            throw DoubanServiceError.blocked("豆瓣返回 \(http.statusCode)，已暂停豆瓣请求 12 小时以避免继续触发风控。")
+        }
+        guard http.statusCode == 200 else {
+            throw DoubanServiceError.httpStatus(http.statusCode)
+        }
+        guard let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .doubanGB18030) else {
+            throw DoubanServiceError.invalidResponse
+        }
+        if html.contains("检测到有异常请求") || html.contains("sec.douban.com") {
+            await gate.pause(hours: 12)
+            throw DoubanServiceError.blocked("豆瓣返回了验证或异常请求页面，已暂停豆瓣请求 12 小时。")
+        }
+        return DoubanSearchParser.parse(html: html)
+    }
+
     private func parseSubject(html: String, subjectId: String, subjectURL: String) throws -> DoubanSubjectPayload {
         let jsonLDObjects = html
             .matches(pattern: #"<script[^>]+type=["']application/ld\+json["'][^>]*>(.*?)</script>"#, options: [.caseInsensitive, .dotMatchesLineSeparators])

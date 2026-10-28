@@ -183,6 +183,21 @@ class AppDatabase {
             _ = try AppDatabase.healSchemaGaps(db)
         }
 
+        // v14: 短剧入库。videoFile 记下条目形态（电影 / 剧集 / 短剧），
+        // 短剧专属字段走旁表，形态与 doubanMetadata 一致。
+        migrator.registerMigration("v14") { db in
+            // v13 的自愈可能已经补过这一列（老库先 heal 再走阶梯），这里只在缺的时候加，
+            // 否则 duplicate column 会把阶梯卡在 v14，整个库报「升级未完成」。
+            let existingColumns = try db.columns(in: "videoFile").map { $0.name.lowercased() }
+            if !existingColumns.contains("mediakind") {
+                try db.alter(table: "videoFile") { t in
+                    t.add(column: "mediaKind", .text)
+                }
+            }
+            try ShortDramaMetadata.createTable(db)
+            try db.execute(sql: #"CREATE INDEX IF NOT EXISTS "idx_videoFile_mediaKind" ON videoFile("mediaKind")"#)
+        }
+
         var migrationError: Error?
         do {
             try migrator.migrate(dbQueue)
@@ -281,7 +296,8 @@ extension AppDatabase {
         ExpectedTable(name: "chineseNameCache", ddl: """
             CREATE TABLE IF NOT EXISTS "chineseNameCache"("key" TEXT PRIMARY KEY, "value" TEXT, "updatedAt" DOUBLE NOT NULL)
             """),
-        ExpectedTable(name: "mediaMark", ddl: MediaMarkStore.createTableSQL)
+        ExpectedTable(name: "mediaMark", ddl: MediaMarkStore.createTableSQL),
+        ExpectedTable(name: "shortDramaMetadata", ddl: ShortDramaMetadata.createTableSQL)
     ]
 
     nonisolated private static let expectedColumns: [ExpectedColumn] = [
@@ -293,7 +309,8 @@ extension AppDatabase {
         ExpectedColumn(table: "mediaSource", column: "addressConfig", ddl: "TEXT"),
         ExpectedColumn(table: "movie", column: "directors", ddl: "TEXT"),
         ExpectedColumn(table: "movie", column: "casts", ddl: "TEXT"),
-        ExpectedColumn(table: "mediaMark", column: "remoteUrl", ddl: "TEXT")
+        ExpectedColumn(table: "mediaMark", column: "remoteUrl", ddl: "TEXT"),
+        ExpectedColumn(table: "videoFile", column: "mediaKind", ddl: "TEXT")
     ]
 
     nonisolated private static let coreTables = ["mediaSource", "movie", "tvShow", "videoFile"]
