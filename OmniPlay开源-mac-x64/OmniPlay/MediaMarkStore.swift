@@ -245,11 +245,12 @@ nonisolated enum MediaMarkStore {
     static func markFilesWatched(db: Database, localId: Int64) throws {
         try db.execute(
             sql: """
-                UPDATE videoFile SET playProgress = CASE WHEN duration > 0 THEN duration ELSE 100 END,
-                                     duration = CASE WHEN duration > 0 THEN duration ELSE 100 END
+                UPDATE videoFile SET playProgress = CASE WHEN duration > 0 THEN duration ELSE ? END,
+                                     duration = CASE WHEN duration > 0 THEN duration ELSE ? END
                 WHERE movieId = ?
                 """,
-            arguments: [localId])
+            arguments: [PlaybackWatchState.unknownDurationWatchedMark,
+                        PlaybackWatchState.unknownDurationWatchedMark, localId])
     }
 
     /// 播完那一刻的自动标记：看完即按播放进度补一条「已看」记录（保留已有评分与评论），

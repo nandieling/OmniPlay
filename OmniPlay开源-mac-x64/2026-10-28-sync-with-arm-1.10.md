@@ -42,3 +42,14 @@
   `BusinessLogicIntegrationTests.prepareTestSchema` 末尾改调 `AppDatabase.healSchemaGaps`，夹具与期望结构不再两处维护，
   `ShortDramaScrapeTests.shortDramaTableRoundTrip` 补上旁表外键要的父条目行。
 - 自动打包见仓库根 `.github/workflows/macos-release.yml`，两份工程各出一个 zip 与 dmg，包名里的版本号取自产物 Info.plist。
+
+## 10-28 晚间增量：短剧连播的「已播」标记
+
+ARM 上又落了一处播放进度修复，x64 同步覆盖 6 个源文件与 1 份新用例：`PlayerScreen.swift`、
+`MPVPlayerManager.swift`、`DatabaseModels.swift`、`MovieCardView.swift`、`MovieDetailView.swift`、
+`MediaMarkStore.swift`、`OmniPlayTests/PlaybackFinishedMarkTests.swift`。原因、改法与真机回归见
+`OmniPlay开源-mac-ARM/docs/2026-10-28-short-drama-watched-mark.md`。两份工程源码再次逐文件一致，
+仍只有两份 entitlements 保留 Intel 差异。
+
+两份工程 `xcodebuild build-for-testing` 均通过，新用例随测试包一起编过；`OmniPlayTests` 在 ARM 上
+114 个用例全绿（同一份源码，测试不依赖指令集），真机回归见 ARM 那份记录。

@@ -197,7 +197,8 @@ class MPVPlayerManager: ObservableObject {
     var playbackEngineSnapshot: PlaybackEngineSnapshot {
         let readSnapshot = { [weak self] in
             guard let self, let mpv = self.mpv else {
-                return PlaybackEngineSnapshot(playlistIndex: 0, timePos: 0, duration: 0, filename: nil)
+                // 没有句柄就没有当前条目：用 -1 表示「无当前项」，别让调用方误读成第 0 项
+                return PlaybackEngineSnapshot(playlistIndex: -1, timePos: 0, duration: 0, filename: nil)
             }
             var timePos: Double = 0.0
             var dur: Double = 0.0
@@ -214,7 +215,8 @@ class MPVPlayerManager: ObservableObject {
                 resolvedTimePos = self.playbackEndTracker.endedDuration
             }
             return PlaybackEngineSnapshot(
-                playlistIndex: max(0, Int(playlistPos)),
+                // mpv 在整个播放列表放完后把 playlist-pos 置为 -1，原样透出才不会认错文件
+                playlistIndex: Int(playlistPos),
                 timePos: resolvedTimePos,
                 duration: resolvedDuration,
                 filename: filename
@@ -1243,7 +1245,7 @@ class MPVPlayerManager: ObservableObject {
                 if let name = filename, name != self.currentFilename {
                     self.currentFilename = name
                 }
-                let resolvedPlaylistIndex = max(0, Int(playlistPos))
+                let resolvedPlaylistIndex = Int(playlistPos)
                 if resolvedPlaylistIndex != self.currentPlaylistIndex {
                     self.currentPlaylistIndex = resolvedPlaylistIndex
                 }

@@ -2044,14 +2044,19 @@ struct PlayerScreen: View {
         RemoteISOStreamProxy.shared.unregister(routeIDs: routeIDs)
     }
 
-    nonisolated private static func applyFinishedPlaybackState(
+    nonisolated static func applyFinishedPlaybackState(
         to file: inout VideoFile,
         observedDuration: Double = 0,
         observedProgress: Double = 0
     ) {
-        let resolvedDuration = max(file.duration, max(observedDuration, observedProgress))
-        file.duration = resolvedDuration
-        file.playProgress = resolvedDuration
+        // 连播时的自动标记只带文件 id：库里的 duration 还没写过的话，进度会跟着算成 0，
+        // 而 0/0 在 PlaybackWatchState 里就是「没播过」，这一集等于没标上。
+        let finishedDuration = PlaybackWatchState.finishedMark(
+            duration: file.duration,
+            observed: max(observedDuration, observedProgress)
+        )
+        file.duration = finishedDuration
+        file.playProgress = finishedDuration
         file.lastPlayedAt = nil
     }
 

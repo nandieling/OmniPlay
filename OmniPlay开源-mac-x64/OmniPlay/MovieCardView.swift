@@ -302,7 +302,7 @@ struct MovieCardView: View {
                     }
                     for var file in files {
                         if shouldMarkWatched {
-                            let duration = file.duration > 0 ? file.duration : 100
+                            let duration = PlaybackWatchState.finishedMark(duration: file.duration)
                             file.duration = duration
                             file.playProgress = duration
                         } else {

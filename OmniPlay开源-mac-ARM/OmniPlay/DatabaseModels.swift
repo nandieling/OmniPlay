@@ -8,6 +8,17 @@ nonisolated enum PlaybackWatchState: Equatable {
     case inProgress
     case watched
 
+    /// 已看但没拿到时长时的兜底秒数：库里 duration 和 playProgress 同时为 0 就是「没播过」，
+    /// 所以「播完」绝不能落成 0。手动标记、导入回填、播放自动标记共用这一个约定。
+    static let unknownDurationWatchedMark: Double = 100
+
+    /// 写「已看」时该落到库里的秒数：拿到过时长就顶到片尾，没拿到就用兜底值。
+    /// 结果恒为正——写 0 会被下一句读回成「没播过」。
+    static func finishedMark(duration: Double, observed: Double = 0) -> Double {
+        let resolved = max(duration, observed)
+        return resolved.isFinite && resolved > 0 ? resolved : unknownDurationWatchedMark
+    }
+
     init(progress: Double, duration: Double) {
         let normalizedProgress = progress.isFinite ? max(0, progress) : 0
         let normalizedDuration = duration.isFinite ? max(0, duration) : 0
