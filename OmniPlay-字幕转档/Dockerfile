@@ -22,8 +22,16 @@ RUN . /etc/os-release \
        done; \
     [ -n "${ok}" ] || { echo "五个 apk 源都没拉到 ${v} 分支的包"; exit 1; }
 
+# 蓝光盘：整盘目录（BDMV/）靠 bluray.py 自己解析，不吃额外依赖；
+# ISO 则优先用带 libbluray 的 ffmpeg，没有就退到 isoinfo / xorriso / 7z 拆盘。
+# 这几个包都是加分项，装不上也只是「这个 ISO 转不了」，不影响常规转档。
+RUN apk add --no-cache libbluray p7zip p7zip-plugins xorriso || \
+    apk add --no-cache --timeout 60 libbluray p7zip xorriso || \
+    echo "ISO 工具没装上：蓝光盘目录照转，整盘镜像遇到时会提示换镜像源"
+
 WORKDIR /srv/omniplay-sidecar
 COPY sidecar.py ./
+COPY bluray.py ./
 COPY web ./web
 
 RUN mkdir -p /var/lib/sidecar

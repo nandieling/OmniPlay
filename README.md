@@ -39,7 +39,7 @@ QQ交流群：951690884， 加群答案：鱼佬。 有使用教程、功能建�
 
 - [macOS ARM 版 README](OmniPlay开源-mac-ARM/README.md)：完整功能清单、使用教程、Xcode 编译归档与打包、常见问题。
 - [macOS x64 版同步记录](OmniPlay开源-mac-x64/2026-10-07-sync-with-arm-1.8.md)：与 ARM 版的差异收敛过程。
-- [macOS x64 版 1.10 同步记录](OmniPlay开源-mac-x64/2026-10-28-sync-with-arm-1.10.md)：本轮从 ARM 版移植的功能与保留的 Intel 专属适配；[1.9 同步记录](OmniPlay开源-mac-x64/2026-10-24-sync-with-arm-1.9.md) 见上一轮。
+- [macOS x64 版 1.10 同步记录](OmniPlay开源-mac-x64/2026-10-28-sync-with-arm-1.10.md)：本轮从 ARM 版移植的功能与保留的 Intel 专属适配；[1.10 直开播放同步修复](OmniPlay开源-mac-x64/2026-11-02-direct-open-sync-with-arm.md)；[1.9 同步记录](OmniPlay开源-mac-x64/2026-10-24-sync-with-arm-1.9.md) 见上一轮。
 - [Windows 版 README](OmniPlay-win/README.md)：构建、打包、日志与播放诊断、TMDB 配置、离线环境说明。
 - [安卓 TV 版 README](OmniPlay-安卓TV/README.md)：遥控器焦点导航、自研 WebDAV 传输层、主题体系、逐版本演进记录。
 

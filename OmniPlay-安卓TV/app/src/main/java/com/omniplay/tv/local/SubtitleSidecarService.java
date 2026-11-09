@@ -414,25 +414,41 @@ public final class SubtitleSidecarService {
             this.client = new WebDavClient(rootUrl, new WebDavClient.Credential(username, password));
         }
 
+        /**
+         * 读写 sidecar 走的是自己那个 socket 客户端，账号必须显式带：{@code streamUrl()} 只是把
+         * 账号拼进 URL 的 userinfo，那是给 mpv 用的， {@code Http} 侧不认就等于匿名请求，
+         * 受保护的共享回 401——「已列出字幕却读不出来」就是这么来的。
+         */
+        private Map<String, String> authHeaders() {
+            Map<String, String> headers = new HashMap<>();
+            String authorization = client.authorization();
+            if (authorization != null && !authorization.isEmpty()) {
+                headers.put("Authorization", authorization);
+            }
+            return headers;
+        }
+
         @Override
         public SeekableSource open(String relativePath) {
-            return new HttpRangeSource(client.streamUrl(relativePath));
+            return new HttpRangeSource(client.streamUrl(relativePath), authHeaders());
         }
 
         @Override
         public void write(String relativePath, byte[] body) throws IOException {
-            require(Http.request(client.streamUrl(relativePath), "PUT", null, body, 120000).status);
+            require(Http.request(client.streamUrl(relativePath), "PUT",
+                    authHeaders(), body, 120000).status);
         }
 
         @Override
         public void writeFile(String relativePath, File file) throws IOException {
-            require(Http.putFile(client.streamUrl(relativePath), null, file, 600000).status);
+            require(Http.putFile(client.streamUrl(relativePath), authHeaders(), file, 600000).status);
         }
 
         @Override
         public boolean exists(String relativePath) {
             try {
-                return Http.request(client.streamUrl(relativePath), "HEAD", null, null, 8000).status < 400;
+                return Http.request(client.streamUrl(relativePath), "HEAD",
+                        authHeaders(), null, 8000).status < 400;
             } catch (IOException ignored) {
                 return false;
             }
@@ -454,7 +470,8 @@ public final class SubtitleSidecarService {
 
         private long length(String relativePath) {
             try {
-                Http.Response head = Http.request(client.streamUrl(relativePath), "HEAD", null, null, 8000);
+                Http.Response head = Http.request(client.streamUrl(relativePath), "HEAD",
+                        authHeaders(), null, 8000);
                 String value = head.header("content-length");
                 return value == null ? 0 : Math.max(0, Long.parseLong(value.trim()));
             } catch (Exception ignored) {
@@ -465,9 +482,13 @@ public final class SubtitleSidecarService {
         @Override
         public byte[] read(String relativePath) throws IOException {
             requirePlayableSize(length(relativePath));
-            Http.Response response = Http.request(client.streamUrl(relativePath), "GET", null, null, 60000);
+            Http.Response response = Http.request(client.streamUrl(relativePath), "GET",
+                    authHeaders(), null, 60000);
             if (response.status >= 400) {
-                throw new IOException("读字幕文件返回 HTTP " + response.status);
+                throw new IOException("读字幕文件返回 HTTP " + response.status
+                        + (response.status == 401 || response.status == 403
+                        ? "，媒体源的账号读不到这个文件（共享可能是只读或换了凭据），重新登录一次媒体源再看。"
+                        : "。"));
             }
             return response.body;
         }
@@ -692,18 +713,30 @@ public final class SubtitleSidecarService {
     /** HTTP / WebDAV：每次一次 Range 请求。 */
     public static final class HttpRangeSource implements SeekableSource {
         private final String url;
+        private final Map<String, String> baseHeaders;
         private long size = -1;
 
         public HttpRangeSource(String url) {
+            this(url, null);
+        }
+
+        /** {@code baseHeaders} 是每次都要带的头（鉴权之类），Range 往上加。 */
+        public HttpRangeSource(String url, Map<String, String> baseHeaders) {
             this.url = url;
+            this.baseHeaders = baseHeaders;
+        }
+
+        private Map<String, String> headersWithRange(long from, long to) {
+            Map<String, String> headers = baseHeaders == null
+                    ? new HashMap<String, String>() : new HashMap<>(baseHeaders);
+            headers.put("Range", "bytes=" + from + "-" + to);
+            return headers;
         }
 
         @Override
         public long size() throws IOException {
             if (size < 0) {
-                Map<String, String> headers = new HashMap<>();
-                headers.put("Range", "bytes=0-0");
-                Http.Response response = Http.request(url, "GET", headers, null, 15000);
+                Http.Response response = Http.request(url, "GET", headersWithRange(0, 0), null, 15000);
                 String range = response.header("content-range");
                 size = range != null && range.contains("/")
                         ? parseLong(range.substring(range.lastIndexOf('/') + 1))
@@ -718,9 +751,7 @@ public final class SubtitleSidecarService {
         @Override
         public byte[] readAt(long offset, int length) throws IOException {
             long end = Math.min(size() - 1, offset + length - 1);
-            Map<String, String> headers = new HashMap<>();
-            headers.put("Range", "bytes=" + offset + "-" + end);
-            Http.Response response = Http.request(url, "GET", headers, null, 60000);
+            Http.Response response = Http.request(url, "GET", headersWithRange(offset, end), null, 60000);
             if (response.status >= 400) {
                 throw new IOException("读取媒体源返回 HTTP " + response.status);
             }

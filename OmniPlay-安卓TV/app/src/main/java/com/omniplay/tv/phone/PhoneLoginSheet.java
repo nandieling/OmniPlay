@@ -3,7 +3,6 @@ package com.omniplay.tv.phone;
 import android.app.Activity;
 import android.graphics.Typeface;
 import android.text.TextUtils;
-import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -92,7 +91,11 @@ public final class PhoneLoginSheet {
             return directories(entries);
         }
         WebDavClient client = new WebDavClient(url, new WebDavClient.Credential(user, pass));
-        return directories(client.list(client.streamUrl("")));
+        List<BrowseEntry> entries = new ArrayList<>();
+        for (WebDavClient.Entry entry : client.list(client.streamUrl(""))) {
+            entries.add(new BrowseEntry(entry.name, entry.href, entry.isCollection));
+        }
+        return directories(entries);
     }
 
     private static List<BrowseEntry> directories(List<BrowseEntry> entries) {
@@ -190,7 +193,4 @@ public final class PhoneLoginSheet {
         }
         return "登录失败：" + text;
     }
-
-    /** 引用 ViewGroup 让 PhoneUi.width 的重载在只有本文件用到时也保持可见（编译期检查）。 */
-    static final int KEEP = ViewGroup.MATCH_PARENT;
 }

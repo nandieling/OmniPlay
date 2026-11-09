@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -186,6 +187,132 @@ def build_pgs_m2ts(path):
         handle.write(bytes(out))
 
 
+# --------------------------------------------------------------------------- #
+# 蓝光盘夹具：整盘目录结构 + TS 排法的 PGS 分卷
+#
+# 盘里的 .m2ts 每条 PES 装一个 PGS 段，净荷只有「类型 + 段长 + 段数据」，
+# PG 同步字和 8 字节 PTS 是 .sup 容器补的。这里就照这个排法造，顺便把
+# 「MPLS 声明的语言 ∩ PMT 实际 PID」这条选轨链路一起验了。
+# --------------------------------------------------------------------------- #
+
+BD_PIDS = {"pmt": 256, "video": 4113, "audio": 4352, "pgs": 4700}
+
+
+def bd_pts(value):
+    """5 字节的 PTS 编码（33 位 + 三个标志位）。"""
+    return bytes([0x21 | ((value >> 29) & 0x0E), (value >> 22) & 0xFF,
+                  0x01 | ((value >> 14) & 0xFE), (value >> 7) & 0xFF,
+                  0x01 | ((value << 1) & 0xFE)])
+
+
+def bd_table(table_id, inner):
+    """表段：指针字段由 bd_packet 在 pusi 时补，这里就别再写一遍。"""
+    length = len(inner) + 4
+    raw = bytes([table_id, 0xB0 | ((length >> 8) & 0x0F), length & 0xFF]) + inner
+    return raw + struct.pack(">I", mpeg2_crc(raw))
+
+
+def bd_packet(pid, payload=b"", pusi=False):
+    """188 字节一个包，填充走 adaptation field，别把 0xFF 混进净荷。"""
+    body = bytearray()
+    if pusi:
+        body.append(0x00)              # pointer field
+    if payload:
+        body += payload
+    room = 188 - 4 - len(body)
+    if room >= 2:
+        head = bytes([0x47, (0x40 if pusi else 0x00) | ((pid >> 8) & 0x1F), pid & 0xFF, 0x30])
+        head += bytes([room - 1, 0x00]) + bytes([0xFF]) * (room - 2)
+    else:
+        head = bytes([0x47, (0x40 if pusi else 0x00) | ((pid >> 8) & 0x1F), pid & 0xFF, 0x10])
+        while len(body) < 184:
+            body.append(0xFF)
+    packet = head + body[:184]
+    assert len(packet) == 188, len(packet)
+    return packet
+
+
+def bd_segments():
+    """两个显示集，各自的段按蓝光排法：类型 + 段长 + 段数据。"""
+    # 载荷照蓝光规范排：调色板号(2)+版本(1)+若干条 5 字节；对象号(2)+补齐(1)+
+    # 首末块标记(1)+RLE 长度(3)+宽(2)+高(2)+RLE；窗口号(1)+x/y/宽/高；呈现段带窗口数与对象数。
+    palette = bytes([0x00, 0x00, 0x00]) + bytes([1, 0xFF, 0x80, 0x80, 0xF0]) \
+        + bytes([2, 0x10, 0x80, 0x80, 0x00])
+    rle = bytes([0x08, 1, 1, 1, 1, 1, 1, 1, 1, 0x00, 0x00, 0x00, 0x00, 0x00])
+    obj = struct.pack(">H", 1) + bytes([0x00, 0xC0]) + (len(rle) + 4).to_bytes(3, "big") \
+        + struct.pack(">HH", 8, 1) + rle
+    window = bytes([0x00]) + struct.pack(">HHHH", 0, 0, 1920, 1080)
+    pcs = bytes([0x01, 0x00, 0x00, 0x00]) + struct.pack(">H", 1) + window \
+        + bytes([0x01]) + struct.pack(">H", 1) + bytes([0x00, 0x00, 0x80]) \
+        + struct.pack(">HHHH", 10, 800, 8, 1)
+    plan = [(3.0, [(0x14, palette), (0x15, obj), (0x16, window), (0x17, pcs), (0x80, b"")]),
+            (62.0, [(0x16, window), (0x17, pcs), (0x80, b"")])]
+    segments = []
+    for seconds, parts in plan:
+        pts = int(seconds * 90000)
+        for kind, payload in parts:
+            segments.append((pts, kind, payload))
+    return segments
+
+
+def bd_expected_sup(segments):
+    """服务端应该写出来的 .sup：蓝光方言 PG + 段长(2) + 类型(1) + PTS(8) + 段数据。"""
+    out = b""
+    for pts, kind, payload in segments:
+        out += b"PG" + struct.pack(">H", 9 + len(payload)) + bytes([kind]) \
+            + struct.pack(">Q", pts) + payload
+    return out
+
+
+def build_bd_disc(disc_dir):
+    """造一张最小但结构齐全的蓝光盘：BDMV/{index.bdmv,PLAYLIST,STREAM}。"""
+    stream = os.path.join(disc_dir, "BDMV", "STREAM")
+    playlist_dir = os.path.join(disc_dir, "BDMV", "PLAYLIST")
+    os.makedirs(stream)
+    os.makedirs(playlist_dir)
+    with open(os.path.join(disc_dir, "BDMV", "index.bdmv"), "wb") as handle:
+        handle.write(b"BDMV0200" + b"\x00" * 64)
+
+    def clip(pgs_pid):
+        """一个分卷：PAT + PMT（视频/音频/一条位图字幕）+ 每条 PGS 单独占一个 PES 包。"""
+        streams = b""
+        for kind, pid in ((0x1B, BD_PIDS["video"]), (0x80, BD_PIDS["audio"]), (0x90, pgs_pid)):
+            streams += bytes([kind]) + struct.pack(">H", 0xE000 | pid) + struct.pack(">H", 0xF000)
+        out = bytearray()
+        out += bd_packet(0x0000, bd_table(0x00, struct.pack(">HBH", 0x0001, 0xC1, 0xF000)
+                                     + struct.pack(">HH", 0x0001, 0xE000 | BD_PIDS["pmt"])),
+                         pusi=True)
+        out += bd_packet(BD_PIDS["pmt"], bd_table(0x02, struct.pack(">HBHH", 0x0001, 0xC1,
+                                                                 0xE000 | BD_PIDS["video"],
+                                                                 0xF000) + streams), pusi=True)
+        for pts, kind, payload in bd_segments():
+            # PES 头按规范排：前缀(3)+流号(1)+包长(2)+'10'标志(1)+PTS 标志(1)+头长(1)+PTS(5)
+            pes = bytes([0x00, 0x00, 0x01, 0xBD]) + struct.pack(">H", 0) \
+                + bytes([0x80, 0xC0, 0x05]) + bd_pts(pts) \
+                + bytes([kind]) + struct.pack(">H", len(payload)) + payload
+            out += bd_packet(pgs_pid, pes, pusi=True)
+        return bytes(out)
+
+    with open(os.path.join(stream, "00001.m2ts"), "wb") as handle:
+        handle.write(clip(BD_PIDS["pgs"]))
+    with open(os.path.join(stream, "00002.m2ts"), "wb") as handle:
+        handle.write(b"\x47" + b"\x00" * 187)
+    # 正片跨分卷时每个 clip 有自己的 PMT，第三个分卷的字幕 PID 故意跟第一个不一样
+    with open(os.path.join(stream, "00003.m2ts"), "wb") as handle:
+        handle.write(clip(BD_PIDS["pgs"] + 1))
+
+    # 播放列表：MPLS 头 + ClipIDInfo + 两条「0x90 紧跟 zho」的 STN 记录（两个分卷各自的字幕）
+    def stn_record(pid):
+        return (bytes([0x00, 0x00, 0x05, 0x90]) + b"zho" + bytes([0x00, 0x09, 0x01])
+                + struct.pack(">H", pid) + b"\x00\x00\x00\x00")
+
+    mpls = (b"MPLS0300" + b"\x00" * 16 + b"00001M2TS" + b"\x00" * 8
+            + b"00002M2TS" + b"\x00" * 8 + b"00003M2TS" + b"\x00" * 8
+            + stn_record(BD_PIDS["pgs"]) + stn_record(BD_PIDS["pgs"] + 1))
+    with open(os.path.join(playlist_dir, "00001.mpls"), "wb") as handle:
+        handle.write(mpls)
+
+
 def build_library(root):
     srt = os.path.join(root, "a.srt")
     ass = os.path.join(root, "b.ass")
@@ -209,6 +336,7 @@ def build_library(root):
     mkv(os.path.join(root, "ReadOnly", "只读片.mkv"), chinese)
     build_pgs_m2ts(os.path.join(root, "BD", "mainframe.m2ts"))
     build_pgs_m2ts(os.path.join(root, "BD", "pushme.m2ts"))
+    build_bd_disc(os.path.join(root, "BD", "假盘.2020.Blu-ray"))
     os.chmod(os.path.join(root, "ReadOnly"), 0o555)
 
 
@@ -237,7 +365,10 @@ def read_rows(db):
 
 def http(method, path, body=None, token=None, port=None):
     port = port or PORT        # 晚绑：main 里换过一次端口，默认参数会把它钉在旧值上
-    request = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), method=method,
+    # 路径里带中文（媒体库里的片子都叫这名），http.client 只认 ASCII，先转义
+    request = urllib.request.Request("http://127.0.0.1:%d%s"
+                                     % (port, urllib.parse.quote(path, safe="/?=&:%")),
+                                     method=method,
                                      data=json.dumps(body).encode("utf-8") if body else None)
     request.add_header("Content-Type", "application/json")
     if token:
@@ -318,9 +449,38 @@ def main():
           "%s %s" % (only.get("status"), only.get("detail")))
     check("蓝光分卷不主动扫", "BD/mainframe.m2ts" not in rows)
 
+    print("\n蓝光盘")
+    disc_key = "BD/假盘.2020.Blu-ray"
+    disc = rows.get(disc_key, {})
+    check("蓝光盘整盘只排一条任务", disc.get("status") == "done",
+          "%s %s" % (disc.get("status"), disc.get("detail")))
+    check("蓝光分卷不单独成任务", (disc_key + "/BDMV/STREAM/00001.m2ts") not in rows)
+    check("盘的偏好语言取自 MPLS 声明", disc.get("language") == "zh", str(disc.get("language")))
+    check("选中的字幕 PID 来自 PMT", disc.get("track_index") == 4700, str(disc.get("track_index")))
+    stream_dir = os.path.join(library, "BD", "假盘.2020.Blu-ray", "BDMV", "STREAM")
+    wanted = bd_expected_sup(bd_segments())
+    blob = b""
+    if os.path.isfile(os.path.join(stream_dir, "00001.zh.sup")):
+        blob = open(os.path.join(stream_dir, "00001.zh.sup"), "rb").read()
+    check("字幕贴着分卷写成 00001.zh.sup", blob == wanted,
+          "拿到 %d 字节，期望 %d 字节" % (len(blob), len(wanted)))
+    check("解出来的段数对得上", blob.count(b"PG") == len(bd_segments()),
+          "共 %d 段" % blob.count(b"PG"))
+    check("没字幕的分卷不硬写空文件",
+          not os.path.exists(os.path.join(stream_dir, "00002.zh.sup")))
+    other = b""
+    if os.path.isfile(os.path.join(stream_dir, "00003.zh.sup")):
+        other = open(os.path.join(stream_dir, "00003.zh.sup"), "rb").read()
+    check("跨分卷各按自己的 PMT 取字幕", other == wanted,
+          "第三个分卷拿到 %d 字节，期望 %d 字节" % (len(other), len(wanted)))
+    check("盘里不留下临时文件",
+          not [name for name in os.listdir(stream_dir) if name.startswith(".")])
+
     print("\n重复扫描")
     run_once(library, db)
     check("第二遍不重做", read_rows(db)["Movies/大电影.2019.1080p.mkv"]["status"] == "done")
+    check("蓝光盘第二遍也不重做",
+          read_rows(db).get("BD/假盘.2020.Blu-ray", {}).get("status") == "done")
 
     print("\nPGS")
     process = serve(library, db)
@@ -370,6 +530,34 @@ def main():
               "%s %s" % (m2ts.get("status"), m2ts.get("detail")))
         code, answer = http("POST", "/api/scan")
         check("/api/scan 跑得动", code == 200 and "enqueued" in answer)
+
+        print("\n文件夹视图")
+        code, top = http("GET", "/api/tree")
+        check("/api/tree 列出根下目录", code == 200
+              and any(one["name"] == "BD" for one in top["dirs"]), str(top.get("dirs"))[:90])
+        code, mid = http("GET", "/api/tree?path=BD")
+        check("盘目录在文件夹视图里标成蓝光盘",
+              code == 200 and any(one["disc"] and one["name"] == "假盘.2020.Blu-ray"
+                                  for one in mid["dirs"]), str(mid.get("dirs"))[:120])
+        code, deep = http("GET", "/api/tree?path=BD/假盘.2020.Blu-ray/BDMV/STREAM")
+        listed = {one["name"]: one for one in (deep or {}).get("files", [])}
+        check("点进盘里能看到分卷和字幕",
+              code == 200 and "00001.m2ts" in listed
+              and any(sub["name"] == "00001.zh.sup" for sub in listed["00001.m2ts"]["subtitles"]),
+              str(listed.get("00001.m2ts", {}).get("subtitles")))
+        check("盘里任何一层都带上整盘进度", bool((deep or {}).get("disc_job"))
+              and deep["disc_job"]["status"] == "done", str((deep or {}).get("disc_job")))
+        code, named = http("GET", "/api/tree?path=BD&q=假盘")
+        check("文件夹视图能筛名字", code == 200 and len(named["dirs"]) == 1,
+              str(named.get("dirs"))[:90])
+        code, escaped = http("GET", "/api/tree?path=../../etc")
+        check("跳出媒体库的目录被挡住", code == 200 and bool(escaped.get("error")),
+              str(escaped.get("error")))
+        code, one_layer = http("POST", "/api/scan", {"path": "TV"})
+        check("只扫一层也可以", code == 200 and "enqueued" in one_layer, str(one_layer)[:80])
+        code, queued = http("POST", "/api/folder/run", {"path": "Movies"})
+        check("「转这一层」把待转的排进队首", code == 200 and isinstance(queued.get("queued"), list),
+              str(queued)[:80])
 
         print("\n分页、分辨率与磁盘")
         check("/health 报了磁盘容量", health.get("disk")

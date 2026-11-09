@@ -284,7 +284,14 @@ public final class PhoneSourceSheet {
             PhoneLoginSheet.mount(host, "local", directory.getAbsolutePath(), "", "", label);
         });
         File[] children = directory.listFiles();
-        if (children == null || children.length == 0) {
+        if (children == null) {
+            // 安卓 11 起读 /sdcard 要有「所有文件访问权限」，没给的话这里列不出任何东西
+            addStoragePermissionHint(host, sheet, directory);
+            sheet.body.addView(PhoneUi.body(activity, "这个目录读不到，上面授权之后再进来看看。"),
+                    PhoneUi.block(activity, PhoneUi.dp(activity, 12), 0));
+            return;
+        }
+        if (children.length == 0) {
             sheet.body.addView(PhoneUi.body(activity, "这个目录里没有子目录。"),
                     PhoneUi.block(activity, PhoneUi.dp(activity, 12), 0));
             return;
@@ -320,5 +327,39 @@ public final class PhoneSourceSheet {
                 pickLocalDirectory(host, child.getAbsolutePath(), child.getName());
             });
         }
+    }
+
+    /** 手机上「添加本地目录」要读 /sdcard，安卓 11 起得先给「所有文件访问权限」。 */
+    private static void addStoragePermissionHint(PhoneHost host, PhoneUi.Sheet sheet, File directory) {
+        if (android.os.Build.VERSION.SDK_INT < 30) {
+            return;
+        }
+        Activity activity = host.activity();
+        boolean granted = android.os.Environment.isExternalStorageManager();
+        sheet.body.addView(PhoneUi.body(activity, granted
+                ? "已经给了所有文件访问权限，这一层可能是空目录或没有读权限。"
+                : "还没有「所有文件访问权限」，读不到 " + directory.getAbsolutePath() + "。"),
+                PhoneUi.block(activity, PhoneUi.dp(activity, 10), 0));
+        if (granted) {
+            return;
+        }
+        Button grant = PhoneUi.primary(activity, "去开启存储权限");
+        sheet.body.addView(grant, PhoneUi.block(activity, PhoneUi.dp(activity, 6), 0));
+        grant.setOnClickListener(view -> {
+            android.content.Intent intent = new android.content.Intent(
+                    android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    android.net.Uri.parse("package:" + activity.getPackageName()));
+            try {
+                activity.startActivity(intent);
+            } catch (Exception unsupported) {
+                try {
+                    activity.startActivity(new android.content.Intent(
+                            android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            android.net.Uri.parse("package:" + activity.getPackageName())));
+                } catch (Exception alsoUnsupported) {
+                    host.toast("这个系统里没有存储权限设置页，手动到系统设置里开。");
+                }
+            }
+        });
     }
 }

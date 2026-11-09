@@ -14,6 +14,7 @@ mkdir -p "${WORK}/pkg/target/web" "${WORK}/pkg/scripts" "${WORK}/spk"
 
 # 包体：DSM 会把 package.tgz 解压到 /var/packages/<套件>/，target 下面放程序
 cp sidecar.py "${WORK}/pkg/target/sidecar.py"
+cp bluray.py "${WORK}/pkg/target/bluray.py"
 cp web/index.html "${WORK}/pkg/target/web/index.html"
 cp synology/sidecar.conf "${WORK}/pkg/target/sidecar.conf.default"
 cp synology/info "${WORK}/pkg/info"

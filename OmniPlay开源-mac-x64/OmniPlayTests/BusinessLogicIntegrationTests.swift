@@ -739,7 +739,7 @@ struct BusinessLogicIntegrationTests {
             bytesPerRow: 0,
             bitsPerPixel: 0
         ), let data = rep.representation(using: .jpeg, properties: [:]) else {
-            throw CocoaError(.formattingError)
+            throw CocoaError(.formatting)
         }
         return data
     }

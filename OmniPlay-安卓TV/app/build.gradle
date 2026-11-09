@@ -26,8 +26,8 @@ android {
         applicationId "com.omniplay.tv"
         minSdk 26
         targetSdk 35
-        versionCode 54
-        versionName "1.43"
+        versionCode 62
+        versionName "1.51"
 
         externalNativeBuild {
             cmake {

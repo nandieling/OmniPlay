@@ -25,6 +25,7 @@ import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
+import android.util.Log;
 import android.view.Display;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -211,6 +212,12 @@ public final class MainActivity extends Activity {
     private List<RuntimeTrack> activeRuntimeAudioTracks = Collections.emptyList();
     private List<RuntimeTrack> activeRuntimeSubtitleTracks = Collections.emptyList();
     private List<SubtitleCue> activeSubtitleCues = Collections.emptyList();
+    /**
+     * 字幕这条链反复出过问题（读不到、对不上时间、选完被别的流程清掉），出问题时屏幕上又只剩
+     * 「已改用」一句话。留一条随时能看的线：<c>adb logcat -s OmniPlay-Sub</c>。
+     */
+    private static final String SUB_TAG = "OmniPlay-Sub";
+    private String lastSubtitleLogLine;
     private List<PgsSubtitleCue> activePgsSubtitleCues = Collections.emptyList();
     private View playerMenuPanel;
     private View playerTopOverlay;
@@ -2179,6 +2186,16 @@ public final class MainActivity extends Activity {
         }
     }
 
+/** 回到唯一那个桌面入口，让它按刚记下的选择重新分发一次。 */
+    private void restartIntoLauncher() {
+        releasePlaybackState();
+        android.content.Intent intent = new android.content.Intent(this, LauncherActivity.class);
+        intent.setFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                | android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        startActivity(intent);
+        finish();
+    }
+
     private void openSettingsOverlay() {
         if (settingsOverlay != null) {
             return;
@@ -2288,6 +2305,34 @@ public final class MainActivity extends Activity {
                         + "深色主题适合关灯观影，切换后立即生效。",
                         COLOR_SUBTLE), margin(matchWidth(), sdp(4), sdp(4), 0, sdp(2)));
 
+        // ---------------------------------------------------------------- 打开时进哪套界面
+        panel.addView(widgets.sectionCaption("打开时进的界面"), margin(matchWidth(), 0, 0, 0, 0));
+        LinearLayout shellCard = widgets.settingsCard();
+        panel.addView(shellCard, margin(matchWidth(), 0, 0, 0, 0));
+        String[] shellModes = LauncherActivity.SHELL_MODES;
+        int shellIndex = 0;
+        String storedShell = LauncherActivity.shellMode(this);
+        for (int index = 0; index < shellModes.length; index++) {
+            if (shellModes[index].equals(storedShell)) {
+                shellIndex = index;
+            }
+        }
+        Widgets.Segment shellChoice = widgets.segment(
+                Arrays.asList("自动", "电视版", "手机版"), shellIndex,
+                index -> {
+                    String mode = shellModes[Math.min(Math.max(0, index), shellModes.length - 1)];
+                    LauncherActivity.setShellMode(this, mode);
+                    settingsStatus.setText("已记住，下次打开进"
+                            + LauncherActivity.shellLabel(mode) + "界面。");
+                });
+        widgets.addCardRow(shellCard, labelledRow("界面", shellChoice.view));
+        Button switchShell = compactButton("现在就换过去");
+        widgets.addCardRow(shellCard, widgets.cardButtonRow(switchShell, spacerPill()));
+        switchShell.setOnClickListener(view -> restartIntoLauncher());
+        panel.addView(widgets.caption("电视版按遥控器 D-pad 走焦，手机版按触摸点按。「自动」只在设备身份报电视、"
+                        + "或只有 leanback 又没触屏时才进电视版；盒子与虚拟机判不准就在上面钉死。",
+                        COLOR_SUBTLE), margin(matchWidth(), sdp(4), sdp(4), 0, sdp(2)));
+
         // ---------------------------------------------------------------- 刮削与播放偏好
         panel.addView(widgets.sectionCaption("刮削与播放偏好"), margin(matchWidth(), 0, 0, 0, 0));
         LinearLayout preferenceCard = widgets.settingsCard();
@@ -2365,6 +2410,15 @@ public final class MainActivity extends Activity {
         panel.addView(widgets.sectionCaption("关于与更新"), margin(matchWidth(), 0, 0, 0, 0));
         LinearLayout aboutCard = widgets.settingsCard();
         panel.addView(aboutCard, margin(matchWidth(), 0, 0, 0, 0));
+        final String appVersion = versionName;
+        Button guide = compactButton("使用指南");
+        widgets.addCardRow(aboutCard, guide);
+        guide.setOnClickListener(view -> openGuideOverlay("使用指南",
+                "添加源、刮削、播放、字幕", com.omniplay.tv.ui.GuideContent.guide()));
+        Button oss = compactButton("关于与开源");
+        widgets.addCardRow(aboutCard, oss);
+        oss.setOnClickListener(view -> openGuideOverlay("关于", "觅影 OmniPlay",
+                com.omniplay.tv.ui.GuideContent.about("版本 " + appVersion)));
         Button update = compactButton("检查软件更新");
         widgets.addCardRow(aboutCard, update);
         TextView updateStatus = new Overlays.StatusText(this, COLOR_MUTED,
@@ -3588,9 +3642,10 @@ public final class MainActivity extends Activity {
         credits.setClipChildren(false);
         credits.setClipToPadding(false);
         info.addView(credits, margin(matchWidth(), 0, sdp(12), 0, 0));
-        addCreditRow(credits, "\u5bfc\u6f14", joinNames(detail.directors));
+        addCreditRow(credits, "\u5bfc\u6f14", joinNames(detail.directors), detail.directors);
         addCreditRow(credits, "\u4e3b\u6f14", joinNames(detail.casts.size() > 6
-                ? detail.casts.subList(0, 6) : detail.casts));
+                ? detail.casts.subList(0, 6) : detail.casts),
+                detail.casts.size() > 6 ? detail.casts.subList(0, 6) : detail.casts);
 
         String overviewText = detailOverviewText(detail);
         TextView overview = text(overviewText.isEmpty() ? "\u6682\u65e0\u7b80\u4ecb" : overviewText,
@@ -3805,6 +3860,129 @@ public final class MainActivity extends Activity {
     }
 
     /** 导演 / 主演 一行：左侧固定标签列，右侧取值，与 mac 版同构。 */
+    /** 演职员一行。带上名单时这一行能按，点开是这个人在本库里的其它作品。 */
+    private void addCreditRow(LinearLayout parent, String label, String value,
+                              List<String> people) {
+        if (value == null || value.isEmpty()) {
+            return;
+        }
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.TOP);
+        parent.addView(row, margin(matchWidth(), 0, sdp(6), 0, 0));
+        row.addView(text(label, ssp(14), Typeface.BOLD, COLOR_SUBTLE),
+                new LinearLayout.LayoutParams(sdp(46), ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView valueView = text(value, ssp(15), Typeface.NORMAL, COLOR_TEXT);
+        valueView.setMaxLines(2);
+        valueView.setEllipsize(TextUtils.TruncateAt.END);
+        valueView.setLineSpacing(sdp(2), 1f);
+        row.addView(valueView, matchWidth());
+        if (people == null || people.isEmpty() || libraryItems.isEmpty()) {
+            return;
+        }
+        // 遥控器要能走到这一行：可聚焦 + 轻微放大，跟其它行同一套焦点语言
+        final List<String> names = new ArrayList<>(people);
+        valueView.setFocusable(true);
+        valueView.setClickable(true);
+        valueView.setPadding(sdp(4), sdp(2), sdp(4), sdp(2));
+        valueView.setOnFocusChangeListener((focusedView, hasFocus) -> {
+            focusedView.setElevation(hasFocus ? sdp(6) : 0);
+            theme.animateFocusScale(focusedView, hasFocus);
+            valueView.setTextColor(hasFocus ? COLOR_FOCUS : COLOR_TEXT);
+        });
+        valueView.setOnClickListener(view -> openPersonOverlay(names));
+    }
+
+    /**
+     * 人物作品：库里含这些人名的其它条目，点一条直接进详情。mac 版有人物页
+     * （PersonProfileStore 会去 TMDB 拉作品列表和头像），本机版只在库里查，不额外发请求。
+     */
+    private void openPersonOverlay(List<String> names) {
+        Overlays.Options options = new Overlays.Options();
+        options.title = TextUtils.join("\u3001", names);
+        options.subtitle = "\u672c\u5e93\u91cc\u7684\u5176\u5b83\u4f5c\u54c1";
+        options.widthDp = 620;
+        options.restoreFocus = getCurrentFocus();
+        Overlays.Overlay opened = overlays.open(options);
+        LinearLayout panel = opened.body;
+        String currentId = currentDetail == null ? null : currentDetail.id;
+        int shown = 0;
+        for (Models.LibraryItem item : libraryItems) {
+            if (currentId != null && currentId.equals(item.id)) {
+                continue;
+            }
+            if (!sharesPerson(item, names)) {
+                continue;
+            }
+            if (shown++ >= 24) {
+                break;
+            }
+            String kind = "tv".equals(item.itemKind) ? "\u5267\u96c6" : "\u7535\u5f71";
+            String year = item.releaseDate != null && item.releaseDate.length() >= 4
+                    ? item.releaseDate.substring(0, 4) : "";
+            Button row = widgets.listRow(item.title, year.isEmpty() ? kind : year + " \u00b7 " + kind);
+            panel.addView(row, widgets.listRowParams());
+            final String itemId = item.id;
+            row.setOnClickListener(view -> {
+                opened.close();
+                showDetail(itemId);
+            });
+        }
+        Button close = button("\u5173\u95ed");
+        overlays.footer(panel, close);
+        close.setOnClickListener(view -> opened.close());
+        // 焦点落在「关闭」上：这条抽屉里的行会直接把用户带进另一部片，先给个能退的地方
+        declarePanelRows(opened, panel, close);
+    }
+
+    /** 这部片子的导演 / 主演里有没有这些人里的任意一个。 */
+    private static boolean sharesPerson(Models.LibraryItem item, List<String> names) {
+        for (String name : names) {
+            String needle = name == null ? "" : name.trim();
+            if (needle.isEmpty()) {
+                continue;
+            }
+            if (matchesName(item.directors, needle) || matchesName(item.casts, needle)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean matchesName(List<String> people, String needle) {
+        if (people == null) {
+            return false;
+        }
+        for (String person : people) {
+            if (person != null && person.trim().equalsIgnoreCase(needle)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 使用指南 / 关于：一层可滚动面板，正文来自 {@link com.omniplay.tv.ui.GuideContent}。 */
+    private void openGuideOverlay(String heading, String subtitle,
+                                  List<com.omniplay.tv.ui.GuideContent.Section> sections) {
+        Overlays.Options options = new Overlays.Options();
+        options.title = heading;
+        options.subtitle = subtitle;
+        options.widthDp = 760;
+        options.restoreFocus = getCurrentFocus();
+        Overlays.Overlay opened = overlays.open(options);
+        LinearLayout panel = opened.body;
+        for (com.omniplay.tv.ui.GuideContent.Section section : sections) {
+            panel.addView(text(section.title, ssp(Widgets.TEXT_HEADLINE), Typeface.BOLD, COLOR_FOCUS),
+                    margin(matchWidth(), 0, sdp(14), 0, sdp(4)));
+            TextView paragraph = text(section.body, ssp(Widgets.TEXT_BODY), Typeface.NORMAL, COLOR_MUTED);
+            paragraph.setLineSpacing(sdp(3), 1f);
+            panel.addView(paragraph, margin(matchWidth(), 0, 0, 0, sdp(6)));
+        }
+        Button close = button("\u5173\u95ed");
+        overlays.footer(panel, close);
+        close.setOnClickListener(view -> opened.close());
+        declarePanelRows(opened, panel, close);
+    }
+
     private void addCreditRow(LinearLayout parent, String label, String value) {
         if (value == null || value.isEmpty()) {
             return;
@@ -5011,6 +5189,8 @@ public final class MainActivity extends Activity {
                 }
 
                 didStart = true;
+                Log.i(SUB_TAG, "播放模式：" + (activeDirectPlayback ? "高性能直出" : "兼容字幕播放")
+                        + " · " + playbackFile.fileName);
                 refreshRuntimeTracks();
                 prefindSidecars(playbackFile);
                 scheduleResumeSeek(playbackFile);
@@ -5458,6 +5638,9 @@ public final class MainActivity extends Activity {
         showPlayerChromeTemporarily();
         refreshRuntimeTracks();
         ArrayList<PlayerMenuOption> options = new ArrayList<>();
+        if (hasSubtitleSelection() || !activeSubtitleCues.isEmpty() || !activePgsSubtitleCues.isEmpty()) {
+            options.add(new PlayerMenuOption("关闭字幕", false, this::turnOffAllSubtitles));
+        }
         // 内封字幕走 mpv 渲染，直出模式（vo=mediacodec_embed）里 mpv 根本不参与画面，
         // 列出来点中也没任何反应。这一档只列覆盖层读得懂的那些（媒体源外挂字幕与 sidecar），
         // 内封轨收起来，用下面那行说明条数并给出切回兼容模式的入口。
@@ -5598,6 +5781,15 @@ public final class MainActivity extends Activity {
     }
 
     private void showPlayerMenu(String title, List<PlayerMenuOption> options, View returnFocus) {
+        StringBuilder menuRows = new StringBuilder();
+        for (PlayerMenuOption option : options) {
+            if (menuRows.length() > 0) {
+                menuRows.append(" | ");
+            }
+            menuRows.append(option.displayLabel());
+        }
+        Log.i(SUB_TAG, "打开播放页菜单：" + title + "，" + options.size()
+                + " 行：" + menuRows);
         showPlayerChromeTemporarily();
         closePlayerMenu(returnFocus);
 
@@ -6081,6 +6273,19 @@ public final class MainActivity extends Activity {
             return;
         }
         double position = playerView.currentTimeSeconds();
+        if (!activeSubtitleCues.isEmpty() || !activePgsSubtitleCues.isEmpty()) {
+            String line = "position=" + (long) (position * 10) / 10d
+                    + " 文本 " + activeSubtitleCues.size()
+                    + " 条 / 位图 " + activePgsSubtitleCues.size()
+                    + " 条，文本命中 " + (playerSubtitleOverlay != null
+                    && playerSubtitleOverlay.getVisibility() == View.VISIBLE ? "是" : "否")
+                    + " 位图命中 " + (playerPgsSubtitleOverlay != null
+                    && playerPgsSubtitleOverlay.getVisibility() == View.VISIBLE ? "是" : "否");
+            if (!line.equals(lastSubtitleLogLine)) {
+                lastSubtitleLogLine = line;
+                Log.i(SUB_TAG, line);
+            }
+        }
         if (playerSubtitleOverlay != null) {
             String subtitle = "";
             for (SubtitleCue cue : activeSubtitleCues) {
@@ -6104,12 +6309,17 @@ public final class MainActivity extends Activity {
     }
 
     private void clearSubtitleOverlay() {
+        Log.i(SUB_TAG, "整条字幕链清空（关闭字幕或换片），代数将变 "
+                + (subtitleLoadGeneration + 1));
         subtitleLoadGeneration++;
         clearSubtitleSelection();
         clearSubtitleOverlayViews();
     }
 
     private int beginSubtitleLoad() {
+        Log.i(SUB_TAG, "开始加载字幕，代数 " + (subtitleLoadGeneration + 1)
+                + "，清空前文本 " + activeSubtitleCues.size() + " 条 / 位图 "
+                + activePgsSubtitleCues.size() + " 条");
         subtitleLoadGeneration++;
         subtitleLoadStartedAtMs = System.currentTimeMillis();
         clearSubtitleOverlayViews();
@@ -6127,6 +6337,8 @@ public final class MainActivity extends Activity {
     }
 
     private void clearSubtitleSelection() {
+        selectedSidecarKey = null;
+        activeSidecar = null;
         selectedEmbeddedSubtitleOrdinal = -1;
         selectedRuntimeSubtitleId = null;
         selectedExternalSubtitleId = null;
@@ -6208,6 +6420,14 @@ public final class MainActivity extends Activity {
     }
 
     private boolean hasSubtitleSelection() {
+        // 转档 / 媒体源外挂字幕也算「选上了」。以前漏了它，默认字幕那套重试会在几秒后把刚挂上
+        // 的 sidecar 换成一条内封轨，而直出模式下内封轨根本不渲染，看上去就是「没报错也没字幕」。
+        return com.omniplay.tv.local.SubtitleSelection.sidecarSelected(selectedSidecarKey)
+                || hasPlainSubtitleSelection();
+    }
+
+    /** 内封 / 外挂 / 运行时字幕的选择状态，不含转档字幕。 */
+    private boolean hasPlainSubtitleSelection() {
         return selectedEmbeddedSubtitleOrdinal >= 0 ||
                 selectedRuntimeSubtitleId != null ||
                 selectedExternalSubtitleId != null ||
@@ -6231,13 +6451,14 @@ public final class MainActivity extends Activity {
     }
 
     private boolean hasRenderableSubtitleSelection(Models.VideoFile file) {
-        if (!hasSubtitleSelection()) {
-            return false;
-        }
-        if (usesAndroidSubtitleOverlay() && !isIsoFile(file)) {
-            return !activeSubtitleCues.isEmpty() || !activePgsSubtitleCues.isEmpty();
-        }
-        return !hasPendingSubtitleSelection();
+        return !com.omniplay.tv.local.SubtitleSelection.defaultRetryMayTakeOver(
+                com.omniplay.tv.local.SubtitleSelection.sidecarSelected(selectedSidecarKey),
+                !activeSubtitleCues.isEmpty() || !activePgsSubtitleCues.isEmpty(),
+                isSubtitleLoadStale(),
+                hasPlainSubtitleSelection(),
+                com.omniplay.tv.local.SubtitleSelection.overlayOwnsSubtitles(
+                        activeDirectPlayback, isIsoFile(file), isActiveHlsPlayback()),
+                hasPendingSubtitleSelection());
     }
 
     private boolean tryUseNativeEmbeddedSubtitle(int ordinal) {
@@ -6281,6 +6502,11 @@ public final class MainActivity extends Activity {
     }
 
     private void clearSubtitleOverlayViews() {
+        if (!activeSubtitleCues.isEmpty() || !activePgsSubtitleCues.isEmpty()) {
+            // 带栈：谁把已经挂上的字幕抹掉了，一看就知道
+            Log.d(SUB_TAG, "字幕层被清空：文本 " + activeSubtitleCues.size()
+                    + " 条 / 位图 " + activePgsSubtitleCues.size() + " 条", new Throwable("谁清的"));
+        }
         activeSubtitleCues = Collections.emptyList();
         activePgsSubtitleCues = Collections.emptyList();
         stopSubtitleOverlayUpdates();
@@ -6536,6 +6762,11 @@ public final class MainActivity extends Activity {
         if ("no".equals(languagePreference) || "off".equals(languagePreference)) {
             // 关闭字幕: leave the overlay empty until the user picks a track.
             clearSubtitleOverlay();
+            return;
+        }
+        if (selectedSidecarKey != null && !selectedSidecarKey.isEmpty()
+                && (!activeSubtitleCues.isEmpty() || !activePgsSubtitleCues.isEmpty())) {
+            // 用户（或自动挂载）已经挑好转档字幕并且读到手上了，别再拿内封轨盖上去。
             return;
         }
         if (!hasSubtitleSelection()) {
@@ -9562,21 +9793,23 @@ public final class MainActivity extends Activity {
         }
         runAsync(() -> api.engine().discoverSidecars(file.id, file.relativePath, file.subtitleStreams),
                 found -> {
-                    if (found != null && found > 0) {
-                        maybeAutoUseSidecar(file);
-                    }
+                    // 这个返回值只数「新登记了几条」：重播同一条时是 0，可库里那几条现成字幕照样该挂上。
+                    Log.i(SUB_TAG, "现成外挂字幕登记完成，新增 " + found + " 条，试着自动挂一条");
+                    maybeAutoUseSidecar(file);
                 },
                 ignored -> {
                 });
     }
 
-    /** 直出模式 + 用户还没自己挑过字幕时，把最合适的现成字幕直接挂上。 */
+    /** 直出模式 + 屏幕上还没有任何能画的字幕时，把最合适的现成字幕直接挂上。 */
     private void maybeAutoUseSidecar(Models.VideoFile file) {
-        if (!activeDirectPlayback || screen != Screen.PLAYER || playerView == null
-                || activePlaybackFile != file || selectedSidecarKey != null
-                || selectedEmbeddedSubtitleOrdinal >= 0 || selectedRuntimeSubtitleId != null) {
+        String blocked = whyNotAutoSidecar(file);
+        if (blocked != null) {
+            Log.i(SUB_TAG, "没有自动挂现成字幕：" + blocked);
             return;
         }
+        String preference = api.engine().settings().defaultSubtitleLanguage();
+        String preferred = com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.normalizeLanguage(preference);
         ArrayList<LocalEngine.Sidecar> usable = new ArrayList<>();
         for (LocalEngine.Sidecar sidecar : api.engine().sidecarsFor(file.id)) {
             if (sidecar.usable()) {
@@ -9584,16 +9817,20 @@ public final class MainActivity extends Activity {
             }
         }
         if (usable.isEmpty()) {
+            Log.i(SUB_TAG, "没有自动挂现成字幕：库里这条片子没有可用的转档字幕");
             return;
         }
-        String preferred = com.omniplay.tv.subtitle.MatroskaSubtitleExtractor
-                .normalizeLanguage(api.engine().settings().defaultSubtitleLanguage());
-        LocalEngine.Sidecar best = null;
-        for (LocalEngine.Sidecar sidecar : usable) {
-            if (preferred != null && preferred.equals(sidecar.language)) {
-                best = sidecar;
-                break;
-            }
+        Log.i(SUB_TAG, "可以自动挂现成字幕：可用的 " + usable.size() + " 条，偏好语言 " + preference);
+        // 先挑偏好语言，同语言里先挑文本字幕：位图那条路要逐条解码，直出模式下更贵。
+        LocalEngine.Sidecar best = com.omniplay.tv.local.SubtitleSelection.prefer(usable, preferred, false);
+        if (best == null) {
+            best = com.omniplay.tv.local.SubtitleSelection.prefer(usable, preferred, true);
+        }
+        if (best == null) {
+            best = com.omniplay.tv.local.SubtitleSelection.prefer(usable, null, false);
+        }
+        if (best == null) {
+            best = com.omniplay.tv.local.SubtitleSelection.prefer(usable, null, true);
         }
         selectSubtitleSidecar(file, best != null ? best : usable.get(0));
     }
@@ -9652,6 +9889,57 @@ public final class MainActivity extends Activity {
     }
 
     /**
+     * 自动挂现成字幕的闸门。返回 null 表示可以挂，否则返回挡住它的理由——「为什么不出字幕」
+     * 是这条链路最难查的问题，答案直接写进日志，不用靠猜。
+     */
+    private String whyNotAutoSidecar(Models.VideoFile file) {
+        if (!activeDirectPlayback) {
+            return "不是高性能直出（兼容模式下内封字幕由播放器画，不该抢）";
+        }
+        if (screen != Screen.PLAYER) {
+            return "已经不在播放页（" + screen + "）";
+        }
+        if (playerView == null) {
+            return "播放器还没起来";
+        }
+        if (activePlaybackFile != file) {
+            return "已经换成别的片子";
+        }
+        if (selectedSidecarKey != null) {
+            return "已经选着一条现成字幕";
+        }
+        if (!activeSubtitleCues.isEmpty() || !activePgsSubtitleCues.isEmpty()) {
+            return "覆盖层已经画着字幕";
+        }
+        if (api.engine() == null) {
+            return "媒体引擎还没起来";
+        }
+        String preference = api.engine().settings().defaultSubtitleLanguage();
+        if (com.omniplay.tv.local.SubtitleSelection.subtitlePreferenceOff(preference)) {
+            return "设置里选了关闭字幕";
+        }
+        // 直出（vo=mediacodec_embed）里 mpv 整个不参与画面，「选着一条内封字幕」只是记了个
+        // 状态，屏幕上什么都没有。所以这种选择不能挡住现成的转档字幕——真机与虚拟机上都验证过，
+        // 正是这里挡住之后，播放页从头到尾不出字幕，也不报错。
+        if (hasPlainSubtitleSelection() && !com.omniplay.tv.local.SubtitleSelection
+                .overlayOwnsSubtitles(activeDirectPlayback, isIsoFile(file), isActiveHlsPlayback())) {
+            return "选着一条交给播放器画的内封字幕";
+        }
+        return null;
+    }
+
+    /** 字幕菜单里的「关闭字幕」：内封、外挂、转档字幕与覆盖层一起清干净。 */
+    private void turnOffAllSubtitles() {
+        showPlayerChromeTemporarily();
+        Log.i(SUB_TAG, "手动关闭字幕");
+        clearSubtitleOverlay();
+        if (playerView != null) {
+            playerView.setSubtitleTrack("no");
+        }
+        showPlayerMenuSubtitleHint("已关闭字幕。");
+    }
+
+    /**
      * 用转档出来的字幕：读进来交给覆盖层，并把 mpv 那条内封轨关掉，免得兼容模式下画两遍。
      */
     private void selectSubtitleSidecar(Models.VideoFile file, LocalEngine.Sidecar sidecar) {
@@ -9660,17 +9948,23 @@ public final class MainActivity extends Activity {
         selectedSidecarKey = sidecarMenuKey(sidecar);
         activeSidecar = sidecar;
         int loadGeneration = beginSubtitleLoad();
+        Log.i(SUB_TAG, "选用 sidecar：" + sidecarMenuLabel(sidecar) + " · " + sidecar.relativePath);
         runAsync(() -> {
             byte[] body = api.engine().readSidecar(sidecar);
             if (body == null || body.length == 0) {
                 throw new java.io.IOException("读不到转档出来的字幕文件。");
             }
-            return "sup".equals(sidecar.format)
+            Object parsed = "sup".equals(sidecar.format)
                     ? com.omniplay.tv.subtitle.PgsSubtitleParser
                             .parse(new java.io.ByteArrayInputStream(body))
                     : parseSubtitleCues(new String(body, java.nio.charset.StandardCharsets.UTF_8));
+            Log.i(SUB_TAG, "读到 " + body.length + " 字节，解析出 "
+                    + (parsed instanceof java.util.List ? ((java.util.List<?>) parsed).size() : -1)
+                    + " 条（" + sidecar.format + "）");
+            return parsed;
         }, result -> {
             if (!isSubtitleLoadCurrent(loadGeneration)) {
+                Log.w(SUB_TAG, "sidecar 结果已过期，丢弃（这一跳通常是被别的字幕流程抢了代）");
                 return;
             }
             if (playerView != null) {
@@ -9704,9 +9998,12 @@ public final class MainActivity extends Activity {
                 return;
             }
             startSubtitleOverlayUpdates();
+            Log.i(SUB_TAG, "字幕已挂上：文本 " + activeSubtitleCues.size()
+                    + " 条 / 位图 " + activePgsSubtitleCues.size() + " 条");
             showPlayerMenuSubtitleHint("已改用转档出来的字幕（" + sidecarMenuLabel(sidecar) + "）。");
         }, failure -> {
             selectedSidecarKey = null;
+            Log.w(SUB_TAG, "sidecar 读取失败", failure);
             String reason = failure instanceof java.io.IOException && failure.getMessage() != null
                     ? failure.getMessage() : "读不到转档出来的字幕。";
             showToast(reason);

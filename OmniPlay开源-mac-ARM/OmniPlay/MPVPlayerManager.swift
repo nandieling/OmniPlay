@@ -13,27 +13,82 @@ nonisolated struct PlaybackEndTracker {
         let timePos: Double
         let eofReason: String?
         let idleWithoutFile: Bool
+        /// mpv 当前条目的文件名。自动切集时靠它认出「这条结尾是不是这个文件播出来的」。
+        var currentFile: String? = nil
+        /// 读属性时的 playlist-pos，用来区分「整表放完」和「正在换下一条」。
+        var playlistPos: Int? = nil
     }
 
     private(set) var liveDuration: Double = 0
     private(set) var liveTimePos: Double = 0
     private(set) var endedDuration: Double = 0
+    /// 记下播完那一刻的条目是谁：mpv 已经切到别的条目时，这份结尾账不能再往外发。
+    private(set) var endedFile: String?
+    private(set) var endedPlaylistPos: Int?
+    private var observedFile: String?
 
     mutating func reset() { self = PlaybackEndTracker() }
 
+    /// 同一个媒体文件的判定：去掉远程 URL 的 query，再只比路径最后一段。
+    nonisolated static func mediaFileIdentity(_ value: String) -> String {
+        var path = value
+        if let queryIndex = path.firstIndex(of: "?") { path = String(path[..<queryIndex]) }
+        path = path.removingPercentEncoding ?? path
+        return (path as NSString).lastPathComponent.lowercased()
+    }
+
+    nonisolated static func isSameMediaFile(_ lhs: String?, _ rhs: String?) -> Bool {
+        guard let lhs, let rhs else { return false }
+        let left = mediaFileIdentity(lhs)
+        return !left.isEmpty && left == mediaFileIdentity(rhs)
+    }
+
     mutating func observe(_ observation: Observation) {
+        let identity = Self.mediaFileIdentity(observation.currentFile ?? "")
+        if !identity.isEmpty, identity != observedFile {
+            // 引擎换条目了：上一集留下的时长、进度、结尾状态全部翻篇
+            liveDuration = 0
+            liveTimePos = 0
+            endedDuration = 0
+            endedFile = nil
+            endedPlaylistPos = nil
+        }
+        observedFile = identity.isEmpty ? observedFile : identity
+
         let duration = observation.duration
         let timePos = observation.timePos
         if duration.isFinite && duration > 0 {
             liveDuration = duration
             // 又播回中间了（停在结尾后按播放会重头来），结尾状态作废
-            if timePos.isFinite && timePos < duration - 1 { endedDuration = 0 }
+            if timePos.isFinite && timePos < duration - 1 {
+                endedDuration = 0
+                endedFile = nil
+                endedPlaylistPos = nil
+            }
         }
         if timePos.isFinite && timePos > 0 { liveTimePos = timePos }
         guard endedDuration == 0, liveDuration > 0 else { return }
         let reachedEnd = observation.eofReason == "eof"
             || (observation.idleWithoutFile && liveTimePos >= liveDuration - 5)
-        if reachedEnd { endedDuration = liveDuration }
+        guard reachedEnd else { return }
+        endedDuration = liveDuration
+        endedFile = observation.currentFile
+        endedPlaylistPos = observation.playlistPos
+    }
+
+    /// 结尾值只交给「还在播当初那个条目」的读取方。
+    ///
+    /// 多文件播放表关了 keep-open，播完会自己切下一条：这时 filename 已经是下一集（或正空着
+    /// 加载下一条），把上一集的片尾值发出去，下一集就会被当成已播完。整表放完是另一种情形：
+    /// filename 被清空且 playlist-pos 落到 -1，那种情况仍然要按「看到结尾」算。
+    func endedMark(forCurrentFile currentFile: String?, playlistPos: Int?) -> Double {
+        guard endedDuration > 0 else { return 0 }
+        let current = (currentFile ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if current.isEmpty {
+            if playlistPos == nil || playlistPos! < 0 { return endedDuration }
+            return playlistPos == endedPlaylistPos ? endedDuration : 0
+        }
+        return Self.isSameMediaFile(current, endedFile) ? endedDuration : 0
     }
 }
 
@@ -77,6 +132,11 @@ class MPVPlayerManager: ObservableObject {
     private let controlQueueKey = DispatchSpecificKey<Bool>()
     private var lastDrawablePointer: Int64?
     private var pendingDrawablePointer: Int64?
+    // 控制队列上最后一次真正写进 mpv 的 wid 与图层像素尺寸。同一个图层、同一个尺寸再写一遍
+    // wid，mpv 会当成图层换了，白重建一次视频输出（4K HDR 实测要一秒以上）；直开播放的全屏
+    // 动画期间这类重复绑定能连着来五六次，时间轴和字幕就一起被钉在那几秒里。
+    private var boundDrawablePointer: Int64?
+    private var boundDrawablePixelSize: CGSize?
     private var retainedDrawableLayer: CAMetalLayer?
     // 直开播放：播放器先装进窗口把探测与缓冲跑起来，图层等全屏动画落定再绑（见 DirectPlayerHandoff）。
     // 期间来的绑定请求先攒着，落定时一次性补上，mpv 的视频输出就只按最终尺寸建一次。
@@ -95,12 +155,19 @@ class MPVPlayerManager: ObservableObject {
     private var geometryRecoveryResumePlay = false
     private var geometryRecoveryReinitSeen = false
     private var geometryRecoveryMatchStreak = 0
+    // 「必须看到 mpv 真的在出画」才放行（补绑图层起视频轨用），普通尺寸纠偏不需要
+    private var geometryRecoveryRequireOutput = false
+    private var geometryRecoveryMinHold: TimeInterval = 0.6
     private var geometryRecoveryArmedAt = Date.distantPast
     private var geometryRecoveryDeadline = Date.distantPast
     // 图层还没绑上就先按「无视频轨」加载，图层就绪后靠它把视频轨恢复回来。
     // 这两个都只在控制队列上读写：绑定和加载都在同一条串行队列上，判定才不会有先后 races。
     private var isDrawableBoundOnControlQueue = false
     private var pendingVideoTrackAfterDrawable: String?
+    // 图层还没绑上就先「无视频轨 + 暂停」加载（见 loadFiles）。这条按住标记一直留到视频输出
+    // 真的就位才清，中途任何放行路径（没视频轨、超时、用户自己按了播放）都靠它收口。
+    private var isAwaitingDeferredVideoStart = false
+    private var deferredVideoStartWatchdog: DispatchWorkItem?
     private var loadIssuedAt: Date?
     private var playbackActivity: NSObjectProtocol?
     
@@ -137,6 +204,10 @@ class MPVPlayerManager: ObservableObject {
     private var subtitleTrackDescriptors: [TrackDescriptor] = []
     private var currentTrackPreferenceKey: String?
     private var lastTrackCount: Int64 = 0
+    // 同目录同名外挂字幕（.sup/.srt/.ass/…）：mpv 自己不去找（`sub-auto` 默认 no），
+    // 直开和库里播放都得我们递给它。按「播放表下标 + 文件」记一次，免得每轮轮询重复 sub-add。
+    private var playlistURLsForSidecars: [URL] = []
+    private var sidecarSignatureForCurrentFile: String?
     private var hasAppliedDefaultSubtitleForCurrentLoad = false
     private var hasUserSelectedSubtitleTrack = false
     private var timer: Timer?
@@ -209,10 +280,15 @@ class MPVPlayerManager: ObservableObject {
             let filename = self.getMpvStringProperty("filename")
             var resolvedTimePos = timePos
             var resolvedDuration = dur
-            if resolvedDuration <= 0, self.playbackEndTracker.endedDuration > 0 {
-                // 引擎已经播完并清掉了当前文件，进度仍要算成「看到结尾」
-                resolvedDuration = self.playbackEndTracker.endedDuration
-                resolvedTimePos = self.playbackEndTracker.endedDuration
+            // 只有当前条目还是播完那一个（或引擎已经清空当前条目）才补片尾值：
+            // mpv 正在换下一条时补进来，会把没看的下一集写成已播。
+            if resolvedDuration <= 0 {
+                let endedMark = self.playbackEndTracker.endedMark(
+                    forCurrentFile: filename, playlistPos: Int(playlistPos))
+                if endedMark > 0 {
+                    resolvedDuration = endedMark
+                    resolvedTimePos = endedMark
+                }
             }
             return PlaybackEngineSnapshot(
                 // mpv 在整个播放列表放完后把 playlist-pos 置为 -1，原样透出才不会认错文件
@@ -513,6 +589,8 @@ class MPVPlayerManager: ObservableObject {
         guard force || lastDrawablePointer != wid else { return }
         guard force || pendingDrawablePointer != wid else { return }
         pendingDrawablePointer = wid
+        // 图层尺寸在主线程读：控制队列上那次「尺寸没变就别理」的判定要用它
+        let targetPixelSize = Self.drawablePixelSize(layer)
         runOnControlQueue { [weak self] in
             guard let self else { return }
             guard let mpv = self.mpv else {
@@ -523,11 +601,27 @@ class MPVPlayerManager: ObservableObject {
                 }
                 return
             }
+            // force 的诉求是「尺寸可能变了，去核一遍」，不是「无条件再写一遍 wid」。
+            // 全屏动画期间 enter-fullscreen / backing-scale / live-resize 会各自补几次重绑，
+            // 图层和尺寸都没变时把它们挡在这里：mpv 每吃一次 wid 就重建一次视频输出。
+            if self.isDrawableBoundOnControlQueue, self.boundDrawablePointer == wid,
+               self.boundDrawablePixelSize == targetPixelSize {
+                self.log("setDrawable 跳过：wid=\(wid) 已按 \(Int(targetPixelSize.width))x\(Int(targetPixelSize.height)) 绑好")
+                DispatchQueue.main.async {
+                    if self.pendingDrawablePointer == wid {
+                        self.pendingDrawablePointer = nil
+                    }
+                    self.lastDrawablePointer = wid
+                }
+                return
+            }
             var mutableWid = wid
             let result = mpv_set_property(mpv, "wid", MPV_FORMAT_INT64, &mutableWid)
-            self.log("setDrawable wid=\(wid) result=\(result)")
+            self.log("setDrawable wid=\(wid) result=\(result) 目标尺寸=\(Int(targetPixelSize.width))x\(Int(targetPixelSize.height))")
             if result >= 0 {
                 self.isDrawableBoundOnControlQueue = true
+                self.boundDrawablePointer = wid
+                self.boundDrawablePixelSize = targetPixelSize
                 // 账本和引擎实际状态认一个就行：视频轨还摘着就必须放回来。
                 // 只认账本的话，起播时那次续播进度 seek 会顺手把账本清掉，
                 // 结果图层绑上了、视频轨却没放回来，整场只有声音和黑屏。
@@ -535,6 +629,10 @@ class MPVPlayerManager: ObservableObject {
                 if self.pendingVideoTrackAfterDrawable != nil
                     || (vidBeforeBind == "no" && !self.isRebuildingVideoOutput) {
                     self.pendingVideoTrackAfterDrawable = nil
+                    // 先按暂停再放视频轨：mpv 建视频输出（建 swapchain、编 tone-mapping 着色器）
+                    // 实测要一两秒，期间 time-pos 根本不动、字幕也不渲染。让引擎按着走，等它真的
+                    // 开始出画再一起放行，声音、画面、字幕和进度条才在同一起跑线上。
+                    self.armVideoOutputStartupGate(mpv: mpv)
                     mpv_set_property_string(mpv, "vid", "auto")
                     self.log("图层已绑定，补上视频轨（绑定前 vid=\(vidBeforeBind ?? "nil")）")
                 }
@@ -663,6 +761,106 @@ class MPVPlayerManager: ObservableObject {
         }
     }
 
+    /// 补绑图层后恢复视频轨专用：mpv 起视频输出要一两秒，期间 time-pos 不动、字幕也不出，
+    /// 用户看到的就是「有声音有画面，进度条钉在原地，字幕过几秒才冒出来」。把引擎按住到
+    /// mpv 真的开始出画（或超时），再连同 seek 一起放行，四项就同时起步。
+    /// 只能在控制队列上调用。
+    private func armVideoOutputStartupGate(mpv: OpaquePointer) {
+        // 问轨道清单，别问 has-video / current-tracks/video/*：这一刻视频轨还摘着（vid=no），
+        // 那份目录本来就是空的，会把所有片子都误判成「没有视频」。清单还没探测出来时按
+        // 「有视频」处理，宁可多等一会儿，也别把不同步的那几秒放出去。
+        guard hasPlayableVideoTrack(mpv) else {
+            log("补绑图层起视频轨：容器里没有视频轨，不必等视频输出")
+            releaseDeferredVideoStart(mpv: mpv, reason: "容器里没有视频轨")
+            return
+        }
+        armGeometryRecovery(mpv: mpv, reason: "补绑图层起视频轨",
+                            requireOutput: true, minHold: 0.2, holdSeconds: 2.5)
+    }
+
+    /// 图层一直没绑上（全屏通知丢了、handoff 没落定）时的兜底：别把片子永久按在暂停上。
+    private func armDeferredVideoStartWatchdog() {
+        deferredVideoStartWatchdog?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isAwaitingDeferredVideoStart, !self.isStopping else { return }
+            guard !self.isRecoveringVideoGeometry else {
+                // 闸门已经在等出画了，它自带 2.5 秒兜底，这轮不抢它的活
+                return
+            }
+            self.log("直开起播放行：图层迟迟没绑上，先放行")
+            self.runOnControlQueue {
+                self.releaseDeferredVideoStart(mpv: self.mpv, reason: "图层 4 秒没绑上")
+            }
+        }
+        deferredVideoStartWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: work)
+    }
+
+    /// 把「先暂停等图层与视频输出」那次按住放掉。只能在控制队列上调用。
+    private func releaseDeferredVideoStart(mpv: OpaquePointer?, reason: String) {
+        guard isAwaitingDeferredVideoStart else { return }
+        isAwaitingDeferredVideoStart = false
+        DispatchQueue.main.async {
+            self.deferredVideoStartWatchdog?.cancel()
+            self.deferredVideoStartWatchdog = nil
+        }
+        guard let mpv else { return }
+        mpv_set_property_string(mpv, "pause", "no")
+        DispatchQueue.main.async {
+            self.pendingIsPlayingOverride = (true, Date().addingTimeInterval(0.75))
+            self.isPlaying = true
+        }
+        log("直开起播放行：\(reason)")
+    }
+
+    private func trackListCount(_ mpv: OpaquePointer?) -> Int64 {
+        var count: Int64 = 0
+        mpv_get_property(mpv, "track-list/count", MPV_FORMAT_INT64, &count)
+        return count
+    }
+
+    /// 只能在控制队列上用：取 `track-list` 指定区间里的字幕轨（id + 标题）
+    private func subtitleTracks(in range: Range<Int64>, mpv: OpaquePointer?) -> [(id: Int64, title: String)] {
+        var result: [(id: Int64, title: String)] = []
+        for index in range where getMpvStringProperty("track-list/\(index)/type") == "sub" {
+            let id = Int64(getMpvStringProperty("track-list/\(index)/id") ?? "") ?? -1
+            result.append((id, getMpvStringProperty("track-list/\(index)/title") ?? ""))
+        }
+        return result
+    }
+
+    /// 只能在控制队列上用：`sub-add` 的 select 不总会落地，挂完直接按 id 点名要的那条
+    private func selectSubtitleTrackById(_ mpv: OpaquePointer?, id: Int64) {
+        mpv_set_property_string(mpv, "sid", "\(id)")
+        hasUserSelectedSubtitleTrack = true
+    }
+
+    /// 只在控制队列上用：数一下当前有几条字幕轨，顺带看看选中的是哪条
+    private func subtitleTrackSummary(_ mpv: OpaquePointer?) -> String {
+        var count: Int64 = 0
+        mpv_get_property(mpv, "track-list/count", MPV_FORMAT_INT64, &count)
+        guard count > 0 else { return "暂无轨道" }
+        var subtitles = 0
+        var selected = "无"
+        for index in 0..<count where getMpvStringProperty("track-list/\(index)/type") == "sub" {
+            subtitles += 1
+            if getMpvStringProperty("track-list/\(index)/selected") == "yes" {
+                selected = getMpvStringProperty("track-list/\(index)/id") ?? "无"
+            }
+        }
+        return "\(subtitles) 条字幕轨，选中 id=\(selected)"
+    }
+
+    private func hasPlayableVideoTrack(_ mpv: OpaquePointer?) -> Bool {
+        var count: Int64 = 0
+        mpv_get_property(mpv, "track-list/count", MPV_FORMAT_INT64, &count)
+        guard count > 0 else { return true }
+        for index in 0..<count where getMpvStringProperty("track-list/\(index)/type") == "video" {
+            return true
+        }
+        return false
+    }
+
     /// 重建已经确定要做：先补一次暂停，再进入「等输出尺寸对上图层」的轮询
     private func beginGeometryRecoveryForRebuild(mpv: OpaquePointer, reason: String) {
         if !isRecoveringVideoGeometry {
@@ -674,19 +872,27 @@ class MPVPlayerManager: ObservableObject {
     }
 
     /// 只能在控制队列上调用
-    private func armGeometryRecovery(mpv: OpaquePointer, reason: String) {
+    private func armGeometryRecovery(mpv: OpaquePointer, reason: String,
+                                     requireOutput: Bool = false,
+                                     minHold: TimeInterval = 0.6,
+                                     holdSeconds: TimeInterval = 4) {
         let wasPlaying = Self.stringProperty(mpv, "pause") != "yes"
         geometryRecoveryGeneration += 1
-        geometryRecoveryResumePlay = wasPlaying
-        geometryRecoveryReinitSeen = false
+        // 「等出画」那一档是我们自己把播放按住的，引擎当然停在 pause=yes；
+        // 这种情况照样要在放行时续播，否则按住就成了真暂停。
+        geometryRecoveryResumePlay = wasPlaying || requireOutput
+        // 「必须等出画」等同于刚重建过视频输出：续播前照例做一次精确 seek，把音视频两条管线冲干净
+        geometryRecoveryReinitSeen = requireOutput
+        geometryRecoveryRequireOutput = requireOutput
+        geometryRecoveryMinHold = minHold
         geometryRecoveryMatchStreak = 0
         geometryRecoveryArmedAt = Date()
-        geometryRecoveryDeadline = Date().addingTimeInterval(4)
+        geometryRecoveryDeadline = Date().addingTimeInterval(holdSeconds)
         isRecoveringVideoGeometry = true
         if wasPlaying {
             mpv_set_property_string(mpv, "pause", "yes")
             DispatchQueue.main.async {
-                self.pendingIsPlayingOverride = (false, Date().addingTimeInterval(2))
+                self.pendingIsPlayingOverride = (false, Date().addingTimeInterval(max(2, holdSeconds)))
                 self.isPlaying = false
             }
         }
@@ -720,8 +926,10 @@ class MPVPlayerManager: ObservableObject {
                 } else {
                     self.geometryRecoveryMatchStreak = 0
                 }
-                let settled = elapsed >= 0.6 && self.geometryRecoveryMatchStreak >= 2
-                let nothingToFix = elapsed >= 1.2 && !self.geometryRecoveryReinitSeen
+                // 「等出画」那一档：没拿到输出尺寸就还不能放行，只能等它或等超时
+                let settled = elapsed >= self.geometryRecoveryMinHold && self.geometryRecoveryMatchStreak >= 2
+                let nothingToFix = elapsed >= 1.2 && !self.geometryRecoveryRequireOutput
+                    && !self.geometryRecoveryReinitSeen
                     && !self.isRebuildingVideoOutput && rendered == nil
                 let timedOut = Date() >= self.geometryRecoveryDeadline
                 if settled || nothingToFix || timedOut {
@@ -743,6 +951,11 @@ class MPVPlayerManager: ObservableObject {
         let didRebuild = geometryRecoveryReinitSeen
         geometryRecoveryReinitSeen = false
         geometryRecoveryMatchStreak = 0
+        isAwaitingDeferredVideoStart = false
+        DispatchQueue.main.async {
+            self.deferredVideoStartWatchdog?.cancel()
+            self.deferredVideoStartWatchdog = nil
+        }
         guard geometryRecoveryResumePlay else { return }
         geometryRecoveryResumePlay = false
         if let mpv {
@@ -849,6 +1062,10 @@ class MPVPlayerManager: ObservableObject {
             // stop() 会把视频输出摘掉（播放页拆了不能还往旧图层画），复用同一个实例
             // 再播时先装回来；值没变时 mpv 内部会自己比掉，不会多重建一次
             mpv_set_property_string(self.mpv, "vo", "gpu-next")
+            // 换片是一次全新的视频输出：清掉「这个 wid 这个尺寸已经绑过了」的账，
+            // 让之后第一次 setDrawable 真的写一遍，别拿旧账把该绑的图层挡掉。
+            self.boundDrawablePointer = nil
+            self.boundDrawablePixelSize = nil
             self.playbackEndTracker.reset()
             // 单文件播放才让 mpv 停在结尾（保住最后一帧和结尾的 time-pos）；
             // 多文件播放表和蓝光标题要照常自动切下一个，不能被 keep-open 拦下。
@@ -872,15 +1089,29 @@ class MPVPlayerManager: ObservableObject {
                 ? Date().addingTimeInterval(self.initialSeekTimeout)
                 : nil
             mpv_set_property_string(self.mpv, "start", "0")
-            if self.isDrawableBoundOnControlQueue {
-                self.pendingVideoTrackAfterDrawable = nil
-            } else {
-                // 图层还没绑上：先按「没有视频轨」打开，容器探测和音频缓冲就能跟
-                // 建窗口、绑图层并行；setDrawable 成功后立刻把视频轨放回来。
+            // 图层还没绑上：先按「没有视频轨」打开，容器探测和音频缓冲就能跟
+            // 建窗口、绑图层并行；setDrawable 成功后立刻把视频轨放回来。
+            // 这一趟还要连播放一起按住（loadfile 的 pause=yes）：续播的片子从 loadfile 到绑图层
+            // 中间有一两秒是真在放的，等图层到位再为建视频输出按一次暂停，就成了「播—停—播」。
+            // 一开始就不放行，声音、画面、字幕和进度条才会在同一刻起步。
+            let holdsVideoStart = !self.isDrawableBoundOnControlQueue
+            if holdsVideoStart {
                 self.pendingVideoTrackAfterDrawable = "auto"
+                self.isAwaitingDeferredVideoStart = true
                 mpv_set_property_string(self.mpv, "vid", "no")
+                // 按住起播走 `pause` 属性而不是 loadfile 的 per-entry 选项：实测再往
+                // `loadfile … -1 start=…` 后面追加第二个 `pause=yes`，mpv 就当这条命令没解析出来，
+                // 时长一直读不到。属性是 mpv 的播放选项，之后加载的文件沿用，放行时一起写回 no。
+                mpv_set_property_string(self.mpv, "pause", "yes")
+            } else {
+                self.pendingVideoTrackAfterDrawable = nil
+                // 图层已经绑好了（例如库里直接播）：不用按，顺手把上一次可能没放行的按住清掉
+                self.isAwaitingDeferredVideoStart = false
+                mpv_set_property_string(self.mpv, "pause", "no")
             }
             self.loadIssuedAt = Date()
+            self.playlistURLsForSidecars = isBluRay ? [] : urls
+            self.sidecarSignatureForCurrentFile = nil
 
             if isBluRay, let rootPath = blurayRootPath {
                 let rootArgument = self.mpvStringArgument(rootPath, stripUserInfo: shouldStripUserInfo)
@@ -889,7 +1120,8 @@ class MPVPlayerManager: ObservableObject {
             } else {
                 var firstLoadCommand = ["loadfile", self.mpvLoadArgument(for: urls[0], stripUserInfo: shouldStripUserInfo), "replace"]
                 if startPosition > 0 {
-                    firstLoadCommand.append(contentsOf: ["-1", String(format: "start=%.3f", startPosition)])
+                    firstLoadCommand.append("-1")
+                    firstLoadCommand.append(String(format: "start=%.3f", startPosition))
                 }
                 self.executeMpvCommand(firstLoadCommand)
                 for url in urls.dropFirst() {
@@ -901,10 +1133,14 @@ class MPVPlayerManager: ObservableObject {
             if defaultSub == "no" { mpv_set_property_string(self.mpv, "sid", "no") } else { mpv_set_property_string(self.mpv, "sid", "auto") }
             
             DispatchQueue.main.async {
-                self.isPlaying = true
-                self.currentTimePosition = 0
+                self.isPlaying = !holdsVideoStart
+                if holdsVideoStart { self.armDeferredVideoStartWatchdog() }
+                // 有续播进度就先把时间轴摆到要接着放的位置：否则一开屏先闪回 00:00，
+                // 等第一轮轮询（0.25 秒后）才跳回去，看着就像「进度条一直是 0」。
+                let seeded = startPosition.isFinite && startPosition > 0 ? startPosition : 0
+                self.currentTimePosition = seeded
                 self.position = 0
-                self.currentTime = "00:00"
+                self.currentTime = self.formatTime(seeded)
                 self.remainingTime = "00:00"
                 self.duration = 0
                 self.lastTrackCount = 0
@@ -950,6 +1186,8 @@ class MPVPlayerManager: ObservableObject {
         // flicker when the next poll arrives.
         let targetIsPlaying = !isPlaying
         geometryRecoveryResumePlay = false
+        // 按住起播期间用户自己按了播放/暂停：这次按住就此作废，别再替他放行
+        isAwaitingDeferredVideoStart = false
         pendingIsPlayingOverride = (targetIsPlaying, Date().addingTimeInterval(0.75))
         isPlaying = targetIsPlaying
         runOnControlQueue { [weak self] in
@@ -961,6 +1199,7 @@ class MPVPlayerManager: ObservableObject {
     func setPaused(_ paused: Bool) {
         guard !isStopping else { return }
         geometryRecoveryResumePlay = false
+        isAwaitingDeferredVideoStart = false
         DispatchQueue.main.async {
             self.pendingIsPlayingOverride = (!paused, Date().addingTimeInterval(0.75))
             self.isPlaying = !paused
@@ -1193,11 +1432,18 @@ class MPVPlayerManager: ObservableObject {
             mpv_get_property(mpv, "idle-active", MPV_FORMAT_FLAG, &isIdleActive)
             let filename = self.getMpvStringProperty("filename")
             let eofReason = self.getMpvStringProperty("eof-reason")
+            // mpv 自己切到播放表下一条时也要补挂该条目的同名外挂字幕
+            if playlistPos >= 0, Int(playlistPos) < self.playlistURLsForSidecars.count {
+                let current = self.playlistURLsForSidecars[Int(playlistPos)]
+                self.applySidecarSubtitlesIfNeeded(for: current, signature: "\(playlistPos)|\(current.path)")
+            }
             self.playbackEndTracker.observe(PlaybackEndTracker.Observation(
                 duration: dur,
                 timePos: timePos,
                 eofReason: eofReason,
-                idleWithoutFile: isIdleActive == 1 && (filename?.isEmpty ?? true)
+                idleWithoutFile: isIdleActive == 1 && (filename?.isEmpty ?? true),
+                currentFile: filename,
+                playlistPos: Int(playlistPos)
             ))
             if let startedAt = self.loadIssuedAt, dur.isFinite, dur > 0 {
                 self.loadIssuedAt = nil
@@ -1563,9 +1809,104 @@ class MPVPlayerManager: ObservableObject {
         }
     }
 
+    /// 外挂字幕认这些扩展名。`idx` 配 `sub` 是 VobSub；`sup` 是蓝光导出的 PGS 位图字幕，
+    /// MPVKit 自带的 ffmpeg 白名单里没有 `sup` 解封装器，得先经 `PGSSubtitleWrapper` 包成 MPEG-TS。
+    static let sidecarSubtitleExtensions: [String] = ["sup", "srt", "ass", "ssa", "sub", "vtt", "idx"]
+
+    /// 给正在播放的条目补挂同目录同名外挂字幕。只能在控制队列上调用。
+    private func applySidecarSubtitlesIfNeeded(for url: URL, signature: String) {
+        guard sidecarSignatureForCurrentFile != signature else { return }
+        sidecarSignatureForCurrentFile = signature
+        guard url.isFileURL else { return }
+        let directory = url.deletingLastPathComponent()
+        let stem = url.deletingPathExtension().lastPathComponent
+        let extensions = Self.sidecarSubtitleExtensions
+        // 列目录放到并发队列：网络盘上这一步能卡上百毫秒，别拖累控制队列的进度与暂停
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self, !self.isStopping else { return }
+            guard let entries = try? FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return }
+            var exact: [URL] = []
+            var tagged: [URL] = []
+            for entry in entries {
+                let ext = entry.pathExtension.lowercased()
+                guard extensions.contains(ext) else { continue }
+                let entryStem = entry.deletingPathExtension().lastPathComponent
+                if entryStem.caseInsensitiveCompare(stem) == .orderedSame {
+                    exact.append(entry)
+                } else if entryStem.lowercased().hasPrefix(stem.lowercased() + ".") {
+                    tagged.append(entry)
+                }
+            }
+            let candidates = exact + tagged
+            guard !candidates.isEmpty else { return }
+            // `.sup` 要先包成 mpv 认得的 TS，这一步得读完整个字幕文件，留在当前后台队列上做
+            let preferredSource = exact.first
+            let mounts = candidates.map { (source: $0, playable: PGSSubtitleWrapper.playableURL(for: $0)) }
+            let preferredPlayable = mounts.first { $0.source == preferredSource }?.playable
+            self.runOnControlQueue {
+                guard let mpv = self.mpv, !self.isStopping else { return }
+                let titleOf: (URL) -> String = { $0.deletingPathExtension().lastPathComponent }
+                let trackCountBeforeMount = self.trackListCount(mpv)
+                guard let preferredSource, let preferredPlayable else {
+                    for mount in mounts {
+                        self.executeMpvCommand(["sub-add", mount.playable.path, "auto", titleOf(mount.source)])
+                    }
+                    self.log("外挂字幕：\(url.lastPathComponent) 挂上 \(mounts.count) 条；\(self.subtitleTrackSummary(mpv))")
+                    return
+                }
+                // 同名那份是用户明摆着要的那条：其余只挂不选，最后把同名的选上
+                for mount in mounts where mount.source != preferredSource {
+                    self.executeMpvCommand(["sub-add", mount.playable.path, "auto", titleOf(mount.source)])
+                }
+                let language = Self.sidecarLanguageTag(from: preferredSource.deletingPathExtension().lastPathComponent, stem: stem)
+                var command = ["sub-add", preferredPlayable.path, "select", titleOf(preferredSource)]
+                if let language { command.append(language) }
+                self.executeMpvCommand(command)
+                // mpv 的 select 未必生效（实测外挂字幕挂上后 sid 仍是空的），挂完按 id 点名
+                let wantedTitle = titleOf(preferredSource)
+                let mounted = self.subtitleTracks(in: trackCountBeforeMount..<self.trackListCount(mpv), mpv: mpv)
+                if let chosen = mounted.first(where: { $0.title == wantedTitle }) ?? mounted.last {
+                    self.selectSubtitleTrackById(mpv, id: chosen.id)
+                }
+                let wrapped = preferredPlayable.pathExtension.lowercased() == "ts" ? "，PGS 已包成 TS" : ""
+                self.log("外挂字幕：\(url.lastPathComponent) 挂上 \(mounts.count) 条，选中 \(preferredSource.lastPathComponent)\(wrapped)")
+            }
+        }
+    }
+
+    /// 从 `00000.cht.sup` 这类文件名尾巴里挑出语言标签，让 mpv 的默认字幕偏好能认出它
+    private static func sidecarLanguageTag(from name: String, stem: String) -> String? {
+        let suffix = String(name.dropFirst(stem.count))
+        let tags = suffix.split(separator: ".").map { $0.lowercased() }
+        let table: [String: String] = [
+            "chi": "chi", "chs": "chi", "zhs": "chi", "zh": "chi", "zh-cn": "chi", "zh-hans": "chi",
+            "cht": "chi", "zht": "chi", "zh-tw": "chi", "zh-hant": "chi", "zho": "chi", "cmn": "chi",
+            "eng": "eng", "en": "eng", "ja": "jpn", "jpn": "jpn", "kor": "kor", "ko": "kor",
+            "fra": "fre", "fre": "fre", "deu": "ger", "ger": "ger", "spa": "spa", "rus": "rus", "tha": "tha"
+        ]
+        for tag in tags.reversed() {
+            if let mapped = table[tag] { return mapped }
+        }
+        return nil
+    }
+
     func addExternalSubtitle(url: URL, title: String, language: String = "chi") {
         hasUserSelectedSubtitleTrack = true
-        executeMpvCommand(["sub-add", url.path, "select", title, language])
+        guard url.isFileURL, url.pathExtension.lowercased() == "sup" else {
+            executeMpvCommand(["sub-add", url.path, "select", title, language])
+            return
+        }
+        // `.sup` 得先包成 TS，可能要读上百 MB，别压在面板关闭后的主线程上
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self, !self.isStopping else { return }
+            let playable = PGSSubtitleWrapper.playableURL(for: url)
+            self.runOnControlQueue {
+                self.executeMpvCommand(["sub-add", playable.path, "select", title, language])
+                let wrapped = playable == url ? "" : "，PGS 已包成 TS"
+                self.log("外挂字幕：手动挂载 \(url.lastPathComponent)\(wrapped)")
+            }
+        }
     }
 
     private func savedTrackPreference(kind: String) -> String? {

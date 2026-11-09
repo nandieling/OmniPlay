@@ -670,34 +670,15 @@ struct MovieDetailView: View {
                 }
                 if Task.isCancelled { return }
                 let files = sourcePairs.map(\.0)
-                let sortedFiles = files.enumerated().sorted {
-                    let lhsParsed = MediaNameParser.parseEpisodeInfo(from: $0.element.fileName, fallbackIndex: $0.offset)
-                    let rhsParsed = MediaNameParser.parseEpisodeInfo(from: $1.element.fileName, fallbackIndex: $1.offset)
-                    if lhsParsed.isTVShow || rhsParsed.isTVShow {
-                        let lhsDetailKey = MediaNameParser.episodeSortKey(for: $0.element.fileName, fallbackIndex: $0.offset).2
-                        let rhsDetailKey = MediaNameParser.episodeSortKey(for: $1.element.fileName, fallbackIndex: $1.offset).2
-                        let lhsResolved = EpisodeMetadataOverrideStore.shared.resolvedEpisodeInfo(
-                            fileId: $0.element.id,
-                            fileName: $0.element.fileName,
-                            fallbackIndex: $0.offset
-                        )
-                        let rhsResolved = EpisodeMetadataOverrideStore.shared.resolvedEpisodeInfo(
-                            fileId: $1.element.id,
-                            fileName: $1.element.fileName,
-                            fallbackIndex: $1.offset
-                        )
-                        return (seasonSortPriority(lhsResolved.season), lhsResolved.episode, lhsDetailKey) <
-                            (seasonSortPriority(rhsResolved.season), rhsResolved.episode, rhsDetailKey)
-                    }
-                    return MediaNameParser.playbackSortPrecedes(
-                        lhsRelativePath: $0.element.relativePath,
-                        lhsFileName: $0.element.fileName,
-                        lhsFallbackIndex: $0.offset,
-                        rhsRelativePath: $1.element.relativePath,
-                        rhsFileName: $1.element.fileName,
-                        rhsFallbackIndex: $1.offset
-                    )
-                }.map(\.element)
+                // 和播放表同一条比较：墙上看到的顺序就是连播的顺序，
+                // 否则「第 5 集」后面接的是播表里排在后面的那一集，中间几集既不播也不标。
+                let sortedFiles = MediaNameParser.sortedForEpisodePlayback(
+                    files,
+                    relativePath: { $0.relativePath },
+                    fileName: { $0.fileName },
+                    fileId: { $0.id },
+                    override: EpisodeMetadataOverrideStore.shared.playbackSortOverride(for:)
+                )
                 var episodes: [EpisodeItem] = []
                 var eligibleEpisodeIDs = Set<String>()
                 var explicitSubtitleFileIDs = Set<String>()
@@ -709,14 +690,13 @@ struct MovieDetailView: View {
                 for (index, file) in sortedFiles.enumerated() {
                     let parsed = MediaNameParser.parseEpisodeDescriptor(from: file.fileName, fallbackIndex: index)
                     let override = EpisodeMetadataOverrideStore.shared.override(for: file.id)
-                    let preferredSeason = override == nil
-                        ? MediaNameParser.resolvePreferredSeason(
-                            from: file.relativePath,
-                            fileName: file.fileName,
-                            fallbackIndex: index
-                        )
-                        : nil
-                    var s = override?.season ?? preferredSeason ?? parsed.season
+                    // 集号显示跟排序用同一条解析，标签和位置不会各说各话
+                    var s = MediaNameParser.resolvedEpisodeSeason(
+                        relativePath: file.relativePath,
+                        fileName: file.fileName,
+                        fallbackIndex: index,
+                        overrideSeason: override?.season
+                    )
                     var e = override?.episode ?? parsed.episode
                     var dName = episodeBaseDisplayName(season: s, episode: e)
                     if isShortDramaMovie {

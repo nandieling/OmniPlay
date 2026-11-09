@@ -228,7 +228,24 @@ public final class MpvPlayer {
         if (!initialized || paused) {
             return false;
         }
-        return "yes".equals(getStringProperty("idle", "no"));
+        // mpv 的 idle 是「没装载文件」，正播着的时候它是 no；早先按 yes 判过，等于暂停/播完
+        // 才认定在播，屏幕常亮整个是反的。这里按 pause 与 eof-reached 判：暂停和放完都放开常亮。
+        if (readFlag("pause", false)) {
+            return false;
+        }
+        return !readFlag("eof-reached", false);
+    }
+
+    /** mpv 的布尔属性念成 yes/no（有的构建给 true/1），读不准时按 fallback 走。 */
+    private boolean readFlag(String property, boolean fallback) {
+        String value = getStringProperty(property, "").trim().toLowerCase(java.util.Locale.ROOT);
+        if (value.equals("yes") || value.equals("true") || value.equals("1")) {
+            return true;
+        }
+        if (value.equals("no") || value.equals("false") || value.equals("0")) {
+            return false;
+        }
+        return fallback;
     }
 
     /**

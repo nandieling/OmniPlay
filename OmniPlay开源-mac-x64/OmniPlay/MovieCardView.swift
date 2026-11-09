@@ -27,7 +27,6 @@ struct MovieCardView: View {
     @State private var showCancelCacheConfirmation = false
     
     @State private var isHovering = false
-    @State private var isFullyWatched = false
     @State private var movieFiles: [VideoFile] = []
     @State private var sourcePairs: [(VideoFile, MediaSource?)] = []
     @State private var doubanMetadata: DoubanMetadata? = nil
@@ -127,11 +126,18 @@ struct MovieCardView: View {
                             .conditionalHelp("部分源文件不存在，需重新连接外置硬盘/NAS 或使用本地缓存播放", show: enableFastTooltip)
                     }
                     Button(action: toggleWatched) {
-                        Image(systemName: isFullyWatched ? "checkmark.circle.fill" : "circle")
+                        // 三态：整部放完 = 已播（实心勾），放到一半 = 未播完（半圆），一点没动 = 未播（空心）。
+                        // 以前这里只有实心勾 / 空心两档，播到一半的片子在首页一律显示成「未播」。
+                        Image(systemName: cardWatchState == .watched
+                              ? "checkmark.circle.fill"
+                              : (cardWatchState == .inProgress ? "circle.lefthalf.filled" : "circle"))
                             .font(.system(size: 13))
-                            .foregroundColor(isFullyWatched ? theme.accent : theme.textSecondary.opacity(0.5))
+                            .foregroundColor(cardWatchState == .unplayed
+                                             ? theme.textSecondary.opacity(0.5)
+                                             : theme.accent)
                     }
                     .buttonStyle(.plain)
+                    .conditionalHelp(cardWatchState.statusLabel, show: enableFastTooltip)
                     Spacer(minLength: 0)
                 }
                 
@@ -241,6 +247,12 @@ struct MovieCardView: View {
         }
     }
 
+    /// 海报下方那颗圆点该显示哪一档。判定收在 `PlaybackWatchState.aggregate` 里，
+    /// 和详情页、NeoDB 标记共用同一套口径；文件列表一刷新（onAppear / libraryUpdated）就跟着变。
+    private var cardWatchState: PlaybackWatchState {
+        PlaybackWatchState.aggregate(files: movieFiles)
+    }
+
     private var continueWatchingProgressRatio: Double? {
         guard isContinueWatchingContext else { return nil }
         // 关闭开关时，直接播放的文件不参与进度计算，卡片上的进度条只反映库内文件
@@ -276,16 +288,12 @@ struct MovieCardView: View {
                 }
                 if Task.isCancelled { return }
                 let files = snapshot.pairs.map(\.0)
-                let allFilesWatched = !files.isEmpty && files.allSatisfy { file in
-                    file.duration > 0 && (file.playProgress / file.duration) >= 0.95
-                }
                 let probes = await MainActor.run { cacheManager.missingSourceProbes(for: snapshot.pairs) }
                 let missingFiles = OfflineCacheManager.hasMissingSource(probes: probes)
                 await MainActor.run {
                     self.movieFiles = files
                     self.sourcePairs = snapshot.pairs
                     self.doubanMetadata = snapshot.douban?.isInvalidPlaceholder == true ? nil : snapshot.douban
-                    self.isFullyWatched = allFilesWatched
                     self.hasMissingFiles = missingFiles
                 }
             } catch {}
@@ -297,9 +305,7 @@ struct MovieCardView: View {
             do {
                 try await AppDatabase.shared.dbQueue.write { db in
                     let files = try VideoFile.fetchVisibleFiles(movieId: movie.id, in: db)
-                    let shouldMarkWatched = files.contains { file in
-                        !(file.duration > 0 && (file.playProgress / file.duration) >= 0.95)
-                    }
+                    let shouldMarkWatched = PlaybackWatchState.aggregate(files: files) != .watched
                     for var file in files {
                         if shouldMarkWatched {
                             let duration = PlaybackWatchState.finishedMark(duration: file.duration)

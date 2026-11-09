@@ -1,6 +1,5 @@
 package com.omniplay.tv.local;
 
-import android.util.Base64;
 
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserFactory;
@@ -52,8 +51,10 @@ public final class WebDavClient {
                 cookieHeader = "";
             } else {
                 String raw = this.username + ":" + this.password;
-                cookieHeader = "Basic " + Base64.encodeToString(
-                        raw.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
+                // java.util.Base64：minSdk 26 起就有，且 JVM 离线校验能直接跑，
+                // 不必为一条 Basic 头把 android.util 的桩类拖进自检。
+                cookieHeader = "Basic " + java.util.Base64.getEncoder()
+                        .encodeToString(raw.getBytes(StandardCharsets.UTF_8));
             }
         }
     }
@@ -95,6 +96,14 @@ public final class WebDavClient {
 
     public String rootUrl() {
         return rootUrl;
+    }
+
+    /**
+     * 现成的 {@code Authorization} 头（没配账号就是空串）。列目录用的是它，读写 sidecar 也得用：
+     * {@link #streamUrl} 只把账号拼进 URL 的 userinfo，那条只对 mpv 有效。
+     */
+    public String authorization() {
+        return credential.cookieHeader;
     }
 
     public static String normalizeRoot(String value) {

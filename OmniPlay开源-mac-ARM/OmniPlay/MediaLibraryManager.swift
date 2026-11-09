@@ -582,6 +582,111 @@ enum MediaNameParser {
         return lhsFallbackIndex < rhsFallbackIndex
     }
 
+    // MARK: - 集序（播放表、分集墙、「下一集」「继续播放」共用）
+
+    /// 用户在分集弹窗里手工改过的季/集，排序时优先级最高。
+    nonisolated struct EpisodeOrderOverride {
+        let season: Int
+        let episode: Int
+    }
+
+    /// 文件名里写死的季号：只有 `S02E03` 这种才算「文件名自己声明了季号」。
+    /// `第 03 集`、`E03` 只给集号，季号留给目录名决定，否则多季目录会被压成同一季交错播放。
+    nonisolated static func explicitFileNameSeason(from fileName: String) -> Int? {
+        let fileStem = ((fileName as NSString).lastPathComponent as NSString).deletingPathExtension
+        guard let match = fileStem.range(of: #"[sS](\d{1,2})[eE][pP]?(\d{1,3})"#, options: .regularExpression) else {
+            return nil
+        }
+        let parts = String(fileStem[match]).uppercased().components(separatedBy: "E")
+        guard parts.count == 2 else { return nil }
+        return Int(parts[0].replacingOccurrences(of: "S", with: ""))
+    }
+
+    /// 目录名里写明的季号（Season 2 / 第 2 季 / 全 3 季这类合集范围）。
+    nonisolated static func pathSeason(from rawPath: String) -> Int? {
+        if let value = parseMultiSeasonRangeStart(from: rawPath), value > 0 { return value }
+        return parsePreferredSeason(from: rawPath)
+    }
+
+    /// 一集最终归到哪一季：手工修正 > 文件名写死的 Sxx > 目录季号 > 文件名默认季号。
+    nonisolated static func resolvedEpisodeSeason(
+        relativePath: String,
+        fileName: String,
+        fallbackIndex: Int,
+        overrideSeason: Int? = nil
+    ) -> Int {
+        if let overrideSeason { return overrideSeason }
+        if let explicit = explicitFileNameSeason(from: fileName) { return explicit }
+        if let season = pathSeason(from: relativePath) { return season }
+        return parseEpisodeDescriptor(from: fileName, fallbackIndex: fallbackIndex).season
+    }
+
+    /// 集序比较：季号、集号、同集内的分段/版本明细，最后才落到 `playbackSortPrecedes` 的路径序。
+    nonisolated static func episodeAwareSortKey(
+        relativePath: String,
+        fileName: String,
+        fallbackIndex: Int,
+        override: EpisodeOrderOverride?
+    ) -> (Int, Int, String) {
+        let parsed = parseEpisodeDescriptor(from: fileName, fallbackIndex: fallbackIndex)
+        let season = resolvedEpisodeSeason(
+            relativePath: relativePath, fileName: fileName, fallbackIndex: fallbackIndex, overrideSeason: override?.season)
+        let episode = override?.episode ?? parsed.episode
+        let segmentOrder = parsed.segmentIndex ?? Int.max
+        let detailKey = String(
+            format: "%02d|%@|%06d|%@", parsed.sortBucket, parsed.variantSortKey, segmentOrder, fileName.lowercased())
+        return (season == 0 ? Int.max : season, episode, detailKey)
+    }
+
+    /// 播放表和分集墙必须用的同一条比较。以前两处各排各的：墙上写着第 2 季，播完第 1 季第 1 集
+    /// 却跳到第 2 季第 1 集，中间几集既不播也不标。
+    nonisolated static func episodeAwarePlaybackSortPrecedes(
+        lhsRelativePath: String,
+        lhsFileName: String,
+        lhsFallbackIndex: Int,
+        lhsOverride: EpisodeOrderOverride?,
+        rhsRelativePath: String,
+        rhsFileName: String,
+        rhsFallbackIndex: Int,
+        rhsOverride: EpisodeOrderOverride?
+    ) -> Bool {
+        let lhsIsEpisode = parseEpisodeInfo(from: lhsFileName, fallbackIndex: lhsFallbackIndex).isTVShow
+            || isLikelyTVEpisodePath(lhsRelativePath)
+        let rhsIsEpisode = parseEpisodeInfo(from: rhsFileName, fallbackIndex: rhsFallbackIndex).isTVShow
+            || isLikelyTVEpisodePath(rhsRelativePath)
+        if lhsIsEpisode || rhsIsEpisode || lhsOverride != nil || rhsOverride != nil {
+            let lhsKey = episodeAwareSortKey(
+                relativePath: lhsRelativePath, fileName: lhsFileName, fallbackIndex: lhsFallbackIndex, override: lhsOverride)
+            let rhsKey = episodeAwareSortKey(
+                relativePath: rhsRelativePath, fileName: rhsFileName, fallbackIndex: rhsFallbackIndex, override: rhsOverride)
+            if lhsKey != rhsKey { return lhsKey < rhsKey }
+        }
+        return playbackSortPrecedes(
+            lhsRelativePath: lhsRelativePath, lhsFileName: lhsFileName, lhsFallbackIndex: lhsFallbackIndex,
+            rhsRelativePath: rhsRelativePath, rhsFileName: rhsFileName, rhsFallbackIndex: rhsFallbackIndex)
+    }
+
+    /// 便捷版：直接拿 `EpisodeMetadataOverrideStore` 的修正记录排一组文件。
+    nonisolated static func sortedForEpisodePlayback<T>(
+        _ files: [T],
+        relativePath: (T) -> String,
+        fileName: (T) -> String,
+        fileId: (T) -> String,
+        override: (String) -> EpisodeOrderOverride?
+    ) -> [T] {
+        files.enumerated().sorted { lhs, rhs in
+            episodeAwarePlaybackSortPrecedes(
+                lhsRelativePath: relativePath(lhs.element),
+                lhsFileName: fileName(lhs.element),
+                lhsFallbackIndex: lhs.offset,
+                lhsOverride: override(fileId(lhs.element)),
+                rhsRelativePath: relativePath(rhs.element),
+                rhsFileName: fileName(rhs.element),
+                rhsFallbackIndex: rhs.offset,
+                rhsOverride: override(fileId(rhs.element)))
+        }.map(\.element)
+    }
+
     nonisolated private static func moviePartSortIndex(in raw: String) -> Int? {
         let tokens = raw
             .replacingOccurrences(of: #"[\\/\s._\-\[\]\(\)\{\}【】（）,:：]+"#, with: " ", options: .regularExpression)

@@ -1679,7 +1679,9 @@ struct PlayerScreen: View {
             }
             let newFile = allPlaylistFiles[newIndex]
             guard oldId != newFile.id else { return }
-            persistFinishedPlaylistFiles(finishedPlaylistFileIds(before: newIndex, previousFileId: oldId))
+            persistFinishedPlaylistFiles(
+                finishedPlaylistFileIds(before: newIndex, previousFileId: oldId),
+                justPlayedFileId: oldId)
             currentVideoFileId = newFile.id
         }
     }
@@ -1693,10 +1695,19 @@ struct PlayerScreen: View {
         
         let panel = NSOpenPanel()
         panel.message = "选择要挂载的字幕文件"
-        // 仅允许常见的字幕格式
-        panel.allowedContentTypes = [UTType(filenameExtension: "srt"), UTType(filenameExtension: "ass"), UTType(filenameExtension: "ssa"), UTType(filenameExtension: "vtt")].compactMap { $0 }
+        // 字幕格式按播放器认的那份列出来：蓝光导出的 .sup（PGS 位图字幕）和 VobSub 的 .idx
+        // 以前不在名单里，面板直接把文件灰掉，手动挂载也选不了。
+        panel.allowedContentTypes = MPVPlayerManager.sidecarSubtitleExtensions
+            .compactMap { UTType(filenameExtension: $0) }
+        // 命名古怪的（.SPT、无扩展名等）别拦着，让 mpv 自己试
+        panel.allowsOtherFileTypes = true
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
+        if videoURLs.indices.contains(playerManager.currentPlaylistIndex) {
+            panel.directoryURL = videoURLs[playerManager.currentPlaylistIndex].deletingLastPathComponent()
+        } else if let first = videoURLs.first {
+            panel.directoryURL = first.deletingLastPathComponent()
+        }
         
         if panel.runModal() == .OK, let url = panel.url {
             let subName = url.lastPathComponent
@@ -1905,16 +1916,13 @@ struct PlayerScreen: View {
         if let seedSourceBasePath = initialSourceBasePath,
            let seedFiles = initialPlaylistFiles,
            !seedFiles.isEmpty {
-            let orderedSeedFiles = seedFiles.enumerated().sorted {
-                MediaNameParser.playbackSortPrecedes(
-                    lhsRelativePath: $0.element.relativePath,
-                    lhsFileName: $0.element.fileName,
-                    lhsFallbackIndex: $0.offset,
-                    rhsRelativePath: $1.element.relativePath,
-                    rhsFileName: $1.element.fileName,
-                    rhsFallbackIndex: $1.offset
-                )
-            }.map(\.element)
+            let orderedSeedFiles = MediaNameParser.sortedForEpisodePlayback(
+                seedFiles,
+                relativePath: { $0.relativePath },
+                fileName: { $0.fileName },
+                fileId: { $0.id },
+                override: Self.episodeOrderOverride(for:)
+            )
             let startIndex = initialFileId.flatMap { targetId in
                 orderedSeedFiles.firstIndex(where: { $0.id == targetId })
             } ?? 0
@@ -1954,16 +1962,13 @@ struct PlayerScreen: View {
                 print("[PlayerScreen] prepare DB snapshot start")
                 let snapshot: (files: [VideoFile], sourceBasePath: String, sourceProtocolType: String, sourceAuthConfig: String?, startIndex: Int)? = try await dbQueue.read { db in
                     let fetchedFiles = try VideoFile.fetchVisibleFiles(movieId: movieValue.id, in: db)
-                    let files = fetchedFiles.enumerated().sorted {
-                        MediaNameParser.playbackSortPrecedes(
-                            lhsRelativePath: $0.element.relativePath,
-                            lhsFileName: $0.element.fileName,
-                            lhsFallbackIndex: $0.offset,
-                            rhsRelativePath: $1.element.relativePath,
-                            rhsFileName: $1.element.fileName,
-                            rhsFallbackIndex: $1.offset
-                        )
-                    }.map(\.element)
+                    let files = MediaNameParser.sortedForEpisodePlayback(
+                        fetchedFiles,
+                        relativePath: { $0.relativePath },
+                        fileName: { $0.fileName },
+                        fileId: { $0.id },
+                        override: Self.episodeOrderOverride(for:)
+                    )
                     guard !files.isEmpty,
                           let source = try files[0].request(for: VideoFile.mediaSource).fetchOne(db) else { return nil }
 
@@ -2044,6 +2049,11 @@ struct PlayerScreen: View {
         RemoteISOStreamProxy.shared.unregister(routeIDs: routeIDs)
     }
 
+    /// 分集弹窗里手工改过的季/集：播放表排序必须跟着它走，否则分集墙的顺序和连播的顺序会分家。
+    nonisolated static func episodeOrderOverride(for fileId: String) -> MediaNameParser.EpisodeOrderOverride? {
+        EpisodeMetadataOverrideStore.shared.playbackSortOverride(for: fileId)
+    }
+
     nonisolated static func applyFinishedPlaybackState(
         to file: inout VideoFile,
         observedDuration: Double = 0,
@@ -2084,18 +2094,42 @@ struct PlayerScreen: View {
         }
     }
 
-    private func resolvedPlaybackFileIndex(from snapshot: MPVPlayerManager.PlaybackEngineSnapshot) -> Int? {
+    /// 把引擎快照对应到播放表里的某个文件，并给出「这份进度是不是这个文件的」。
+    ///
+    /// 认不出来的文件名（`bd://`、代理 URL）不算「切到别的集」，仍按原样采信；
+    /// 只有快照里的文件名能对上播放表里**另一个**条目时，才判定为已经自动切到下一集。
+    private func resolvedPlaybackFile(
+        from snapshot: MPVPlayerManager.PlaybackEngineSnapshot
+    ) -> (index: Int, snapshotBelongsToFile: Bool)? {
         if let filename = snapshot.filename,
            let filenameIndex = allPlaylistFiles.firstIndex(where: { playbackFilename(filename, matches: $0) }) {
-            return filenameIndex
+            return (filenameIndex, true)
         }
+        let snapshotMapsToAnotherFile: Bool = {
+            guard let filename = snapshot.filename, !filename.isEmpty else { return false }
+            return allPlaylistFiles.contains { playbackFilename(filename, matches: $0) }
+        }()
         if allPlaylistFiles.indices.contains(snapshot.playlistIndex) {
-            return snapshot.playlistIndex
+            return (snapshot.playlistIndex, !snapshotMapsToAnotherFile)
         }
-        if let currentVideoFileId {
-            return allPlaylistFiles.firstIndex(where: { $0.id == currentVideoFileId })
+        if let currentVideoFileId,
+           let index = allPlaylistFiles.firstIndex(where: { $0.id == currentVideoFileId }) {
+            return (index, !snapshotMapsToAnotherFile)
         }
         return nil
+    }
+
+    /// 连播区间里该不该把某个文件写成已播。
+    ///
+    /// `justPlayedFileId` 是引擎刚离开的那一条，播完切走是它的正常收尾；中间的条目是引擎自己
+    /// 跳过去的（打不开、或轮询漏了一次切换），一秒都没放过，只有库里本来就记着已播才允许保留。
+    nonisolated static func shouldMarkPlaylistFileFinished(
+        fileId: String,
+        justPlayedFileId: String?,
+        storedWatchState: PlaybackWatchState
+    ) -> Bool {
+        if fileId == justPlayedFileId { return true }
+        return storedWatchState == .watched
     }
 
     private func finishedPlaylistFileIds(before currentIndex: Int, previousFileId: String?) -> [String] {
@@ -2108,7 +2142,7 @@ struct PlayerScreen: View {
         return Array(allPlaylistFiles[previousIndex..<currentIndex].map(\.id))
     }
 
-    private func persistFinishedPlaylistFiles(_ fileIds: [String]) {
+    private func persistFinishedPlaylistFiles(_ fileIds: [String], justPlayedFileId: String?) {
         var seenFileIds = Set<String>()
         let uniqueFileIds = fileIds.filter { seenFileIds.insert($0).inserted }
         guard !uniqueFileIds.isEmpty else { return }
@@ -2119,6 +2153,11 @@ struct PlayerScreen: View {
                     var movieIds: [Int64] = []
                     for fileId in uniqueFileIds {
                         if var file = try VideoFile.fetchOne(db, key: fileId) {
+                            let storedState = PlaybackWatchState(progress: file.playProgress, duration: file.duration)
+                            guard Self.shouldMarkPlaylistFileFinished(
+                                fileId: fileId,
+                                justPlayedFileId: justPlayedFileId,
+                                storedWatchState: storedState) else { continue }
                             Self.applyFinishedPlaybackState(to: &file)
                             try file.update(db)
                             if let movieId = file.movieId { movieIds.append(movieId) }
@@ -2143,8 +2182,11 @@ struct PlayerScreen: View {
         showControls = true
 
         let playbackSnapshot = playerManager.playbackEngineSnapshot
-        let resolvedPlaylistIndex = resolvedPlaybackFileIndex(from: playbackSnapshot)
+        let resolvedPlaylistFile = resolvedPlaybackFile(from: playbackSnapshot)
+        let resolvedPlaylistIndex = resolvedPlaylistFile?.index
+        let snapshotBelongsToFile = resolvedPlaylistFile?.snapshotBelongsToFile ?? true
         let fileIdToSave = resolvedPlaylistIndex.flatMap { allPlaylistFiles.indices.contains($0) ? allPlaylistFiles[$0].id : nil } ?? currentVideoFileId
+        let justPlayedFileId = currentVideoFileId
         let completedFileIds = resolvedPlaylistIndex.map {
             finishedPlaylistFileIds(before: $0, previousFileId: currentVideoFileId)
         } ?? []
@@ -2152,7 +2194,7 @@ struct PlayerScreen: View {
         let snapshotDuration = playbackSnapshot.duration.isFinite ? playbackSnapshot.duration : 0.0
         let durationToSave = snapshotDuration > 0 ? snapshotDuration : playerManager.duration
         let isTVPlaybackAtClose = isTVPlayback
-        traceClose("snapshot fileId=\(fileIdToSave ?? "nil") playlistIndex=\(playbackSnapshot.playlistIndex) filename=\(playbackSnapshot.filename ?? "nil") progress=\(progressToSave) duration=\(durationToSave) isTV=\(isTVPlaybackAtClose)")
+        traceClose("snapshot fileId=\(fileIdToSave ?? "nil") playlistIndex=\(playbackSnapshot.playlistIndex) filename=\(playbackSnapshot.filename ?? "nil") progress=\(progressToSave) duration=\(durationToSave) isTV=\(isTVPlaybackAtClose) snapshotOwnFile=\(snapshotBelongsToFile)")
         forceCursorVisible()
         traceClose("calling playerManager.stop()")
         playerManager.stop()
@@ -2166,12 +2208,20 @@ struct PlayerScreen: View {
                 var movieIds: [Int64] = []
                 for completedId in completedFileIds where completedId != fileId {
                     if var completedFile = try VideoFile.fetchOne(db, key: completedId) {
+                        let storedState = PlaybackWatchState(
+                            progress: completedFile.playProgress, duration: completedFile.duration)
+                        guard Self.shouldMarkPlaylistFileFinished(
+                            fileId: completedId,
+                            justPlayedFileId: justPlayedFileId,
+                            storedWatchState: storedState) else { continue }
                         Self.applyFinishedPlaybackState(to: &completedFile)
                         try completedFile.update(db)
                         if let movieId = completedFile.movieId { movieIds.append(movieId) }
                     }
                 }
-                if var file = try VideoFile.fetchOne(db, key: fileId) {
+                // 快照说的不是这一条（引擎已经自动切到下一集，只是还没轮到刷新 currentVideoFileId）：
+                // 别人的进度和时长不能往这一条上写，否则一秒没看的下一集会被盖成已播。
+                if snapshotBelongsToFile, var file = try VideoFile.fetchOne(db, key: fileId) {
                     let resolvedDuration = max(durationToSave, file.duration)
                     let finished = resolvedDuration > 0 && (progressToSave / resolvedDuration) >= 0.95
                     let thresholded = progressToSave > 5.0 ? progressToSave : 0.0

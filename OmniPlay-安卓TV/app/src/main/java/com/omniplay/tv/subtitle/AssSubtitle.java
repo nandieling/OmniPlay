@@ -14,7 +14,7 @@ public final class AssSubtitle {
         public final double endSeconds;
         public final String text;
 
-        Cue(double startSeconds, double endSeconds, String text) {
+        public Cue(double startSeconds, double endSeconds, String text) {
             this.startSeconds = startSeconds;
             this.endSeconds = endSeconds;
             this.text = text;

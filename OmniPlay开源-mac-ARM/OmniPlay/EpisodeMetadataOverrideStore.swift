@@ -1,7 +1,10 @@
 import Foundation
 
-final class EpisodeMetadataOverrideStore {
-    static let shared = EpisodeMetadataOverrideStore()
+/// 状态全部落在 `UserDefaults` 里，本尊没有可变态字段。
+/// 本工程开了 `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`，播放表要在后台任务里按集序排序，
+/// 所以读取这条链（`shared`、`override(for:)`、`loadOverrides`）显式留在非隔离一侧。
+final class EpisodeMetadataOverrideStore: @unchecked Sendable {
+    nonisolated static let shared = EpisodeMetadataOverrideStore()
 
     struct Override: Codable {
         var season: Int
@@ -9,11 +12,11 @@ final class EpisodeMetadataOverrideStore {
         var subtitle: String?
     }
 
-    private let defaultsKey = "OmniPlayEpisodeMetadataOverrides"
+    private nonisolated let defaultsKey = "OmniPlayEpisodeMetadataOverrides"
 
     private init() {}
 
-    func override(for fileId: String) -> Override? {
+    nonisolated func override(for fileId: String) -> Override? {
         loadOverrides()[fileId]
     }
 
@@ -45,7 +48,13 @@ final class EpisodeMetadataOverrideStore {
         return (override.season, override.episode, displayName, true)
     }
 
-    private func loadOverrides() -> [String: Override] {
+    /// 播放表、分集墙、「下一集」「继续播放」共用的排序输入。
+    nonisolated func playbackSortOverride(for fileId: String) -> MediaNameParser.EpisodeOrderOverride? {
+        guard let override = override(for: fileId) else { return nil }
+        return MediaNameParser.EpisodeOrderOverride(season: override.season, episode: override.episode)
+    }
+
+    nonisolated private func loadOverrides() -> [String: Override] {
         guard let data = UserDefaults.standard.data(forKey: defaultsKey),
               let decoded = try? JSONDecoder().decode([String: Override].self, from: data) else {
             return [:]

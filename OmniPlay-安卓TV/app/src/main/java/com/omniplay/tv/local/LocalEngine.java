@@ -313,7 +313,10 @@ public final class LocalEngine {
                     .append(source.password).append('\u0001')
                     .append(source.enabled);
         }
-        preferences.edit().putString("sources", builder.toString()).apply();
+        // 媒体源清单是这台设备最重要的几条配置：用 apply() 异步落盘时，刚挂完目录就被
+        // 系统或用户杀掉进程，重启后清单是空的，海报墙整屏归零（文件其实还在库里）。
+        // 这份数据只有几行，同步写不值得省。
+        preferences.edit().putString("sources", builder.toString()).commit();
     }
 
     private static String defaultSourceName(String kind, String path) {
@@ -718,8 +721,24 @@ public final class LocalEngine {
     // ------------------------------------------------------------- library models
 
     /** 首页那个「N 部」用这条轻查询，不必为了一个数字把整库重读一遍。 */
+    /**
+     * 「所有影视 · N 部」里的那个 N。以前直接数 entity 表，于是条目在库里但一条文件都没挂上
+     * （媒体源停用、文件被删、只登记未入库）时，数字比墙上的海报多。这里与 {@link #libraryItems()}
+     * 用同一套口径：只数真的能在墙上出现的条目。
+     */
     public int libraryItemCount() {
-        return library.entityCount(enabledSourceIds());
+        java.util.Set<Integer> enabled = enabledSourceIds();
+        Map<Long, List<LocalMediaLibrary.StoredFile>> movieFiles = library.allFilesGrouped(false, enabled);
+        Map<Long, List<LocalMediaLibrary.StoredFile>> showFiles = library.allFilesGrouped(true, enabled);
+        int total = 0;
+        for (LocalMediaLibrary.StoredEntity entity : library.allEntities()) {
+            List<LocalMediaLibrary.StoredFile> files =
+                    entity.isTv ? showFiles.get(entity.id) : movieFiles.get(entity.id);
+            if (files != null && !files.isEmpty()) {
+                total++;
+            }
+        }
+        return total;
     }
 
     public List<Models.LibraryItem> libraryItems() {
@@ -1712,7 +1731,7 @@ public final class LocalEngine {
         /** 真的没转出来，是 NAS 那边写回媒体源的现成字幕（登记时占 900 号以后的轨位）。 */
         public final boolean external;
 
-        Sidecar(LocalMediaLibrary.SidecarRow row) {
+        public Sidecar(LocalMediaLibrary.SidecarRow row) {
             external = row.trackNumber >= 900;
             videoFileId = row.videoFileId;
             trackNumber = row.trackNumber;
@@ -1728,7 +1747,13 @@ public final class LocalEngine {
 
         /** 跑完或跑到中途都算能用：覆盖到的区间里字幕照常显示。 */
         public boolean usable() {
-            return "done".equals(status) || "partial".equals(status);
+            if (!"done".equals(status) && !"partial".equals(status)) {
+                return false;
+            }
+            // 自己转档出来的那条：抽出来是 0 条的（早期版本留下的、或者读挂过的残留行）别拿去挂，
+            // 挂上也是空白，还会把后面真能读的那条挡掉。媒体源里现成的外挂字幕是按需现读的，
+            // 库里没记条数，照旧放行。
+            return external || cueCount > 0;
         }
     }
 
@@ -1957,6 +1982,108 @@ public final class LocalEngine {
         return recognised;
     }
 
+    /** 一条从容器里直接抽出来的内封字幕。文本轨带 text，位图轨带 sup 字节流。 */
+    public static final class EmbeddedSubtitle {
+        public final String language;
+        public final String format;
+        public final String text;
+        public final byte[] sup;
+
+        EmbeddedSubtitle(String language, String format, String text, byte[] sup) {
+            this.language = language == null || language.isEmpty() ? "und" : language;
+            this.format = format;
+            this.text = text;
+            this.sup = sup;
+        }
+    }
+
+    /** 位图轨整轨抽进内存的上限：再大就该走转档落盘，别把电视撑爆。 */
+    private static final long MAX_INLINE_PGS_BYTES = 24L << 20;
+    private static final String INLINE_PGS_TOO_BIG = "omniplay-inline-pgs-too-big";
+
+    /**
+     * 容器里内封的字幕轨清单。mpv 还没报 track-list 的时候用它兜底，
+     * 字幕菜单里至少能看见有几条内封轨；只读 EBML 头，不碰数据块。
+     */
+    public List<com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.Track> embeddedSubtitleTracks(
+            String videoFileId, String relativePath) {
+        SubtitleSidecarService.Access access = sidecarAccessFor(videoFileId, relativePath);
+        if (access == null) {
+            return Collections.emptyList();
+        }
+        try {
+            return com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.tracks(access.open(relativePath));
+        } catch (Exception error) {
+            return Collections.emptyList();
+        }
+    }
+
+    /** 把容器里第 trackNumber 条字幕轨整个抽出来，交给播放页覆盖层直接画。 */
+    public EmbeddedSubtitle readEmbeddedSubtitle(
+            String videoFileId, String relativePath, int trackNumber) throws IOException {
+        SubtitleSidecarService.Access access = sidecarAccessFor(videoFileId, relativePath);
+        if (access == null) {
+            throw new IOException("这个媒体源现在读写不了。");
+        }
+        com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.Track track = null;
+        for (com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.Track candidate
+                : com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.tracks(access.open(relativePath))) {
+            if (candidate.trackNumber == trackNumber) {
+                track = candidate;
+            }
+        }
+        if (track == null) {
+            throw new IOException("这个文件里没有字幕轨 " + trackNumber + "。");
+        }
+        final List<com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.Cue>[] latest = new List[]{
+                new ArrayList<com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.Cue>()};
+        // 位图轨一边抽一边盯字节数，超了当场停下：整轨几百 MB 的 PGS 不该塞进内存，
+        // 那种交给后台转档落盘（可续跑），这里只负责能秒出的那些。
+        final long[] pgsBytes = {0L};
+        final boolean bitmap = track.isBitmap();
+        try {
+            com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.run(
+                    access.open(relativePath), trackNumber, 0L, 45, 0d, (cues, progress) -> {
+                        latest[0] = cues;
+                        if (!bitmap) {
+                            return;
+                        }
+                        long total = 0;
+                        for (com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.Cue cue : cues) {
+                            total += cue.pgsPacket == null ? 0 : cue.pgsPacket.length;
+                        }
+                        pgsBytes[0] = total;
+                        if (total > MAX_INLINE_PGS_BYTES) {
+                            throw new RuntimeException(INLINE_PGS_TOO_BIG);
+                        }
+                    });
+        } catch (RuntimeException oversize) {
+            if (!INLINE_PGS_TOO_BIG.equals(oversize.getMessage())) {
+                throw oversize;
+            }
+            throw new IOException("这条位图字幕整轨太大（" + (pgsBytes[0] >> 20) + " MB），先让它走后台转档。");
+        }
+        List<com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.Cue> cues = latest[0];
+        if (track.isBitmap()) {
+            java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+            long written = 0;
+            for (com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.Cue cue : cues) {
+                if (cue.pgsPacket == null) {
+                    continue;
+                }
+                written += cue.pgsPacket.length;
+                try {
+                    buffer.write(cue.pgsPacket);
+                } catch (IOException impossible) {
+                    throw new RuntimeException(impossible.getMessage(), impossible);
+                }
+            }
+            return new EmbeddedSubtitle(track.language, "sup", null, buffer.toByteArray());
+        }
+        return new EmbeddedSubtitle(track.language, track.format,
+                com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.serialize(track, cues), null);
+    }
+
     /** 转一条视频文件里最该看的那条字幕轨。可以在任何后台线程上调。 */
     public SidecarReport transcodeSidecar(String videoFileId, String relativePath) {
         SubtitleSidecarService.Access access = sidecarAccessFor(videoFileId, relativePath);
@@ -1977,8 +2104,29 @@ public final class LocalEngine {
             library.recordSidecar(row);
             return new SidecarReport(false, row.error);
         }
-        com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.Track track =
-                pickSubtitleTrack(tracks);
+        return transcribe(access, videoFileId, relativePath, pickSubtitleTrack(tracks));
+    }
+
+    /** 指定轨号转一条：播放页里用户点名要哪条内封字幕时走这条。 */
+    public SidecarReport transcodeSidecar(String videoFileId, String relativePath, int trackNumber) {
+        SubtitleSidecarService.Access access = sidecarAccessFor(videoFileId, relativePath);
+        if (access == null) {
+            return new SidecarReport(false, "这个媒体源现在读写不了。");
+        }
+        for (com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.Track candidate
+                : SubtitleSidecarService.probe(access, relativePath)) {
+            if (candidate.trackNumber == trackNumber) {
+                return transcribe(access, videoFileId, relativePath, candidate);
+            }
+        }
+        return new SidecarReport(false, "这个文件里没有字幕轨 " + trackNumber + "。");
+    }
+
+    private SidecarReport transcribe(
+            SubtitleSidecarService.Access access,
+            String videoFileId,
+            String relativePath,
+            com.omniplay.tv.subtitle.MatroskaSubtitleExtractor.Track track) {
         LocalMediaLibrary.SidecarRow row = new LocalMediaLibrary.SidecarRow();
         row.videoFileId = videoFileId;
         row.trackNumber = track.trackNumber;

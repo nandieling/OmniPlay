@@ -17,6 +17,8 @@ public interface PhoneHost {
 
     LocalPlayApi api();
 
+    com.omniplay.tv.local.LocalEngine engine();
+
     ImageLoader images();
 
     ExecutorService io();
@@ -26,7 +28,11 @@ public interface PhoneHost {
     /** 媒体源或资料变了：首页与当前详情页都要重新拉一遍。 */
     com.omniplay.tv.local.SavedConnections savedConnections();
 
+    /** 媒体源或资料变了：首页与当前详情页都要重新拉一遍。 */
     void refreshLibrary();
+
+    /** 挂载完就后台扫描刮削，进度写在首页顶部，不挡当前弹层。 */
+    void scanInBackground();
 
     void toast(String message);
 }

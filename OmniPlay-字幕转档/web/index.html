@@ -126,6 +126,28 @@
   /* 改过还没保存：把「保存策略」点亮，别让用户以为已经生效了 */
   #policyBtn.dirty { border-color: var(--accent); color: var(--accent); font-weight: 600; }
   .empty { padding: 34px 12px; text-align: center; color: var(--ink-3); }
+  /* 文件夹视图：按媒体库里真实的目录一层层点 */
+  .crumbs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; font-size: 13px; }
+  .crumbs button { padding: 3px 8px; font-size: 13px; }
+  .frows { display: flex; flex-direction: column; gap: 6px; }
+  .frow {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 9px 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .frow.dir { cursor: pointer; }
+  .frow:hover { border-color: var(--ink-3); }
+  .frow .name { font-weight: 600; word-break: break-all; }
+  .frow.dir .name::before { content: "\25B8 "; color: var(--ink-3); }
+  .frow .meta { color: var(--ink-2); font-size: 12px; }
+  .frow .subs { color: var(--ink-3); font-size: 12px; word-break: break-all; }
+  .frow .grow { flex: 1 1 auto; }
+  .badge {
+    display: inline-block; padding: 1px 6px; border-radius: 5px; font-size: 11px;
+    background: var(--chip); color: var(--ink-2); white-space: nowrap;
+  }
+  .badge.bd { color: #7a5cc0; }
+  .badge.iso { color: #3f8fb0; }
+  .subs b { color: var(--accent); font-weight: 600; }
   footer { color: var(--ink-3); font-size: 12px; margin-top: 12px; }
   dialog {
     border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink);
@@ -150,6 +172,10 @@
   <span class="chip" id="version">—</span>
   <span class="chip" id="ffmpeg">—</span>
   <span class="chip" id="roots">—</span>
+  <div class="seg" id="viewSeg" title="转档队列按任务列，文件夹按媒体库里真实的目录列">
+    <button data-view="queue" aria-pressed="true">转档队列</button>
+    <button data-view="folder">文件夹</button>
+  </div>
   <span class="grow"></span>
   <button id="tokenBtn" title="设置了 SIDECAR_TOKEN 时才需要">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M17 8.5 20.5 5v-2H17v2h-2.5"/></svg>
@@ -187,7 +213,7 @@
     <span class="grow"></span>
   </div>
 
-  <div class="bar">
+  <div class="bar" id="queueBar">
     <div class="seg" id="resSeg" title="只看某个分辨率以上的片子">
       <button data-r="" aria-pressed="true">全部分辨率</button>
       <button data-r="uhd">4K</button>
@@ -203,14 +229,29 @@
     </button>
   </div>
 
-  <table>
-    <thead>
-      <tr><th>文件</th><th>分辨率</th><th>字幕轨</th><th>状态</th><th>进度</th><th>产物</th><th>更新</th><th></th></tr>
-    </thead>
-    <tbody id="rows"></tbody>
-  </table>
-  <div class="empty" id="empty" hidden>还没有任务。点「扫描媒体库」，或者从电视端点一次转档。</div>
-  <div class="pager" id="pager"></div>
+  <div id="queueView">
+    <table>
+      <thead>
+        <tr><th>文件</th><th>分辨率</th><th>字幕轨</th><th>状态</th><th>进度</th><th>产物</th><th>更新</th><th></th></tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" hidden>还没有任务。点「扫描媒体库」，或者从电视端点一次转档。</div>
+    <div class="pager" id="pager"></div>
+  </div>
+
+  <div id="folderView" hidden>
+    <div class="bar">
+      <div class="crumbs" id="crumbs"></div>
+      <input type="search" id="fq" placeholder="筛这一层的名字">
+      <span class="grow"></span>
+      <button id="folderScanBtn" title="只扫这一层目录，不动别的">扫描这一层</button>
+      <button id="folderRunBtn" class="primary" title="把这一层里待转的排到队首">转这一层</button>
+    </div>
+    <div class="frows" id="frows"></div>
+    <div class="empty" id="fempty" hidden>这一层里没有媒体文件。</div>
+    <div class="pager" id="froot"></div>
+  </div>
   <footer id="foot"></footer>
 </main>
 
@@ -230,6 +271,7 @@
 const state = {
   jobs: [], counts: {}, filter: "all", res: "", q: "", health: null, scanning: false,
   page: 1, pages: 1, total: 0, perPage: 50,
+  view: "queue", path: "", fq: "", tree: null,
 };
 const TOKEN_KEY = "omniplay.sidecar.token";
 
@@ -489,19 +531,110 @@ function jobsURL() {
   return "/api/jobs?" + params.toString();
 }
 
+function treeURL() {
+  const params = new URLSearchParams();
+  params.set("path", state.path || "");
+  if (state.fq.trim()) params.set("q", state.fq.trim());
+  return "/api/tree?" + params.toString();
+}
+
+/** 文件夹视图：一行一个目录或一个媒体文件，字幕文件直接摊在行里。 */
+function statusPill(job) {
+  if (!job) return '<span class="badge">未排队</span>';
+  const pair = STATUS[job.status] || [job.status, ""];
+  return '<span class="pill ' + pair[1] + '">' + esc(pair[0]) + "</span>"
+    + (job.detail ? ' <span class="subs">' + esc(job.detail) + "</span>" : "");
+}
+
+function renderCrumbs() {
+  const box = document.getElementById("crumbs");
+  const tree = state.tree;
+  if (!tree) { box.innerHTML = ""; return; }
+  const parts = ['<button data-nav="">媒体库</button>'];
+  let trail = "";
+  for (const part of String(tree.path || "").split("/").filter(Boolean)) {
+    trail = trail ? trail + "/" + part : part;
+    parts.push('<span class="muted">/</span><button data-nav="' + esc(trail) + '">'
+      + esc(part) + "</button>");
+  }
+  box.innerHTML = parts.join("");
+}
+
+function renderFolder() {
+  const tree = state.tree;
+  const host = document.getElementById("frows");
+  renderCrumbs();
+  if (!tree) { host.innerHTML = ""; return; }
+  const rows = [];
+  for (const dir of tree.dirs || []) {
+    const bits = [];
+    if (dir.videos) bits.push(dir.videos + " 个媒体文件");
+    if (dir.subdirs) bits.push(dir.subdirs + " 个子目录");
+    const badge = dir.disc
+      ? '<span class="badge ' + (dir.kind === "iso" ? "iso" : "bd") + '">蓝光盘</span>' : "";
+    rows.push('<div class="frow dir" data-nav="' + esc(dir.path) + '"><span class="name">'
+      + esc(dir.name) + "</span>" + badge + '<span class="meta">' + esc(bits.join(" · "))
+      + '</span><span class="grow"></span>' + (dir.disc ? statusPill(dir.job) : "") + "</div>");
+  }
+  for (const file of tree.files || []) {
+    const subs = (file.subtitles || []).map((one) =>
+      "<b>" + esc(one.language) + "." + esc(one.format) + "</b> " + bytes(one.size)).join("　");
+    const status = (file.job || {}).status;
+    const act = '<button data-retry="' + esc(file.path) + '">'
+      + (status === "done" ? "重转" : (status === "pending" ? "排队中" : "转")) + "</button>";
+    rows.push('<div class="frow"><span class="name">' + esc(file.name) + "</span>"
+      + (file.kind === "iso" ? '<span class="badge iso">ISO</span>' : "")
+      + '<span class="meta">' + bytes(file.size)
+      + (file.job && file.job.height ? " · " + Number(file.job.height) + "p" : "") + "</span>"
+      + '<span class="grow"></span><span class="subs">'
+      + (subs ? "已挂字幕 " + subs : '<span class="muted">还没有外挂字幕</span>') + "</span>"
+      + statusPill(file.job) + act + "</div>");
+  }
+  host.innerHTML = rows.join("");
+  document.getElementById("fempty").hidden = rows.length > 0;
+  const disc = tree.disc_job;
+  const discNote = disc
+    ? '<span>蓝光盘整体 <span class="pill ' + ((STATUS[disc.status] || [, ""])[1] || "") + '">'
+      + esc((STATUS[disc.status] || [disc.status, ""])[0]) + "</span> "
+      + esc(disc.language || "") + "." + esc(disc.format || "")
+      + (disc.detail ? " · " + esc(disc.detail) : "") + "</span> " : "";
+  document.getElementById("froot").innerHTML = discNote + '<span class="grow"></span><span>'
+    + (tree.dir_total || 0) + " 个目录 · " + (tree.file_total || 0) + " 个媒体文件"
+    + (tree.truncated ? "（这一层条目多，先列前 300 条）" : "")
+    + (tree.writable === false ? " · 这一层只读，写不进字幕" : "") + "</span>";
+}
+
+function setView(view) {
+  state.view = view;
+  document.getElementById("queueView").hidden = view !== "queue";
+  document.getElementById("queueBar").hidden = view !== "queue";
+  document.getElementById("folderView").hidden = view !== "folder";
+  for (const node of document.querySelectorAll("#viewSeg button")) {
+    node.setAttribute("aria-pressed", String(node.dataset.view === view));
+  }
+  refresh().catch(() => {});
+}
+
 async function refresh() {
-  const [health, jobs] = await Promise.all([api("/api/health"), api(jobsURL())]);
+  const health = await api("/api/health");
   state.health = health;
+  if (health.policy) syncPolicyInputs(health.policy);
+  document.getElementById("scanBtn").disabled = state.scanning;
+  renderHeader();
+  renderState();
+  renderDisks();
+  if (state.view === "folder") {
+    state.tree = await api(treeURL());
+    renderFolder();
+    return;
+  }
+  const jobs = await api(jobsURL());
   state.counts = jobs.counts;
   state.jobs = jobs.jobs;
   state.total = Number(jobs.total || 0);
   state.pages = Number(jobs.pages || 1);
   state.page = Math.min(state.page, state.pages);
-  if (health.policy) syncPolicyInputs(health.policy);
-  document.getElementById("scanBtn").disabled = state.scanning;
-  renderHeader();
   renderTiles();
-  renderState();
   renderRows();
 }
 
@@ -618,6 +751,67 @@ document.getElementById("rows").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-retry]");
   if (button) enqueue(button.dataset.retry);
 });
+async function scanFolder() {
+  try {
+    const result = await api("/api/scan", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: state.path || "" }),
+    });
+    toast(result.enqueued ? "这一层新排了 " + result.enqueued + " 条。" : "这一层没有要转的。");
+    await refresh();
+  } catch (error) {
+    if (error.message !== "auth") toast("扫描失败：" + error.message);
+  }
+}
+
+async function runFolder() {
+  try {
+    const result = await api("/api/folder/run", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: state.path || "" }),
+    });
+    toast(result.count ? "已把 " + result.count + " 条排到队首。"
+                       : "这一层没有待转的；蓝光盘和字幕都齐了，或者还没扫描过。");
+    await refresh();
+  } catch (error) {
+    if (error.message !== "auth") toast("失败了：" + error.message);
+  }
+}
+
+document.getElementById("viewSeg").addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (button) setView(button.dataset.view);
+});
+document.getElementById("crumbs").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-nav]");
+  if (!button) return;
+  state.path = button.dataset.nav || "";
+  refresh().catch(() => {});
+});
+document.getElementById("frows").addEventListener("click", (event) => {
+  const retry = event.target.closest("button[data-retry]");
+  if (retry) {
+    if (!retry.disabled) {
+      retry.disabled = true;
+      enqueue(retry.dataset.retry);
+    }
+    return;
+  }
+  const nav = event.target.closest("[data-nav]");
+  if (nav) {
+    state.path = nav.dataset.nav;
+    refresh().catch(() => {});
+  }
+});
+document.getElementById("folderScanBtn").addEventListener("click", scanFolder);
+document.getElementById("folderRunBtn").addEventListener("click", runFolder);
+let folderSearchTimer = 0;
+document.getElementById("fq").addEventListener("input", (event) => {
+  state.fq = event.target.value;
+  clearTimeout(folderSearchTimer);
+  folderSearchTimer = setTimeout(() => refresh().catch(() => {}), 350);
+});
+
 document.getElementById("tokenBtn").addEventListener("click", () => openToken());
 document.getElementById("tokenClose").addEventListener("click",
   () => document.getElementById("tokenDialog").close());

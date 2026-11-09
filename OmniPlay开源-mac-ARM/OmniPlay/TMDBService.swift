@@ -102,7 +102,8 @@ struct TMDBPersonInfo: Codable, Equatable {
 }
 
 // TMDB 人物作品条目（标题 + 评分 + 年份/日期 + TMDB id），用于文件夹详情页简介
-struct TMDBFilmographyItem: Codable, Equatable {
+/// 非隔离：随 `PersonProfile` 一起在 GRDB 后台闭包里解码。
+nonisolated struct TMDBFilmographyItem: Codable, Equatable {
     var title: String
     var rating: Double?
     var year: Int?

@@ -174,6 +174,24 @@ public final class Http {
         }
     }
 
+    private static boolean hasAuthorization(Map<String, String> headers) {
+        if (headers == null) {
+            return false;
+        }
+        for (String key : headers.keySet()) {
+            if (key != null && key.equalsIgnoreCase("Authorization")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 用 {@link java.util.Base64}：minSdk 26 起有，JVM 离线校验也能直接跑。 */
+    private static String basicAuth(String userInfo) {
+        return "Basic " + java.util.Base64.getEncoder().encodeToString(
+                userInfo.getBytes(StandardCharsets.UTF_8));
+    }
+
     private static void writeRequest(OutputStream output, Target target, String method,
                                      Map<String, String> headers, Body body) throws IOException {
         StringBuilder request = new StringBuilder(256);
@@ -187,6 +205,11 @@ public final class Http {
                     request.append(header.getKey()).append(": ").append(header.getValue()).append("\r\n");
                 }
             }
+        }
+        String inherited = target.userInfo.isEmpty() || hasAuthorization(headers)
+                ? null : basicAuth(target.userInfo);
+        if (inherited != null) {
+            request.append("Authorization: ").append(inherited).append("\r\n");
         }
         if (body != null) {
             request.append("Content-Length: ").append(body.length()).append("\r\n");
@@ -376,13 +399,17 @@ public final class Http {
         final boolean tls;
         final String authority;
         final String requestTarget;
+        /** URL 里的账号密码（已解回原样），没有就是空串。 */
+        final String userInfo;
 
-        Target(String host, int port, boolean tls, String authority, String requestTarget) {
+        Target(String host, int port, boolean tls, String authority, String requestTarget,
+               String userInfo) {
             this.host = host;
             this.port = port;
             this.tls = tls;
             this.authority = authority;
             this.requestTarget = requestTarget;
+            this.userInfo = userInfo == null ? "" : userInfo;
         }
 
         static Target parse(String url) throws IOException {
@@ -412,7 +439,31 @@ public final class Http {
             if (port != (tls ? 443 : 80)) {
                 authority += ":" + port;
             }
-            return new Target(host, port, tls, authority, encodePath(path));
+            return new Target(host, port, tls, authority, encodePath(path), userInfoOf(parsed));
+        }
+
+        /**
+         * {@code streamUrl()} 会把账号密码拼进 URL 的 userinfo 交给 mpv——mpv 认这套，我们这个走
+         * socket 的客户端原先解析完就丢了，请求等于匿名发出去，受保护的 WebDAV 直接回 401。
+         * 账号密码是按 URL 编码拼进去的（密码可能带 {@code :} {@code @} {@code /}），解回原样再算 Basic。
+         */
+        static String userInfoOf(URL parsed) {
+            String raw = parsed.getUserInfo();
+            if (raw == null || raw.isEmpty()) {
+                return "";
+            }
+            int split = raw.indexOf(':');
+            String user = split < 0 ? raw : raw.substring(0, split);
+            String password = split < 0 ? "" : raw.substring(split + 1);
+            return decodeComponent(user) + ":" + decodeComponent(password);
+        }
+
+        private static String decodeComponent(String value) {
+            try {
+                return java.net.URLDecoder.decode(value, "UTF-8");
+            } catch (Exception ignored) {
+                return value;
+            }
         }
 
         private static String encodePath(String path) {

@@ -27,13 +27,21 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "1.0"
+try:                                  # 蓝光盘支持是加分项，读不到也别拖累常规转档
+    import bluray
+except Exception:                     # noqa: BLE001 - 任何 import 意外都降级成「不支持蓝光」
+    bluray = None
+
+VERSION = "1.1"
 USER_AGENT = "OmniPlay-Sidecar/" + VERSION
 
 # 主动扫库只碰这些容器。蓝光分卷（.m2ts/.ts）和 ISO 由 TV 端点名指定——
 # 一盘蓝光里哪条是正片只有 TV 端的扫描逻辑知道，NAS 不该把整盘都抽一遍。
 WALK_SUFFIXES = {".mkv", ".webm", ".mp4", ".m4v"}
-PUSH_SUFFIXES = {".m2ts", ".mts", ".ts", ".iso"}
+# 蓝光盘：盘目录（里面有 BDMV/）和整盘镜像都自己扫，正片由 bluray.pick_main 认。
+DISC_SUFFIXES = {".iso", ".bin"}
+CANDIDATE_SUFFIXES = WALK_SUFFIXES | DISC_SUFFIXES
+PUSH_SUFFIXES = {".m2ts", ".mts", ".ts", ".iso", ".bin"}
 
 # 字幕轨 -> 目标格式。文本轨统一收成 srt/ass，PGS 原样封成 .sup。
 TEXT_CODECS = {
@@ -56,6 +64,8 @@ LANGUAGE_ALIASES = {
 }
 
 SKIPPED_DIRS = {"lost+found", "lost & found", "@eadir"}
+MAX_TREE_ENTRIES = 300          # 文件夹视图一次最多列这么多条目
+LIST_SUFFIXES = CANDIDATE_SUFFIXES | PUSH_SUFFIXES   # 文件夹视图要看得见蓝光分卷
 
 # ffmpeg -progress 吐的那些字段，认得出来的才当进度看，其余的行留着当报错用。
 PROGRESS_KEYS = {"frame", "fps", "q", "size", "size_lbr", "bitrate", "time",
@@ -132,7 +142,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     attempts    INTEGER,
     updated_at  REAL,
     width       INTEGER,
-    height      INTEGER
+    height      INTEGER,
+    kind        TEXT,
+    disc_path   TEXT,
+    playlist    INTEGER
 );
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -142,7 +155,8 @@ CREATE TABLE IF NOT EXISTS settings (
 
 COLUMNS = ("abs_path", "out_path", "video_size", "video_mtime", "track_index",
            "codec", "language", "format", "status", "detail", "covered",
-           "out_size", "attempts", "updated_at", "width", "height")
+           "out_size", "attempts", "updated_at", "width", "height",
+           "kind", "disc_path", "playlist")
 
 # 列表页按分辨率分类：没有视频轨或没探出来的归进 unknown。
 RES_GROUP = ("CASE WHEN height IS NULL OR height = 0 THEN 'unknown' "
@@ -175,9 +189,11 @@ class Store:
     def migrate(self):
         """老的状态表没有分辨率两列，就地补上，别逼用户删库重扫。"""
         have = {row[1] for row in self.conn.execute("PRAGMA table_info(jobs)")}
-        for column in ("width", "height"):
+        for column, decl in (("width", "INTEGER"), ("height", "INTEGER"),
+                             ("kind", "TEXT"), ("disc_path", "TEXT"),
+                             ("playlist", "INTEGER")):
             if column not in have:
-                self.conn.execute("ALTER TABLE jobs ADD COLUMN %s INTEGER" % column)
+                self.conn.execute("ALTER TABLE jobs ADD COLUMN %s %s" % (column, decl))
 
     def row(self, path):
         with self.lock:
@@ -218,6 +234,21 @@ class Store:
                 "SELECT path FROM jobs WHERE status = 'pending' ORDER BY updated_at LIMIT ?",
                 (limit,))
             return [item[0] for item in cursor.fetchall()]
+
+    def many(self, paths):
+        """按相对路径批量取任务行，文件夹视图用它一次对上整目录的状态。"""
+        paths = [item for item in paths if item]
+        if not paths:
+            return {}
+        found = {}
+        with self.lock:
+            for chunk in [paths[i:i + 400] for i in range(0, len(paths), 400)]:
+                cursor = self.conn.execute(
+                    "SELECT * FROM jobs WHERE path IN (%s)" % ", ".join(["?"] * len(chunk)),
+                    chunk)
+                for item in cursor.fetchall():
+                    found[item["path"]] = dict(item)
+        return found
 
     def recent(self, limit):
         with self.lock:
@@ -292,6 +323,8 @@ class Service:
         self.priority_lock = threading.Lock()
         self.wake = threading.Event()
         self.bluray = False
+        self.disc_reader = False
+        self.iso_tool = None
         self.stats = {"scans": 0, "converted": 0, "failed": 0}
         self.scanning = False
         self.started_at = time.time()
@@ -421,6 +454,9 @@ class Service:
                 raise SystemExit("找不到 %s，这个服务离不开它。" % self.tool(tool))
         probe = self.run([self.tool("ffmpeg"), "-hide_banner", "-demuxers"])
         self.bluray = " bluray " in (" " + probe[1].replace("\n", " ") + " ")
+        # 盘目录（BDMV/）靠自己的解析器，不吃 libbluray；ISO 才需要 ffmpeg 或外部工具。
+        self.disc_reader = bluray is not None
+        self.iso_tool = bluray.iso_tool() if bluray else None
 
     def tool(self, name):
         return getattr(self.cfg, name)
@@ -442,6 +478,8 @@ class Service:
             "ffmpeg": self.tool("ffmpeg"),
             "ffprobe": self.tool("ffprobe"),
             "bluray": self.bluray,
+            "blurayDiscs": self.disc_reader,
+            "isoTool": self.iso_tool,
             "roots": roots,
             "languages": self.cfg.langs,
             "counts": self.store.summary(),
@@ -481,12 +519,17 @@ class Service:
 
     # -- 扫描 -------------------------------------------------------------- #
 
-    def walk(self):
-        """走一遍媒体库，把该转的排进队列。已有的 sidecar 一眼跳过，不碰文件内容。"""
+    def walk(self, only=None):
+        """走一遍媒体库，把该转的排进队列。已有的 sidecar 一眼跳过，不碰文件内容。
+
+        ``only`` 给定时只走这一个目录（页面上的「扫描这个文件夹」）。蓝光盘目录
+        整盘算一条任务，识别到就把 BDMV/ 那些盘内结构剪掉，不再逐卷重复排队。
+        """
         self.stats["scans"] += 1
         self.scanning = True
         enqueued = 0
-        for root in self.cfg.roots:
+        roots = [only] if only else list(self.cfg.roots)
+        for root in roots:
             if not os.path.isdir(root):
                 log("跳过没有挂载的媒体库：%s" % root)
                 continue
@@ -494,9 +537,15 @@ class Service:
                 subdirs[:] = [name for name in subdirs
                               if not name.startswith(".") and not name.startswith("_")
                               and name.lower() not in SKIPPED_DIRS]
+                if self.disc_reader and "bdmv" in {name.lower() for name in subdirs}:
+                    disc = bluray.disc_at(directory) if bluray else None
+                    if disc is not None:
+                        subdirs[:] = []          # 盘内结构不再往下钻
+                        if self.consider_disc(disc):
+                            enqueued += 1
                 lower = {name.lower() for name in names}
                 for name in names:
-                    if not name.lower().endswith(tuple(WALK_SUFFIXES)):
+                    if not name.lower().endswith(tuple(CANDIDATE_SUFFIXES)):
                         continue
                     abs_path = os.path.join(directory, name)
                     if self.consider(abs_path, lower):
@@ -504,6 +553,130 @@ class Service:
         self.scanning = False
         log("扫描完成：这一轮排进队列 %d 条。" % enqueued)
         return enqueued
+
+    # -- 蓝光盘 ------------------------------------------------------------ #
+
+    def disc_key(self, disc):
+        """盘目录的相对键。媒体库根直接就是盘根时 to_relative 会给 None，兜个底。"""
+        directory = disc["path"]
+        relative = self.to_relative(directory)
+        if relative is not None:
+            return relative
+        absolute = os.path.abspath(directory)
+        for root in self.cfg.roots:
+            if os.path.abspath(root) == absolute:
+                return "./" + os.path.basename(absolute.rstrip(os.sep))
+        return None
+
+    def consider_disc(self, disc):
+        """一张蓝光盘排一条任务：正片由 bluray.pick_main 认，每个分卷各写一份同名 .sup。"""
+        relative = self.disc_key(disc)
+        if relative is None:
+            return False
+        directory = disc["path"]
+        try:
+            stat = os.stat(directory)
+        except OSError:
+            self.store.upsert(path=relative, abs_path=directory, kind="bd",
+                              status="failed", detail="盘目录读不到了。")
+            return False
+        known = self.store.row(relative)
+        if (known and known["status"] in TERMINAL_STATUSES
+                and known["video_size"] == stat.st_size
+                and known["video_mtime"] == int(stat.st_mtime)):
+            return False
+        if not self.disc_reader:
+            self.store.upsert(path=relative, abs_path=directory, kind="bd",
+                              status="unsupported", detail="服务器上的 bluray.py 读不到了。",
+                              video_size=stat.st_size, video_mtime=int(stat.st_mtime))
+            return False
+        playlist, segments = bluray.pick_main(disc, self.cfg.langs, normalize_language)
+        if not segments:
+            self.store.upsert(path=relative, abs_path=directory, kind="bd",
+                              status="unsupported", detail="认不出这张蓝光盘的正片分卷。",
+                              video_size=stat.st_size, video_mtime=int(stat.st_mtime))
+            return False
+        total = 0
+        for path in segments:
+            try:
+                total += os.path.getsize(path)
+            except OSError:
+                pass
+        if self.disc_sidecars_there(segments):
+            self.store.upsert(path=relative, abs_path=directory, kind="bd",
+                              status="skipped", detail="每个分卷都已经挂着外挂字幕了。",
+                              video_size=stat.st_size, video_mtime=int(stat.st_mtime))
+            return False
+        # 分辨率只探第一个分卷，够页面按 4K/1080p 分类，也够 min_height 策略用
+        probe = self.plan(segments[0]) or {}
+        height = int(probe.get("height") or 0)
+        width = int(probe.get("width") or 0)
+        floor = self.policy()["min_height"]
+        if floor and height and height < floor:
+            self.store.upsert(path=relative, abs_path=directory, kind="bd",
+                              status="skipped", detail="只有 %dp，兼容模式够用，按策略不转。" % height,
+                              video_size=stat.st_size, video_mtime=int(stat.st_mtime),
+                              width=width, height=height)
+            return False
+        pid, language, note, _index = self.disc_subtitle(playlist, segments)
+        track = self.pick_disc_track(probe.get("tracks") or [])
+        self.store.upsert(path=relative, abs_path=directory, kind="bd",
+                          disc_path=directory,
+                          playlist=(playlist or {}).get("id"),
+                          out_path=sidecar_path(segments[0], language, "sup"),
+                          video_size=stat.st_size, video_mtime=int(stat.st_mtime),
+                          # 盘任务这里存的是位图字幕的 PID，不是容器内的字幕轨序号
+                          track_index=pid or (track or {}).get("index", 0),
+                          codec=(track or {}).get("codec") or "hdmv_pgs_subtitle",
+                          language=language, format="sup",
+                          status="pending", detail=note, covered=0.0, out_size=0,
+                          width=width, height=height)
+        return True
+
+    def disc_subtitle(self, playlist, segments):
+        """定这张盘抽哪一条位图字幕：MPLS 声明的语言 ∩ PMT 实际有的 PID，再按偏好排。
+
+        返回 ``(pid, 语言, 说明, 位次)``。两边各有一半信息——MPLS 有语言但 rip 后 PID
+        位置不稳，PMT 有准确 PID 却没有语言，取交集才敢把文件命名成 ``.zh.sup``。位次留给
+        后面的分卷用：每个 clip 有自己的 PMT，正片跨多个分卷时字幕 PID 常常不一样。
+        """
+        entries = []
+        if segments:
+            try:
+                entries = bluray.pmt_subtitle_pids(segments[0])
+            except OSError:
+                entries = []
+        choice = bluray.choose_subtitle(playlist, entries, self.cfg.langs, normalize_language)
+        language = normalize_language(choice.get("lang")) or "und"
+        if language in ("", "und") and self.cfg.langs:
+            language = self.cfg.langs[0]
+        return (choice.get("pid"), language, choice.get("note") or "",
+                choice.get("index"))
+
+    def pick_disc_track(self, tracks):
+        """盘里挑一条字幕：先要偏好语言的位图轨，其次任意位图轨。"""
+        wanted = set(self.cfg.langs or [])
+        bitmaps = [item for item in tracks if item.get("format") == "sup"]
+        for item in bitmaps:
+            if item.get("language") in wanted:
+                return item
+        if bitmaps:
+            return bitmaps[0]
+        for item in tracks:
+            if item.get("language") in wanted:
+                return item
+        return tracks[0] if tracks else None
+
+    def disc_sidecars_there(self, segments):
+        """正片每个分卷旁边都已经挂着外挂字幕？那整盘就不用再转了。"""
+        if not segments:
+            return False
+        directory = os.path.dirname(segments[0])
+        try:
+            names = {name.lower() for name in os.listdir(directory)}
+        except OSError:
+            return False
+        return all(self.sidecar_already_there(path, names) for path in segments)
 
     def consider(self, abs_path, sibling_names=None):
         """决定一个视频要不要转，并把结论写进状态表。返回是否新排了任务。"""
@@ -528,11 +701,48 @@ class Service:
                               detail="已经有可用的外挂字幕了。",
                               video_size=stat.st_size, video_mtime=int(stat.st_mtime))
             return False
-        if os.path.splitext(abs_path)[1].lower() == ".iso" and not self.bluray:
-            self.store.upsert(path=relative, abs_path=abs_path, status="unsupported",
-                              detail="ISO 需要 ffmpeg 带 libbluray 才读得了，这个镜像没有。",
-                              video_size=stat.st_size, video_mtime=int(stat.st_mtime))
-            return False
+        if os.path.splitext(abs_path)[1].lower() in DISC_SUFFIXES:
+            if not self.disc_reader:
+                self.store.upsert(path=relative, abs_path=abs_path, status="unsupported",
+                                  detail="服务器上的 bluray.py 读不到了，ISO 先跳过。",
+                                  video_size=stat.st_size, video_mtime=int(stat.st_mtime))
+                return False
+            if not self.bluray and not self.iso_tool:
+                self.store.upsert(path=relative, abs_path=abs_path, status="unsupported",
+                                  detail="读 ISO 要么 ffmpeg 带 libbluray，要么装 isoinfo / xorriso / 7z。",
+                                  video_size=stat.st_size, video_mtime=int(stat.st_mtime))
+                return False
+            plan = self.plan(abs_path) or {"tracks": [], "reason": "", "width": 0, "height": 0}
+            if not plan["tracks"]:
+                # 没有 libbluray 时 ffprobe 读不开 ISO，交给执行阶段用外部工具拆盘
+                if self.bluray:
+                    self.store.upsert(path=relative, abs_path=abs_path, kind="iso",
+                                      status="unsupported", detail=plan["reason"],
+                                      video_size=stat.st_size, video_mtime=int(stat.st_mtime))
+                    return False
+                plan = {"tracks": [{"index": 0, "codec": "hdmv_pgs_subtitle",
+                                    "language": self.cfg.langs[0] if self.cfg.langs else "und",
+                                    "format": "sup"}], "width": 0, "height": 0}
+            height = int(plan.get("height") or 0)
+            width = int(plan.get("width") or 0)
+            floor = self.policy()["min_height"]
+            if floor and height and height < floor:
+                self.store.upsert(path=relative, abs_path=abs_path, kind="iso",
+                                  status="skipped",
+                                  detail="只有 %dp，兼容模式够用，按策略不转。" % height,
+                                  video_size=stat.st_size, video_mtime=int(stat.st_mtime),
+                                  width=width, height=height)
+                return False
+            track = self.pick_disc_track(plan["tracks"]) or plan["tracks"][0]
+            self.store.upsert(path=relative, abs_path=abs_path, kind="iso",
+                              disc_path=abs_path,
+                              out_path=sidecar_path(abs_path, track["language"], track["format"]),
+                              video_size=stat.st_size, video_mtime=int(stat.st_mtime),
+                              track_index=track["index"], codec=track["codec"],
+                              language=track["language"], format=track["format"],
+                              status="pending", detail="", covered=0.0, out_size=0,
+                              width=width, height=height)
+            return True
         plan = self.plan(abs_path)
         if plan is None:
             self.store.upsert(path=relative, abs_path=abs_path, status="failed",
@@ -577,6 +787,150 @@ class Service:
             if len(parts) == 2 and parts[1] in ("srt", "ass", "sup") and parts[0]:
                 return True
         return False
+
+    # -- 文件夹视图 -------------------------------------------------------- #
+
+    def tree(self, path="", needle=""):
+        """按真实目录列媒体库：一层层点进去看单集文件和已经转好的字幕。
+
+        只列当前这一层（每个子目录多一次列举用来给计数），库再大也不会一次爬完；
+        蓝光盘目录整盘算一条，进度直接对上状态表里的那一行。
+        """
+        needle = (needle or "").strip().lower()
+        absolute = self.to_absolute(path) if path else None
+        if path and absolute is None:
+            return {"error": "这个目录不在媒体库里。", "dirs": [], "files": []}
+        if absolute is None:
+            absolute = os.path.abspath(self.cfg.roots[0]) if self.cfg.roots else "/"
+        if not os.path.isdir(absolute):
+            return {"error": "这个目录读不到了。", "dirs": [], "files": []}
+        try:
+            with os.scandir(absolute) as handle:
+                entries = sorted(list(handle), key=lambda item: item.name.lower())
+        except OSError as error:
+            return {"error": "读不了这个目录：%s" % error, "dirs": [], "files": []}
+        names = [item.name for item in entries]
+        dirs = []
+        files = []
+        keyed = []
+        for item in entries:
+            if item.name.startswith(".") or item.name.startswith("_"):
+                continue
+            if item.name.lower() in SKIPPED_DIRS:
+                continue
+            try:
+                is_dir = item.is_dir()
+            except OSError:
+                continue
+            if is_dir:
+                disc = bluray.disc_at(item.path) if (bluray and self.disc_reader) else None
+                videos = subdirs = 0
+                try:
+                    with os.scandir(item.path) as kids:
+                        for kid in kids:
+                            try:
+                                if kid.is_dir():
+                                    subdirs += 1
+                                elif kid.name.lower().endswith(tuple(LIST_SUFFIXES)):
+                                    videos += 1
+                            except OSError:
+                                pass
+                except OSError:
+                    pass
+                relative = self.to_relative(item.path)
+                dirs.append({"name": item.name, "path": relative, "videos": videos,
+                             "subdirs": subdirs, "disc": disc is not None,
+                             "kind": (disc or {}).get("kind")})
+                if disc is not None and relative:
+                    keyed.append(relative)
+                continue
+            suffix = os.path.splitext(item.name)[1].lower()
+            if suffix not in LIST_SUFFIXES:
+                continue
+            try:
+                size = item.stat().st_size
+            except OSError:
+                size = 0
+            relative = self.to_relative(item.path)
+            if relative:
+                keyed.append(relative)
+            stem = os.path.splitext(item.name)[0].lower() + "."
+            subs = []
+            for name in names:
+                low = name.lower()
+                if not low.startswith(stem):
+                    continue
+                parts = low[len(stem):].split(".")
+                if len(parts) != 2 or parts[1] not in ("srt", "ass", "sup") or not parts[0]:
+                    continue
+                try:
+                    sub_size = os.path.getsize(os.path.join(absolute, name))
+                except OSError:
+                    sub_size = 0
+                subs.append({"name": name, "language": parts[0],
+                             "format": parts[1], "size": sub_size})
+            files.append({"name": item.name, "path": relative, "size": size,
+                          "kind": "iso" if suffix in DISC_SUFFIXES else "video",
+                          "subtitles": sorted(subs, key=lambda one: one["name"].lower())})
+        if needle:
+            dirs = [one for one in dirs if needle in one["name"].lower()]
+            files = [one for one in files if needle in one["name"].lower()]
+        rows = self.store.many(keyed)
+        counts = {}
+        for item in files + [one for one in dirs if one["disc"]]:
+            job = rows.get(item["path"])
+            item["job"] = None if not job else {
+                key: job.get(key) for key in ("status", "kind", "language", "format",
+                                              "detail", "covered", "out_size", "height",
+                                              "width", "updated_at")}
+            status = (job or {}).get("status") or "unknown"
+            counts[status] = counts.get(status, 0) + 1
+        # 站在盘里的任何一层，都把整盘那一行的进度带上，页面才不会「看起来没排队」
+        disc_job = None
+        if bluray is not None and self.disc_reader:
+            probe = absolute
+            for _ in range(6):
+                above_dir = os.path.dirname(probe.rstrip(os.sep) or os.sep)
+                if not above_dir or above_dir == probe:
+                    break
+                if bluray.is_disc_directory(above_dir):
+                    disc_job = self.store.row(self.to_relative(above_dir))
+                    break
+                probe = above_dir
+        if disc_job:
+            disc_job = {key: disc_job.get(key) for key in
+                        ("status", "kind", "language", "format", "detail", "covered",
+                         "out_size", "path")}
+        relative_here = self.to_relative(absolute)
+        parent = None
+        above = os.path.dirname(absolute.rstrip(os.sep) or os.sep)
+        if relative_here:
+            parent = self.to_relative(above)
+        limited = files[:MAX_TREE_ENTRIES]
+        return {"root": os.path.abspath(self.cfg.roots[0]) if self.cfg.roots else "/",
+                "path": relative_here, "abs": absolute, "parent": parent,
+                "writable": self.writable(absolute), "counts": counts,
+                "dirs": dirs[:MAX_TREE_ENTRIES], "files": limited,
+                "disc_job": disc_job,
+                "dir_total": len(dirs), "file_total": len(files),
+                "truncated": len(files) > MAX_TREE_ENTRIES or len(dirs) > MAX_TREE_ENTRIES}
+
+    def enqueue_folder(self, path):
+        """把这一层里待转和失败过的排到队首：页面上的「转这个文件夹」。"""
+        listing = self.tree(path)
+        picked = [one["path"] for one in listing.get("files", []) if one.get("path")]
+        picked += [one["path"] for one in listing.get("dirs", [])
+                   if one.get("disc") and one.get("path")]
+        rows = self.store.many(picked)
+        wanted = [relative for relative in picked
+                  if (rows.get(relative) or {}).get("status") in ("pending", "failed")]
+        with self.priority_lock:
+            for relative in wanted:
+                if relative not in self.priority:
+                    self.priority.append(relative)
+        if wanted:
+            self.wake.set()
+        return wanted
 
     # -- 探测 -------------------------------------------------------------- #
 
@@ -669,18 +1023,23 @@ class Service:
     def run_job(self, relative):
         row = self.store.row(relative)
         if row is None or not row.get("abs_path"):
-            return False
+            return True
         abs_path = row["abs_path"]
+        kind = row.get("kind") or "file"
+        if kind == "bd":
+            return self.run_disc(row, relative)
+        if kind == "iso":
+            return self.run_iso(row, relative)
         out_path = row["out_path"] or sidecar_path(abs_path, row["language"], row["format"])
         directory = os.path.dirname(abs_path)
         if not os.path.isfile(abs_path):
             self.store.patch(relative, status="failed", detail="文件不见了。")
-            return False
+            return True
         if not self.writable(directory):
             self.store.patch(relative, status="readonly", out_path=out_path,
                              detail="媒体源是只读挂载，写不进去。")
             self.stats["failed"] += 1
-            return False
+            return True
         tmp = os.path.join(directory,
                            "." + os.path.basename(out_path) + ".part")
         cmd = [self.tool("ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin",
@@ -702,19 +1061,19 @@ class Service:
                              detail=tail(outcome[1]),
                              attempts=int(row.get("attempts") or 0) + 1)
             self.stats["failed"] += 1
-            return False
+            return True
         try:
             os.replace(tmp, out_path)
         except OSError as error:
             remove_quiet(tmp)
             self.store.patch(relative, status="failed", detail="写不进去：%s" % error)
             self.stats["failed"] += 1
-            return False
+            return True
         size = os.path.getsize(out_path)
         if size <= 0:
             self.store.patch(relative, status="unsupported", out_path=out_path,
                              detail="抽出来是空的，这条字幕大概是空的。", out_size=0)
-            return False
+            return True
         self.store.patch(relative, status="done", out_path=out_path, out_size=size,
                          detail="", covered=max(0.0, self.last_covered))
         self.stats["converted"] += 1
@@ -765,6 +1124,330 @@ class Service:
         if code != 0:
             return (False, " ".join(notes[-3:]) or ("ffmpeg 退出码 %d" % code))
         return (True, "")
+
+    # -- 蓝光盘执行 -------------------------------------------------------- #
+
+    def probe_subtitles(self, abs_path, extra=()):
+        """只问字幕轨、不做语言筛选：蓝光这边要自己决定用哪条轨。"""
+        cmd = [self.tool("ffprobe"), "-v", "error", "-print_format", "json",
+               "-show_streams"] + list(extra) + [abs_path]
+        code, out, _err = self.run(cmd)
+        if code != 0:
+            return []
+        try:
+            streams = json.loads(out or "{}").get("streams", [])
+        except ValueError:
+            return []
+        found = []
+        ordinal = 0
+        for stream in streams:
+            if stream.get("codec_type") != "subtitle":
+                continue
+            codec = (stream.get("codec_name") or "").lower()
+            index = ordinal
+            ordinal += 1
+            if codec in TEXT_CODECS:
+                fmt = TEXT_CODECS[codec]
+            elif codec in PGS_CODECS:
+                fmt = "sup"
+            else:
+                continue
+            tags = stream.get("tags") or {}
+            found.append({"index": index, "codec": codec, "format": fmt,
+                          "language": normalize_language(tags.get("language")),
+                          "name": tags.get("title") or ""})
+        return found
+
+    def fail_job(self, relative, detail, row):
+        self.store.patch(relative, status="failed", detail=tail(detail),
+                         attempts=int(row.get("attempts") or 0) + 1)
+        self.stats["failed"] += 1
+        return False
+
+    def run_disc(self, row, relative):
+        """蓝光盘：正片每个分卷各抽一份 PGS，写成贴着分卷的同名 .sup。
+
+        TV 端进库的就是 ``BDMV/STREAM/NNNNN.m2ts``，找外挂字幕只看这个文件自己
+        的目录，所以输出必须贴着分卷，不能只写在盘根。
+        """
+        if bluray is None:
+            self.store.patch(relative, status="unsupported", detail="服务器上的 bluray.py 读不到了。")
+            return False
+        directory = row.get("disc_path") or row["abs_path"]
+        disc = bluray.disc_at(directory)
+        if disc is None or disc.get("kind") != "folder":
+            self.store.patch(relative, status="failed", detail="这张蓝光盘读不到了。")
+            self.stats["failed"] += 1
+            return False
+        if not self.writable(directory):
+            self.store.patch(relative, status="readonly", detail="媒体源是只读挂载，写不进去。")
+            self.stats["failed"] += 1
+            return False
+        playlist, segments = bluray.pick_main(disc, self.cfg.langs, normalize_language)
+        if not segments:
+            self.store.patch(relative, status="unsupported", detail="认不出这张蓝光盘的正片分卷。")
+            return False
+        pid, language, note, index = self.disc_subtitle(playlist, segments)
+        language = row.get("language") or language
+        stored_pid = int(row.get("track_index") or 0) or pid
+        self.store.patch(relative, status="running", detail=note, covered=0.0, out_size=0)
+        started = time.time()
+        written = 0
+        total_bytes = 0
+        notes = []
+        for segment in segments:
+            out_path = sidecar_path(segment, language, "sup")
+            try:
+                existing = os.path.getsize(out_path)
+            except OSError:
+                existing = 0
+            if existing > 0:
+                written += 1
+                total_bytes += existing
+                continue
+            tmp = os.path.join(os.path.dirname(segment),
+                               "." + os.path.basename(out_path) + ".part")
+            ok, detail = self.extract_pgs(segment, tmp, language, stored_pid, index)
+            if not ok:
+                remove_quiet(tmp)
+                if detail:
+                    notes.append(detail)
+                continue
+            try:
+                size = os.path.getsize(tmp)
+                os.replace(tmp, out_path)
+            except OSError as error:
+                remove_quiet(tmp)
+                notes.append("写不进去：%s" % error)
+                continue
+            if size > self.cfg.max_out_bytes:
+                remove_quiet(out_path)
+                notes.append("抽出来的字幕超过 %d MB，这条先不用它。"
+                             % (self.cfg.max_out_bytes >> 20))
+                continue
+            written += 1
+            total_bytes += size
+        self.store.patch(relative, covered=written / float(len(segments)),
+                         out_size=total_bytes)
+        if not written:
+            return self.fail_job(relative, " ".join(notes[-3:]) or "分卷里没有能抽的 PGS 字幕。", row)
+        self.store.patch(relative, status="done",
+                         out_path=sidecar_path(segments[0], language, "sup"),
+                         out_size=total_bytes,
+                         detail="%d/%d 个分卷写好了字幕" % (written, len(segments)))
+        self.stats["converted"] += 1
+        log("蓝光盘 %s：%d/%d 个分卷写了字幕，%.1f MB，%.1f 秒"
+            % (relative, written, len(segments), total_bytes / 1048576.0,
+               time.time() - started))
+        return True
+
+    def extract_pgs(self, segment, tmp, language="", pid=None, prefer_index=None):
+        """从一个 .m2ts 里抽 PGS。
+
+        顺序：已经定了 PID 就直接解 TS（真盘验证过，最快也最稳）；解不出来按盘上选定
+        那条字幕的位次，用这个分卷自己的 PMT 再认一次（正片跨多个分卷时，每个 clip 的
+        字幕 PID 常常不一样）；再让 ffmpeg 试它认得的字幕轨；都不行就把 PMT 里其余的
+        位图字幕逐条试一遍。
+        """
+        tried = []
+
+        def attempt(candidate):
+            if not candidate or candidate in tried:
+                return False
+            tried.append(int(candidate))
+            try:
+                if bluray.demux_pgs([segment], int(candidate), tmp) > 0:
+                    return True
+            except OSError:
+                remove_quiet(tmp)
+                return False
+            remove_quiet(tmp)
+            return False
+
+        if attempt(pid):
+            return True, ""
+        try:
+            entries = bluray.pmt_subtitle_pids(segment)
+        except OSError as error:
+            return False, "读分卷失败：%s" % error
+        pids = [item for item, kind in entries if kind == "pgs"]
+        order = []
+        if prefer_index is not None and 0 <= int(prefer_index) < len(pids):
+            order.append(pids[int(prefer_index)])
+        order.extend(pids)
+        for candidate in order:
+            if attempt(candidate):
+                return True, ""
+        picks = [item for item in self.probe_subtitles(segment) if item["format"] == "sup"]
+        if language:
+            preferred = [item for item in picks if item["language"] == language]
+            picks = preferred or picks
+        for item in picks:
+            cmd = [self.tool("ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin",
+                   "-y", "-i", segment, "-map", "0:s:%d" % item["index"],
+                   "-c:s", "copy", "-f", "sup", tmp]
+            code, _out, _err = self.run(cmd)
+            if code == 0:
+                try:
+                    if os.path.getsize(tmp) > 0:
+                        return True, ""
+                except OSError:
+                    pass
+            remove_quiet(tmp)
+        if not pids:
+            return False, "这个分卷里没有 PGS 字幕。"
+        return False, "PMT 里写了 PGS，但没解出内容。"
+
+    def run_iso(self, row, relative):
+        """整盘镜像：ffmpeg 带 libbluray 就一次抽完整条字幕，否则拆出 BDMV 再走分卷那套。"""
+        if bluray is None:
+            self.store.patch(relative, status="unsupported", detail="服务器上的 bluray.py 读不到了。")
+            return False
+        iso_path = row.get("disc_path") or row["abs_path"]
+        if not os.path.isfile(iso_path):
+            self.store.patch(relative, status="failed", detail="ISO 文件不见了。")
+            self.stats["failed"] += 1
+            return False
+        directory = os.path.dirname(iso_path)
+        language = row.get("language") or (self.cfg.langs[0] if self.cfg.langs else "und")
+        fmt = row.get("format") or "sup"
+        out_path = row.get("out_path") or sidecar_path(iso_path, language, fmt)
+        if not self.writable(directory):
+            self.store.patch(relative, status="readonly", out_path=out_path,
+                             detail="媒体源是只读挂载，写不进去。")
+            self.stats["failed"] += 1
+            return False
+        self.store.patch(relative, status="running", detail="", covered=0.0, out_size=0)
+        started = time.time()
+        tmp = os.path.join(directory, "." + os.path.basename(out_path) + ".part")
+        notes = []
+        ok = False
+        if self.bluray:
+            ok, detail = self.extract_iso_with_ffmpeg(iso_path, tmp, row, fmt)
+            if not ok:
+                remove_quiet(tmp)
+                notes.append(detail)
+        if not ok:
+            ok, detail = self.extract_iso_with_tool(iso_path, tmp, language)
+            if not ok:
+                remove_quiet(tmp)
+                if detail:
+                    notes.append(detail)
+        if not ok:
+            return self.fail_job(relative, " ".join(item for item in notes if item), row)
+        try:
+            size = os.path.getsize(tmp)
+            os.replace(tmp, out_path)
+        except OSError as error:
+            remove_quiet(tmp)
+            return self.fail_job(relative, "写不进去：%s" % error, row)
+        if size <= 0:
+            remove_quiet(out_path)
+            self.store.patch(relative, status="unsupported", out_path=out_path,
+                             detail="抽出来是空的，这条字幕大概是空的。", out_size=0)
+            return False
+        self.store.patch(relative, status="done", out_path=out_path, out_size=size,
+                         detail="", covered=max(0.0, self.last_covered))
+        self.stats["converted"] += 1
+        log("%s -> %s（%.1f MB，%.1f 秒）"
+            % (relative, os.path.basename(out_path), size / 1048576.0, time.time() - started))
+        return True
+
+    def extract_iso_with_ffmpeg(self, iso_path, tmp, row, fmt):
+        """ffmpeg 带 libbluray 时用它：先按播放列表选标题，不行再退到默认标题。"""
+        title = row.get("playlist")
+        index = int(row.get("track_index") or 0)
+        attempts = ([["-title", str(title)]] if title else []) + [[]]
+        last = ""
+        for extra in attempts:
+            cmd = [self.tool("ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+            cmd += extra + ["-i", iso_path, "-map", "0:s:%d" % index]
+            cmd += (["-c:s", "copy", "-f", "sup", tmp] if fmt == "sup"
+                    else ["-c:s", fmt, "-f", fmt, tmp])
+            code, _out, err = self.run(cmd)
+            if code == 0:
+                try:
+                    if os.path.getsize(tmp) > 0:
+                        return True, ""
+                except OSError:
+                    pass
+            remove_quiet(tmp)
+            last = err or last
+        return False, tail(last) or "ffmpeg 读不了这个 ISO。"
+
+    def extract_iso_with_tool(self, iso_path, tmp, language):
+        """没有 libbluray：用 isoinfo / xorriso / 7z 先拆结构，再按播放列表只拆要用的分卷。"""
+        members = bluray.iso_members(iso_path)
+        if not members:
+            return False, "列不出 ISO 里的文件（试装 isoinfo / xorriso / 7z）。"
+        upper = [member.upper() for member in members]
+        streams = [member for member, item in zip(members, upper)
+                   if "/STREAM/" in item and item.endswith(".M2TS")]
+        structure = [member for member, item in zip(members, upper)
+                     if "/BDMV/" in item and "/STREAM/" not in item]
+        if not streams:
+            return False, "这个 ISO 里没有 BDMV/STREAM 分卷，大概不是蓝光盘。"
+        work = os.path.join(os.path.dirname(iso_path), ".omniplay-iso-%d" % int(time.time()))
+        try:
+            os.makedirs(work, exist_ok=True)
+            for member in structure[:400]:
+                bluray.extract_member(iso_path, member,
+                                      os.path.join(work, member.lstrip("/")), work)
+            disc = bluray.disc_at(work)
+            clips = self.iso_main_clips(disc) if disc else []
+            if clips:
+                wanted = {"%05d.m2ts" % clip for clip in clips}
+                chosen = [member for member in streams
+                          if member.split("/")[-1].lower() in wanted]
+            else:
+                chosen = streams[:24]      # 认不出播放列表就只拆前 24 卷，别把整盘拷一遍
+            if not chosen:
+                return False, "播放列表点名的分卷在 ISO 里找不到。"
+            for member in chosen:
+                bluray.extract_member(iso_path, member,
+                                      os.path.join(work, member.lstrip("/")), work)
+            disc = bluray.disc_at(work)
+            if disc is None:
+                return False, "拆出来的盘结构不完整。"
+            _playlist, segments = bluray.pick_main(disc, self.cfg.langs, normalize_language)
+            if not segments:
+                return False, "拆出来的盘里没有正片分卷。"
+            for pid, kind in bluray.pmt_subtitle_pids(segments[0]):
+                if kind != "pgs":
+                    continue
+                try:
+                    if bluray.demux_pgs(segments, pid, tmp) > 0:
+                        return True, ""
+                except OSError as error:
+                    return False, "解 TS 失败：%s" % error
+                remove_quiet(tmp)
+            for segment in segments:
+                ok, _detail = self.extract_pgs(segment, tmp, language)
+                if ok:
+                    return True, ""
+                remove_quiet(tmp)
+            return False, "拆出来的分卷里没有 PGS 字幕。"
+        except OSError as error:
+            return False, "拆盘失败：%s" % error
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def iso_main_clips(self, disc):
+        """先只拆结构，用播放列表决定要拆哪几个分卷，别把整盘 m2ts 都拷一遍。"""
+        if disc is None:
+            return []
+        wanted = set(self.cfg.langs or [])
+        ordered = sorted(bluray.playlists(disc),
+                         key=lambda item: (item["seconds"] or 0.0), reverse=True)
+        for item in ordered:
+            if wanted and any(sub["kind"] == "pgs"
+                              and normalize_language(sub["lang"]) in wanted
+                              for sub in item["subtitles"]):
+                return item["clips"]
+        for item in ordered:
+            if item["clips"]:
+                return item["clips"]
+        return []
 
     def run(self, cmd):
         try:
@@ -931,6 +1614,9 @@ class Handler(BaseHTTPRequestHandler):
                              "page": number, "per_page": per_page,
                              "pages": max(1, (total + per_page - 1) // per_page),
                              "jobs": rows})
+        elif route in ("/tree", "/api/tree"):
+            self.reply(200, service.tree(query.get("path", [""])[0],
+                                         query.get("q", [""])[0]))
         elif route in ("/status", "/api/status"):
             wanted = query.get("file", [""])[0]
             abs_path = service.to_absolute(wanted) if wanted else None
@@ -960,9 +1646,14 @@ class Handler(BaseHTTPRequestHandler):
             accepted, rejected = service.push([str(item) for item in files])
             self.reply(200, {"accepted": accepted, "rejected": rejected})
         elif route in ("/scan", "/api/scan"):
-            enqueued = service.walk()
+            body = self.read_body()
+            only = self.service.to_absolute(str(body.get("path") or "")) if body.get("path") else None
+            if body.get("path") and only is None:
+                self.reply(400, {"error": "这个目录不在媒体库里。"})
+                return
+            enqueued = service.walk(only=only)
             service.wake.set()
-            self.reply(200, {"enqueued": enqueued,
+            self.reply(200, {"enqueued": enqueued, "path": only,
                              "state": "running" if service.running else "paused"})
         elif route in ("/run", "/api/run"):
             action = str(self.read_body().get("action", "")).strip().lower()
@@ -975,6 +1666,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.reply(200, {"state": "running" if service.running else "paused",
                              "counts": service.store.summary()})
+        elif route in ("/folder/run", "/api/folder/run"):
+            path = str(self.read_body().get("path") or "")
+            queued = service.enqueue_folder(path)
+            self.reply(200, {"queued": queued, "count": len(queued)})
         elif route in ("/policy", "/api/policy"):
             body = self.read_body()
             try:

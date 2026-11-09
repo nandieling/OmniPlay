@@ -33,6 +33,16 @@ nonisolated enum PlaybackWatchState: Equatable {
 
     var hasResumeProgress: Bool { self == .inProgress }
 
+    /// 一部片子底下多个文件合成一个状态：全部放到片尾才算已播，只要有一个文件动过就算未播完。
+    /// 海报墙卡片、详情页和标记入口都走这一条，免得同一部片在两个页面报两种状态。
+    static func aggregate(files: [VideoFile]) -> PlaybackWatchState {
+        guard files.isEmpty == false else { return .unplayed }
+        let states = files.map { PlaybackWatchState(progress: $0.playProgress, duration: $0.duration) }
+        if states.allSatisfy({ $0 == .watched }) { return .watched }
+        if states.contains(where: { $0 != .unplayed }) { return .inProgress }
+        return .unplayed
+    }
+
     var statusLabel: String {
         switch self {
         case .unplayed: return "未播"
@@ -670,7 +680,8 @@ struct CategoryFolder: Codable, FetchableRecord, PersistableRecord, Identifiable
 }
 
 // 导演/主演人物资料：TMDB 人物 id + 头像 + 完整作品列表缓存（id 与分类文件夹一致："kind#name"）
-struct PersonProfile: Codable, FetchableRecord, PersistableRecord, Identifiable {
+// 非隔离：GRDB 记录要能在 dbQueue 的后台闭包里取字段，和本文件其他记录类型同一口径。
+nonisolated struct PersonProfile: Codable, FetchableRecord, PersistableRecord, Identifiable {
     var id: String
     var name: String
     var kind: String
