@@ -23,6 +23,12 @@ private final class MPVContainerView: NSView {
     private var autoPausedForLiveResize = false
     private var resumeAfterLiveResizeWorkItem: DispatchWorkItem?
     private var videoOutputReinitWork: DispatchWorkItem?
+    // 指针活动的 tracking area 与节流时刻。mpv 的图层盖在 SwiftUI 之上并且吃 hit-test，
+    // 指针只在画面上移动时，SwiftUI 的 onContinuousHover 一次都收不到事件（点击走响应链才到得了），
+    // 于是「鼠标藏起来之后再动就再也不出现」。这块 NSView 自己挂 tracking area 收 mouseMoved，
+    // 报给播放器，播放页据此把系统光标和控制条放回来。
+    private var pointerTrackingArea: NSTrackingArea?
+    private var lastPointerActivityAt: TimeInterval = 0
 
     deinit {
         resumeAfterLiveResizeWorkItem?.cancel()
@@ -60,6 +66,61 @@ private final class MPVContainerView: NSView {
     override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
         endLiveResize()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = pointerTrackingArea {
+            removeTrackingArea(existing)
+        }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        pointerTrackingArea = area
+    }
+
+    // 每个都接着交给 super：这些事件原本会顺着响应链继续往上走（SwiftUI 的手势能收到），
+    // 我们只是路过报一声「指针动过」，不能把它们截在这块视图里。
+    override func mouseMoved(with event: NSEvent) {
+        reportPointerActivity()
+        super.mouseMoved(with: event)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        reportPointerActivity()
+        super.mouseEntered(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        reportPointerActivity()
+        super.mouseDragged(with: event)
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        reportPointerActivity()
+        super.rightMouseDragged(with: event)
+    }
+
+    override func otherMouseDragged(with event: NSEvent) {
+        reportPointerActivity()
+        super.otherMouseDragged(with: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        reportPointerActivity()
+        super.scrollWheel(with: event)
+    }
+
+    /// 鼠标一动就是每秒几十次事件，播放页只需要知道「有人在用」，这里先拦一道。
+    private func reportPointerActivity() {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastPointerActivityAt >= 0.1 else { return }
+        lastPointerActivityAt = now
+        playerManager?.reportPointerActivity()
     }
 
     override func viewDidMoveToWindow() {

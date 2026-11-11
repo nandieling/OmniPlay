@@ -30,6 +30,19 @@ private struct RemoteISOFile {
     let extents: [RemoteISOExtent]
 }
 
+/// 远程 ISO 直读的取数节奏。WebDAV 服务器在公网那头，每个 Range 请求都要付一次首字节往返
+/// （几十到几百毫秒）。原来「取一块 512KB、发一块」严格串行，实测吞吐被钉在 3MB/s 上下，
+/// 而 2160p 原盘动辄要 6~10MB/s，缓冲几秒就抽干，看成片就是一卡一卡。
+/// 块开大、同时在途的请求排成滑动窗口：发当前块的时候，后面几块已经在路上。
+private enum RemoteISOReadTuning {
+    /// 单次 Range 请求的字节数
+    static let chunkSize = 2 * 1024 * 1024
+    /// 同时在途的 Range 请求数（预取深度）
+    static let readaheadChunks = 4
+    /// 单块取数的重试次数
+    static let readAttempts = 3
+}
+
 private struct RemoteISOProxyRegistration {
     let urls: [URL]
     let routeIDs: [String]
@@ -161,7 +174,7 @@ private final class RemoteISOHTTPByteReader {
             var extentRemaining = extent.length - skip
             skip = 0
             while remaining > 0 && extentRemaining > 0 {
-                let chunkLength = Int(Swift.min(remaining, extentRemaining, 512 * 1024))
+                let chunkLength = Int(Swift.min(remaining, extentRemaining, Int64(RemoteISOReadTuning.chunkSize)))
                 let data = try await read(offset: extentOffset, length: chunkLength)
                 output.append(data)
                 let readCount = Int64(data.count)
@@ -415,20 +428,79 @@ private final class RemoteISOStreamProxy {
                 try await self.send(Data(headers.joined(separator: "\r\n").utf8), connection: connection)
 
                 if method != "HEAD" {
-                    var sent: Int64 = 0
-                    while sent < range.length {
-                        let chunkLength = Int(Swift.min(range.length - sent, 512 * 1024))
-                        let data = try await route.reader.read(file: route.file, offset: range.offset + sent, length: chunkLength)
-                        guard !data.isEmpty else { break }
-                        try await self.send(data, connection: connection)
-                        sent += Int64(data.count)
-                    }
+                    try await self.sendBody(route: route, range: range, connection: connection)
                 }
                 connection.cancel()
             } catch {
                 connection.cancel()
             }
         }
+    }
+
+    /// 滑动窗口预取 + 顺序发送：`inFlight` 严格按偏移排队，等第 k 块到位的时候，
+    /// k+1…k+预取深度 早就发出去取数了，公网往返全部藏在发送的时间里。
+    /// 顺序发送不能省：mpv 的分派器按字节序读这条流，乱序到手就成了花屏。
+    private func sendBody(route: Route, range: (offset: Int64, length: Int64), connection: NWConnection) async throws {
+        let end = range.offset + range.length
+        let startedAt = Date()
+        var issued = range.offset
+        var sentBytes: Int64 = 0
+        var inFlight: [Task<Data, Error>] = []
+
+        func issueMore() {
+            while inFlight.count < RemoteISOReadTuning.readaheadChunks, issued < end, !Task.isCancelled {
+                let chunkLength = Int(Swift.min(Int64(RemoteISOReadTuning.chunkSize), end - issued))
+                let from = issued
+                inFlight.append(Task(priority: .userInitiated) {
+                    try await Self.readWithRetry(reader: route.reader, file: route.file, offset: from, length: chunkLength)
+                })
+                issued += Int64(chunkLength)
+            }
+        }
+
+        issueMore()
+        do {
+            while !inFlight.isEmpty {
+                let task = inFlight.removeFirst()
+                let data = try await task.value
+                guard !data.isEmpty else { break }
+                try await self.send(data, connection: connection)
+                sentBytes += Int64(data.count)
+                issueMore()
+            }
+        } catch {
+            // 播放端半路挂断（拖进度、换集）或取数彻底失败：别再为这条已死的连接预取
+            inFlight.forEach { $0.cancel() }
+            throw error
+        }
+
+        let elapsed = Date().timeIntervalSince(startedAt)
+        guard sentBytes > 0, elapsed > 0.5 else { return }
+        Self.log("直读 \(route.file.fileName)：送出 \(sentBytes) 字节 / \(String(format: "%.1f", elapsed))s "
+            + "≈ \(String(format: "%.1f", Double(sentBytes) / 1_048_576 / elapsed))MB/s"
+            + "（\(RemoteISOReadTuning.readaheadChunks)×\(RemoteISOReadTuning.chunkSize / 1024)KB 窗口）")
+    }
+
+    /// 公网抖动、服务器偶尔 5xx 都会让一次 Range 取数失败，直接抛出去就是整条流断掉，
+    /// mpv 那头看到的是卡死或反复重连。重试几轮再放弃。
+    private static func readWithRetry(reader: RemoteISOHTTPByteReader, file: RemoteISOFile,
+                                      offset: Int64, length: Int) async throws -> Data {
+        var lastError: Error?
+        for attempt in 0..<RemoteISOReadTuning.readAttempts {
+            do {
+                let data = try await reader.read(file: file, offset: offset, length: length)
+                if !data.isEmpty || attempt == RemoteISOReadTuning.readAttempts - 1 { return data }
+            } catch {
+                lastError = error
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        if let lastError { throw lastError }
+        return Data()
+    }
+
+    private static func log(_ message: String) {
+        print("[RemoteISOProxy] \(message)")
     }
 
     private func send(_ data: Data, connection: NWConnection) async throws {
@@ -1074,6 +1146,9 @@ struct PlayerScreen: View {
     
     @State private var showControls = true
     @State private var isCursorHidden = false
+    // 「指针在画面上动过」的观察者。播放页的 body 已经大到不能再挂修饰符了，
+    // 所以跟菜单跟踪一样用 AppKit 的观察者，在 onAppear/onDisappear 里挂卸。
+    @State private var pointerActivityObserver: NSObjectProtocol?
     @State private var hideUITask: Task<Void, Never>? = nil
     @State private var isMenuInteractionActive = false
     // 正在跟踪的菜单及其宿主：SwiftUI 的 Menu 没有展开态回调，只能盯 AppKit 的跟踪通知
@@ -1639,6 +1714,7 @@ struct PlayerScreen: View {
                 persistAndStopPlaybackIfNeeded(reason: "applicationWillTerminate")
             }
             startObservingMenus()
+            startObservingPointerActivity()
             prepareVideoWithPermission()
             resetHideTimer()
         }
@@ -1647,6 +1723,7 @@ struct PlayerScreen: View {
             PlaybackProgressFlushCenter.unregister(progressFlushToken)
             stopObservingMenus()
             hideUITask?.cancel()
+            stopObservingPointerActivity()
             setCursorHidden(false)
             persistAndStopPlaybackIfNeeded(reason: "onDisappear")
         }
@@ -1894,6 +1971,39 @@ struct PlayerScreen: View {
         guard shouldHide != isCursorHidden else { return }
         if shouldHide { NSCursor.hide() } else { NSCursor.unhide() }
         isCursorHidden = shouldHide
+    }
+
+    /// mpv 的图层盖在 SwiftUI 之上并且吃 hit-test，指针只在画面上移动时 onContinuousHover
+    /// 一次都收不到事件，于是「光标藏起来之后再动就再也不出现」。出画的那块 NSView 自己
+    /// 挂 tracking area 收 mouseMoved 并发来这个通知（见 MPVContainerView），这里接住它。
+    private func startObservingPointerActivity() {
+        guard pointerActivityObserver == nil else { return }
+        pointerActivityObserver = NotificationCenter.default.addObserver(
+            forName: .omniPlayMPVPointerDidMove, object: playerManager, queue: .main
+        ) { _ in
+            Task { @MainActor in self.handlePointerActivity() }
+        }
+    }
+
+    private func stopObservingPointerActivity() {
+        guard let observer = pointerActivityObserver else { return }
+        NotificationCenter.default.removeObserver(observer)
+        pointerActivityObserver = nil
+    }
+
+    /// 指针在画面上动过：控制条和系统光标都该跟着回来。
+    /// 只在状态真的要变时才动手，尤其「解除光标隐藏」不能摊到每一次鼠标移动上。
+    private func handlePointerActivity() {
+        guard !isClosingPlayback else { return }
+        if !showControls {
+            withAnimation(.easeInOut(duration: 0.3)) { showControls = true }
+        }
+        // isCursorHidden 就是「NSCursor.hide() 还欠着没还」的账；补回来的动作交给
+        // forceCursorVisible，它会把 hide 计数配平，也顺手把账本一起归零。
+        if isCursorHidden {
+            forceCursorVisible()
+        }
+        resetHideTimer()
     }
 
     private func forceCursorVisible() {
