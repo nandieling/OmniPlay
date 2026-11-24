@@ -80,8 +80,37 @@ final class OmniPlayUITests: XCTestCase {
         XCTAssertTrue(app.buttons["toolbar.copyDiagnostics"].waitForExistence(timeout: 5))
     }
 
+    // 扫描刮削失败、媒体源连接失败：要落在左上角横幅里，而不是把首页压在一个模态弹窗底下。
     @MainActor
-    private func launchAppForUITest(openWebDAVSheet: Bool = false) throws -> XCUIApplication {
+    func testScanFailureShowsTopLeftBannerInsteadOfAlert() throws {
+        let app = try launchAppForUITest(showScanErrorBanner: true)
+
+        let banner = app.descendants(matching: .any)["home.scanErrorBanner"].firstMatch
+        XCTAssertTrue(banner.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["home.scanErrorBanner.message"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["好"].exists)
+        XCTAssertTrue(app.buttons["toolbar.sync"].exists)
+    }
+
+    // TMDB 连不上：同样落在左上角，并且三个动作按钮都还在，不再是必须选一个的模态框。
+    @MainActor
+    func testTMDBFailureShowsTopLeftNoticeWithActions() throws {
+        let app = try launchAppForUITest(showTMDBNotice: true)
+
+        let notice = app.descendants(matching: .any)["home.tmdbConnectionNotice"].firstMatch
+        XCTAssertTrue(notice.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["好"].exists)
+        XCTAssertTrue(app.buttons["本次不刮削"].exists)
+        XCTAssertTrue(app.buttons["重试扫描"].exists)
+        XCTAssertTrue(app.buttons["添加 API / 设置代理"].exists)
+    }
+
+    @MainActor
+    private func launchAppForUITest(
+        openWebDAVSheet: Bool = false,
+        showScanErrorBanner: Bool = false,
+        showTMDBNotice: Bool = false
+    ) throws -> XCUIApplication {
         let app = XCUIApplication()
         if app.state == .runningForeground || app.state == .runningBackground {
             app.terminate()
@@ -91,6 +120,12 @@ final class OmniPlayUITests: XCTestCase {
         app.launchEnvironment["UITEST_MODE"] = "1"
         if openWebDAVSheet {
             app.launchEnvironment["UITEST_OPEN_WEBDAV_SHEET"] = "1"
+        }
+        if showScanErrorBanner {
+            app.launchEnvironment["UITEST_SHOW_SCAN_ERROR_BANNER"] = "1"
+        }
+        if showTMDBNotice {
+            app.launchEnvironment["UITEST_SHOW_TMDB_NOTICE"] = "1"
         }
         app.launch()
         guard app.wait(for: .runningForeground, timeout: 15) else {

@@ -265,6 +265,116 @@ class MPVPlayerManager: ObservableObject {
         decodeProbeDeadline = Date().addingTimeInterval(20)
     }
 
+    // MARK: - 进度条稳定
+    // 尾部 Cues 索引丢掉的 MKV（外置盘拷贝丢块最常见）一次定位要线性扫几秒，期间 mpv 报的
+    // time-pos 会在几个位置之间来回跳；demuxer 内部重同步时也会突然前窜。这些值直接发给 UI
+    // 就成了「进度异常跳转」。所以：引擎说它在 seek 就冻住显示位置，seek 完先无条件认一次，
+    // 其余时间超过正常推进量级的跳变要连续两轮站得住才上屏。只影响显示，引擎该去哪还去哪。
+    private var lastPublishedTimePos: Double = 0
+    private var pendingTimePos: Double?
+    private var pendingTimePosHits = 0
+    private var acceptNextTimePos = true
+    private var engineSeekStartedAt: Date?
+    /// 卡死的定位也不能把进度条永久钉住，超过这个时长就照常发布引擎给的值。
+    private let engineSeekFreezeLimit: TimeInterval = 8
+
+    /// 只能在主线程用：把引擎报的位置收敛成可以上屏的值。
+    private func stableTimePos(rawTimePos: Double, isEngineSeeking: Bool) -> Double {
+        let now = Date()
+        if isEngineSeeking {
+            let startedAt = engineSeekStartedAt ?? now
+            engineSeekStartedAt = startedAt
+            if now.timeIntervalSince(startedAt) < engineSeekFreezeLimit {
+                return lastPublishedTimePos
+            }
+        } else if let startedAt = engineSeekStartedAt {
+            engineSeekStartedAt = nil
+            let took = now.timeIntervalSince(startedAt)
+            if took >= 1.5 {
+                log(String(format: "定位耗时 %.1fs：这个文件八成没有可用的 seek 索引", took))
+            }
+        }
+        guard rawTimePos.isFinite, rawTimePos >= 0 else { return lastPublishedTimePos }
+        if acceptNextTimePos {
+            acceptNextTimePos = false
+            pendingTimePos = nil
+            pendingTimePosHits = 0
+            lastPublishedTimePos = rawTimePos
+            return rawTimePos
+        }
+        // 轮询间隔 0.25 秒，正常播放每轮也就走这么多；比这大一个量级的跳变先压一压
+        if abs(rawTimePos - lastPublishedTimePos) > 1.5 {
+            if let pending = pendingTimePos, abs(pending - rawTimePos) < 1.0 {
+                pendingTimePosHits += 1
+            } else {
+                pendingTimePos = rawTimePos
+                pendingTimePosHits = 1
+            }
+            if pendingTimePosHits < 2 {
+                return lastPublishedTimePos
+            }
+        }
+        pendingTimePos = nil
+        pendingTimePosHits = 0
+        lastPublishedTimePos = rawTimePos
+        return rawTimePos
+    }
+
+    /// 只能在主线程用：换片时把进度条的账清干净，并从已知的起播位置继续记账。
+    private func resetTimelineStability(seededPosition: Double) {
+        lastPublishedTimePos = seededPosition
+        pendingTimePos = nil
+        pendingTimePosHits = 0
+        acceptNextTimePos = true
+        engineSeekStartedAt = nil
+    }
+
+    /// 我们自己发起的定位：下一次引擎报的位置无条件接受，别让稳定逻辑把正常跳转压掉。
+    private func noteUserInitiatedSeek() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.acceptNextTimePos = true
+            self.pendingTimePos = nil
+            self.pendingTimePosHits = 0
+        }
+    }
+
+    // MARK: - 容器体检
+    // 「播得卡 + 进度乱跳」有两类完全相反的成因：播放器没喂饱，或者这个文件本身就不完整。
+    // 后者在 exFAT 外置盘上尤其常见（大文件写丢块，落盘的是零），现场又没有任何提示，
+    // 于是一律算到播放器头上。加载时顺手在后台量一下，把结论写进日志。
+    private let integrityProbeLock = NSLock()
+    private var integrityProbedPaths: Set<String> = []
+
+    private func startContainerIntegrityProbe(for urls: [URL]) {
+        let candidates = urls.filter {
+            $0.isFileURL && ["mkv", "webm"].contains($0.pathExtension.lowercased())
+        }
+        guard !candidates.isEmpty else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            for url in candidates {
+                self.integrityProbeLock.lock()
+                let alreadyDone = self.integrityProbedPaths.contains(url.path)
+                if !alreadyDone { self.integrityProbedPaths.insert(url.path) }
+                self.integrityProbeLock.unlock()
+                guard !alreadyDone else { continue }
+                guard let report = ContainerIntegrityProbe.probe(url: url) else { continue }
+                if report.looksIncomplete {
+                    self.log(String(format: "容器体检：%@ —— %@；抽样中全零块占 %.1f%%（共 %d 处）。"
+                                    + "这种文件的表现就是卡顿加进度乱跳，建议跟源文件重新拷贝一次并校验。",
+                                    report.fileName,
+                                    report.diagnosis,
+                                    report.zeroRatio * 100,
+                                    report.zeroBlocks))
+                } else {
+                    self.log(String(format: "容器体检：%@ —— 索引可用，抽样全零 %.1f%%",
+                                    report.fileName, report.zeroRatio * 100))
+                }
+            }
+        }
+    }
+
     private func int64Property(_ mpv: OpaquePointer?, _ name: String) -> Int64? {
         var value: Int64 = 0
         return mpv_get_property(mpv, name, MPV_FORMAT_INT64, &value) >= 0 ? value : nil
@@ -1270,6 +1380,11 @@ class MPVPlayerManager: ObservableObject {
             self.loadIssuedAt = Date()
             self.playlistURLsForSidecars = isBluRay ? [] : urls
             self.sidecarSignatureForCurrentFile = nil
+            // 本地 MKV/WebM 顺手做个完整性快检（后台跑，不拖起播）：索引没了、大片全零，
+            // 那卡顿和进度乱跳就该怪文件，不怪播放器。
+            if !isBluRay {
+                self.startContainerIntegrityProbe(for: urls)
+            }
 
             if isBluRay, let rootPath = blurayRootPath {
                 let rootArgument = self.mpvStringArgument(rootPath, stripUserInfo: shouldStripUserInfo)
@@ -1303,6 +1418,7 @@ class MPVPlayerManager: ObservableObject {
                 self.duration = 0
                 self.lastTrackCount = 0
                 self.currentPlaylistIndex = 0
+                self.resetTimelineStability(seededPosition: seeded)
             }
         }
     }
@@ -1444,6 +1560,7 @@ class MPVPlayerManager: ObservableObject {
         runOnControlQueue { [weak self] in
             guard let self else { return }
             self.clearPendingInitialSeek()
+            self.noteUserInitiatedSeek()
             mpv_command_string(self.mpv, String(format: "seek %.2f absolute", targetTime))
         }
     }
@@ -1452,6 +1569,7 @@ class MPVPlayerManager: ObservableObject {
         runOnControlQueue { [weak self] in
             guard let self else { return }
             self.clearPendingInitialSeek()
+            self.noteUserInitiatedSeek()
             mpv_command_string(self.mpv, String(format: "seek %.2f absolute", max(0, seconds)))
         }
     }
@@ -1473,6 +1591,7 @@ class MPVPlayerManager: ObservableObject {
         runOnControlQueue { [weak self] in
             guard let self else { return }
             self.clearPendingInitialSeek()
+            self.noteUserInitiatedSeek()
             mpv_command_string(self.mpv, String(format: "seek %.2f relative", seconds))
         }
     }
@@ -1578,6 +1697,7 @@ class MPVPlayerManager: ObservableObject {
             var playlistPos: Int64 = 0
             var isPaused: Int32 = 0
             var isIdleActive: Int32 = 0
+            var isSeeking: Int32 = 0
 
             mpv_get_property(mpv, "time-pos", MPV_FORMAT_DOUBLE, &timePos)
             mpv_get_property(mpv, "duration", MPV_FORMAT_DOUBLE, &dur)
@@ -1588,6 +1708,8 @@ class MPVPlayerManager: ObservableObject {
             mpv_get_property(mpv, "playlist-pos", MPV_FORMAT_INT64, &playlistPos)
             mpv_get_property(mpv, "pause", MPV_FORMAT_FLAG, &isPaused)
             mpv_get_property(mpv, "idle-active", MPV_FORMAT_FLAG, &isIdleActive)
+            // 定位期间（尤其是没索引要扫文件的 MKV）引擎报的 time-pos 还没落定，别拿去刷进度条
+            mpv_get_property(mpv, "seeking", MPV_FORMAT_FLAG, &isSeeking)
             let filename = self.getMpvStringProperty("filename")
             let eofReason = self.getMpvStringProperty("eof-reason")
             // 顺带体检：真卡住了就把缓存提前量和解码路径写进日志，
@@ -1614,8 +1736,9 @@ class MPVPlayerManager: ObservableObject {
 
             DispatchQueue.main.async {
                 defer { self.isPollingState = false }
-                let validTimePos = timePos.isFinite && timePos >= 0 ? timePos : self.currentTimePosition
                 let validDuration = dur.isFinite && dur > 0 ? dur : 0
+                let stableTimePos = self.stableTimePos(rawTimePos: timePos, isEngineSeeking: isSeeking == 1)
+                let validTimePos = stableTimePos.isFinite && stableTimePos >= 0 ? stableTimePos : self.currentTimePosition
                 self.currentTimePosition = validTimePos
                 // `idle` is not a reliable playback-state signal for bd:// and
                 // some remote/ISO sources: it may remain set while the active

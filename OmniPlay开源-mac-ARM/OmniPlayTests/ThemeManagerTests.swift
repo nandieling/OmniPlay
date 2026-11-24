@@ -102,6 +102,28 @@ struct ThemeManagerTests {
         #expect(fallbackColor == .crystal)
         #expect(fallbackStyle == .classic)
     }
+
+    // 解析结果按「配色 + 风格」缓存一份，视图侧每访问一次 theme.xxx 都命中缓存。
+    // 这里盯两件事：同一份重复取要稳定，键拼接不能串到别的组合上去。
+    @Test("主题按「配色 + 风格」缓存，重复解析稳定且键不互串")
+    func resolverCachesPerSelection() {
+        let mintGlass = AppThemeResolver.theme(colorRaw: ThemeType.mint.rawValue, styleRaw: Self.glassRaw)
+        let again = AppThemeResolver.theme(colorRaw: ThemeType.mint.rawValue, styleRaw: Self.glassRaw)
+        #expect(mintGlass.name == again.name)
+        #expect(mintGlass.backdrop.count == again.backdrop.count)
+        #expect(mintGlass.glass?.glows.count == again.glass?.glows.count)
+        #expect(mintGlass.glass?.cornerRadius == again.glass?.cornerRadius)
+
+        // 键是用分隔符拼的，别把「配色+分隔符」当成另一个配色名解析成功
+        let collided = AppThemeResolver.theme(colorRaw: ThemeType.mint.rawValue + "|" + Self.glassRaw, styleRaw: Self.classicRaw)
+        #expect(!collided.isLiquidGlass)
+        #expect(collided.name != mintGlass.name)
+
+        // 旧的单键「液态玻璃」仍然等价于晶透白 + 玻璃风格
+        let legacy = AppThemeResolver.theme(colorRaw: "liquidGlass", styleRaw: "")
+        #expect(legacy.isLiquidGlass)
+        #expect(legacy.name == AppThemeResolver.theme(colorRaw: ThemeType.crystal.rawValue, styleRaw: Self.glassRaw).name)
+    }
 }
 
 // 用 sRGB 相对亮度判断一个颜色偏白还是偏黑，比逐处比对十六进制稳。

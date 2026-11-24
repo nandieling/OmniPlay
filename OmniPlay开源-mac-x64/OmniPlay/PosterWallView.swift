@@ -387,10 +387,16 @@ struct PosterWallView: View {
     @State private var checkingSourceIDs: Set<Int64> = []
     @State private var isLoadingLibraryData = false
     @State private var needsLibraryReloadAfterCurrentLoad = false
-    @State private var isShowingTMDBConnectionAlert = false
     @State private var tmdbConnectionMessage = ""
-    @State private var isShowingScanErrorAlert = false
+    /// TMDB 连不上也走左上角横幅：nil 表示当前没有这条提示。
+    /// 它要用户拿主意（不刮 / 重试 / 去设置），所以不自动收起。
+    @State private var tmdbNoticeID: UUID? = nil
+    /// 扫描刮削失败、媒体源连接失败都改成左上角横幅：nil 表示当前没有提示，
+    /// 每次失败换一个 id，好让上一条排定好的自动收起准时过期。
+    @State private var scanErrorBannerID: UUID? = nil
+    @State private var scanErrorBannerExpanded = false
     @State private var scanErrorMessage = ""
+    @State private var scanErrorBannerDetail = ""
     @State private var scanErrorAlertTitle = "扫描刮削失败"
     @State private var isHomeCacheModeActive = false
 
@@ -411,6 +417,34 @@ struct PosterWallView: View {
     // 🌟 彻底删除了所有与 network 相关的 State
     
     let columns = [GridItem(.adaptive(minimum: 160), spacing: 20)]
+
+    // MARK: - 海报墙高度预估（挡掉快速下滑时的橡皮筋回弹）
+    //
+    // LazyVGrid 只在滚到某一行时才量那一行。快速下滑时 NSScrollView 以为已经到底，
+    // 先橡皮筋弹回去，等那几行 realize 完再落下来；慢机器上解码与卡片读库还要跟主线程
+    // 抢 CPU，回弹就更明显。海报卡高度是写死的（MovieCardView 自己 frame 成 310pt），
+    // 所以按列数把整墙高度直接算出来垫在最外层：内容高度一开始就是最终值，惯性滚动
+    // 途中不会改口。估不准只会少估（真比预估高时照常往下长），不会把海报裁掉。
+    private static let wallCardHeight: CGFloat = 310
+    private static let wallRowSpacing: CGFloat = 30
+    private static let wallColumnMinWidth: CGFloat = 160
+    private static let wallColumnSpacing: CGFloat = 20
+    private static let wallHorizontalPadding: CGFloat = 25
+    @State private var wallContentWidth: CGFloat = 0
+
+    // MARK: - 海报预取水位
+    //
+    // 卡片是滚到眼前才 onAppear，那时才开始读盘解码，慢机器上就是「先一片灰，过几秒
+    // 才出图」。改成滚到哪儿就把后面几十张排进后台解码队列：水位只往前走，每次入屏
+    // 顶多补一批，不会每张卡片都下一次队。
+    private static let wallPrefetchLead = 96
+    private static let wallHeadPrefetchCount = 240
+    @State private var wallPrefetchedUpTo = 0
+    /// 条目 id 在排序结果里的下标，入屏时用它决定该预取哪一段。
+    @State private var wallIndexByID: [Int64: Int] = [:]
+    /// 上一次预取时整墙的内容指纹（顺序 + 海报路径）。扫描期间 `libraryUpdated` 会连着
+    /// 触发重建，指纹没变就没必要把同一批路径再排一遍队。
+    @State private var wallPrefetchSignature = -1
     init() {
         let isFast = UserDefaults.standard.bool(forKey: "enableFastTooltip")
         UserDefaults.standard.set(isFast ? 50 : 1000, forKey: "NSInitialToolTipDelay")
@@ -427,6 +461,35 @@ struct PosterWallView: View {
     @State private var cachedCategoryFolderGroups: [CategoryFolderGroup] = []
 
     var displayedMovies: [Movie] { cachedDisplayedMovies }
+
+    /// 这一段里要预取的海报路径（没有海报的条目自动跳过，重复的交给解码器去重）。
+    private static func posterPathsForPrefetch(from movies: [Movie]) -> [String] {
+        movies.prefix(400).compactMap { movie in
+            guard let path = movie.posterPath, !path.isEmpty else { return nil }
+            return path
+        }
+    }
+
+    /// 预取 `displayedMovies[start..<end]` 的海报。读盘和解码都在后台队列，主线程只排个队。
+    private func prefetchWallPosters(from start: Int, to end: Int) {
+        let lower = max(0, min(start, displayedMovies.count))
+        let upper = max(lower, min(end, displayedMovies.count))
+        guard lower < upper else { return }
+        PosterImageLoader.shared.prefetchPosterPaths(
+            Self.posterPathsForPrefetch(from: Array(displayedMovies[lower..<upper])),
+            limit: upper - lower)
+    }
+
+    /// 卡片入屏时把前面一屏的海报垫进缓存；水位没动就什么都不做。
+    private func requestPosterPrefetch(for movie: Movie) {
+        guard activeCategoryMode == .none, let id = movie.id,
+              let index = wallIndexByID[id] else { return }
+        let target = min(displayedMovies.count, index + Self.wallPrefetchLead)
+        guard target > wallPrefetchedUpTo else { return }
+        let start = wallPrefetchedUpTo
+        wallPrefetchedUpTo = target
+        prefetchWallPosters(from: start, to: target)
+    }
 
     /// 输入变了才重算；调用点：媒体库载入/变更后、搜索词、排序方式与方向、分类模式切换。
     private func rebuildWallCaches() {
@@ -452,6 +515,25 @@ struct PosterWallView: View {
             return ascending ? isLess : !isLess
         }
         cachedDisplayedMovies = result
+        // 整墙数据一算好就重建预取水位：先把开头几屏垫进内存缓存，剩下的滚到跟前再补。
+        var indexByID: [Int64: Int] = [:]
+        indexByID.reserveCapacity(result.count)
+        var signature = 7
+        for (offset, movie) in result.enumerated() {
+            if let id = movie.id { indexByID[id] = offset }
+            let movieID = Int(movie.id ?? 0)
+            let posterHash = movie.posterPath?.hashValue ?? 0
+            signature = signature &* 31
+            signature = signature &+ movieID
+            signature = signature &+ posterHash
+            signature = signature &+ offset
+        }
+        wallIndexByID = indexByID
+        if signature != wallPrefetchSignature {
+            wallPrefetchSignature = signature
+            wallPrefetchedUpTo = min(result.count, Self.wallHeadPrefetchCount)
+            prefetchWallPosters(from: 0, to: wallPrefetchedUpTo)
+        }
         cachedCategoryFolderGroups = Self.categoryFolderGroups(
             mode: activeCategoryMode, source: result, ascending: categoryFolderSortAsc)
     }
@@ -513,6 +595,25 @@ struct PosterWallView: View {
 
     private var activeCategoryMode: HomeCategoryMode {
         HomeCategoryMode(rawValue: homeCategoryMode) ?? .none
+    }
+
+    /// 探一下海报墙自身的宽度：列数由可用宽度决定，高度估算要用同一个口径。
+    private var wallWidthProbe: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .onAppear { wallContentWidth = proxy.size.width }
+                .onChange(of: proxy.size.width) { _, width in wallContentWidth = width }
+        }
+    }
+
+    /// 按当前宽度算出的整墙高度。只在海报墙（非分类文件夹视图）且有内容时启用，
+    /// 其余情况返回 0 表示不干预。
+    private var wallEstimatedHeight: CGFloat {
+        guard activeCategoryMode == .none, !displayedMovies.isEmpty, wallContentWidth > 0 else { return 0 }
+        let usable = wallContentWidth - Self.wallHorizontalPadding * 2
+        let columnCount = max(1, Int((usable + Self.wallColumnSpacing) / (Self.wallColumnMinWidth + Self.wallColumnSpacing)))
+        let rowCount = (displayedMovies.count + columnCount - 1) / columnCount
+        return CGFloat(rowCount) * Self.wallCardHeight + CGFloat(max(0, rowCount - 1)) * Self.wallRowSpacing
     }
 
     @ViewBuilder
@@ -1134,6 +1235,7 @@ struct PosterWallView: View {
                                     LazyVGrid(columns: columns, spacing: 30) {
                                         ForEach(displayedMovies, id: \.id) { movie in
                                             homeMovieCard(movie: movie)
+                                                .onAppear { requestPosterPrefetch(for: movie) }
                                         }
                                     }
                                 } else {
@@ -1142,6 +1244,8 @@ struct PosterWallView: View {
                             }
                             .padding(.horizontal, 25)
                             .padding(.bottom, 25)
+                            .background(wallWidthProbe)
+                            .frame(minHeight: wallEstimatedHeight, alignment: .top)
                             .animation(.easeInOut, value: displayedMovies.count)
                         }
                     }
@@ -1150,6 +1254,22 @@ struct PosterWallView: View {
                 .environment(\.isPosterWallScrolling, isWallScrolling)
                 .wallScrollPhaseGating(isScrolling: $isWallScrolling)
                 .padding(.top, topBarHeight)
+                
+                // 扫描刮削失败、媒体源连接失败、TMDB 连不上都收进左上角横幅，不再弹窗打断
+                VStack(alignment: .leading, spacing: 8) {
+                    if scanErrorBannerID != nil {
+                        scanErrorBanner()
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                    if tmdbNoticeID != nil {
+                        tmdbConnectionNotice()
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.top, topBarHeight + 6)
+                .padding(.leading, 24)
+                .padding(.trailing, 24)
                 
                 if let cacheMessage = cacheManager.cacheStatusMessage {
                     Text(cacheMessage)
@@ -1298,29 +1418,6 @@ struct PosterWallView: View {
             } message: {
                 Text(directPlayback.lastOpenError?.message ?? "")
             }
-            .alert(Text(scanErrorAlertTitle), isPresented: $isShowingScanErrorAlert) {
-                Button("好", role: .cancel) { }
-            } message: {
-                Text(scanErrorMessage)
-            }
-            .alert("TMDB API 无法连接", isPresented: $isShowingTMDBConnectionAlert) {
-                Button("本次不刮削", role: .cancel) {
-                    // 不刮元数据，但缺失的分集剧照仍然要补抓。
-                    Task { await enqueueEpisodeStillBackfill(runID: UUID(), movieIDs: [], forceRetry: true) }
-                }
-                Button("重试扫描") {
-                    isShowingTMDBConnectionAlert = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { triggerScanAndScrape(manual: true) }
-                }
-                Button("添加 API / 设置代理", role: .cancel) {
-                    settingsFocusTMDBApi = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        showSettings = true
-                    }
-                }
-            } message: {
-                Text("检测到有待刮削的影视，但 TMDB 暂时无法连接。请添加自定义 TMDB API，或开启代理后在设置中重新检测。\n\(tmdbConnectionMessage)")
-            }
             // 🌟 彻底删除了那个恶心的 SMB/WebDAV Sheet 弹窗！
         }
         .onAppear {
@@ -1332,14 +1429,30 @@ struct PosterWallView: View {
                 prepareManualWebDAVBrowserLogin()
                 isShowingWebDAVPreScanLoginSheet = true
             }
+            if ProcessInfo.processInfo.environment["UITEST_SHOW_SCAN_ERROR_BANNER"] == "1" {
+                showScanErrorBanner(
+                    title: "部分媒体源扫描失败",
+                    message: "“NAS”连接失败：网络不可达或超时。",
+                    detail: """
+                    OmniPlay 扫描诊断 (UITEST)
+
+                    [源] NAS
+                    协议=webdav
+                    分类=network
+                    端点=https://nas.local/dav
+                    消息=“NAS”连接失败：网络不可达或超时。
+                    """
+                )
+            }
+            if ProcessInfo.processInfo.environment["UITEST_SHOW_TMDB_NOTICE"] == "1" {
+                showTMDBConnectionNotice(message: "请求超时（URLSession 错误 1001）")
+            }
             if autoScanOnStartup && ProcessInfo.processInfo.environment["UITEST_MODE"] != "1" {
                 triggerScanAndScrape()
             }
             // 媒体库结构没升级完整时得当场说清楚，否则用户只会看到「扫完了，但什么都没有」。
             if let databaseError = AppDatabase.shared.setupError {
-                scanErrorAlertTitle = "媒体库没能升级完成"
-                scanErrorMessage = databaseError
-                isShowingScanErrorAlert = true
+                showScanErrorBanner(title: "媒体库没能升级完成", message: databaseError)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .libraryUpdated)) { notification in
@@ -4517,12 +4630,15 @@ struct PosterWallView: View {
 
     // 扫描必须有回音：单个媒体源失败、或扫描成功但一个文件都没找到时，原先只在左上角
     // 闪过一行状态文字就收尾，用户看到的效果是「点了按钮什么都没发生」。
+    // 这些原因现在统一交给左上角横幅（showScanErrorBanner），不再弹窗。
     private func reportScanOutcomes(sourceResults: [MediaSourceScanResult], scannedSources: [MediaSource]) {
         let failures = sourceResults.filter { !$0.isSuccess }
         if !failures.isEmpty {
-            scanErrorAlertTitle = failures.count == sourceResults.count ? "扫描刮削失败" : "部分媒体源扫描失败"
-            scanErrorMessage = MediaSourceScanDiagnosticsFormatter.diagnosticsReport(results: sourceResults)
-            isShowingScanErrorAlert = true
+            showScanErrorBanner(
+                title: failures.count == sourceResults.count ? "扫描刮削失败" : "部分媒体源扫描失败",
+                message: MediaSourceScanDiagnosticsFormatter.userFacingSummary(results: sourceResults),
+                detail: MediaSourceScanDiagnosticsFormatter.diagnosticsReport(results: sourceResults)
+            )
             return
         }
         // 这一轮真的找到并入库过文件，就别再报「没有扫描到视频文件」
@@ -4530,9 +4646,197 @@ struct PosterWallView: View {
         if foundCount > 0 { return }
         // 库里已经有内容时不再打扰：那种情况下 0 命中只是「没有新增」。
         guard movies.isEmpty else { return }
-        scanErrorAlertTitle = "没有扫描到视频文件"
-        scanErrorMessage = MediaSourceScanDiagnosticsFormatter.emptyScanReport(sources: scannedSources)
-        isShowingScanErrorAlert = true
+        showScanErrorBanner(
+            title: "没有扫描到视频文件",
+            message: "",
+            detail: MediaSourceScanDiagnosticsFormatter.emptyScanReport(sources: scannedSources)
+        )
+    }
+
+    // MARK: - 左上角失败横幅
+    //
+    // 扫描刮削失败、媒体源连接失败原先都是居中弹窗：点一下同步就被模态框拦住，诊断原文
+    // 又长又没法复制。这里换成左上角一条横幅，默认收起只留一行结论，展开后看完整报告。
+
+    private static let scanErrorBannerAutoDismiss: TimeInterval = 12
+
+    /// 左上角失败横幅：message 是收起状态下那行人话，detail 是展开后才看的完整诊断。
+    private func showScanErrorBanner(title: String, message: String, detail: String = "") {
+        let bannerID = UUID()
+        withAnimation(.easeInOut(duration: 0.2)) {
+            scanErrorBannerID = bannerID
+            scanErrorAlertTitle = title
+            let headline = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            scanErrorMessage = headline.isEmpty ? Self.firstMeaningfulLine(of: detail) : headline
+            scanErrorBannerDetail = detail
+            scanErrorBannerExpanded = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.scanErrorBannerAutoDismiss) {
+            // 已经被更新的失败覆盖，或用户正展开在看，就不再自动收起
+            guard scanErrorBannerID == bannerID, !scanErrorBannerExpanded else { return }
+            withAnimation(.easeInOut(duration: 0.2)) { scanErrorBannerID = nil }
+        }
+    }
+
+    private func dismissScanErrorBanner() {
+        withAnimation(.easeInOut(duration: 0.2)) { scanErrorBannerID = nil }
+    }
+
+    private func copyScanErrorBanner() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(scanErrorBannerDetailText, forType: .string)
+    }
+
+    /// 展开态与「复制」用的全文：结论在前，诊断报告跟在后面。
+    private var scanErrorBannerDetailText: String {
+        scanErrorBannerDetail.isEmpty
+            ? scanErrorMessage
+            : scanErrorMessage + "\n\n" + scanErrorBannerDetail
+    }
+
+    /// 没有现成结论时退到报告首行，跳过「OmniPlay 扫描诊断」这类抬头。
+    private static func firstMeaningfulLine(of text: String) -> String {
+        let lines = text
+            .split(omittingEmptySubsequences: true, whereSeparator: \.isNewline)
+            .map(String.init)
+        return lines.first(where: { !$0.hasPrefix("OmniPlay 扫描诊断") }) ?? lines.first ?? text
+    }
+
+    private func scanErrorBanner() -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(theme.warningColor)
+                Text(scanErrorAlertTitle)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(theme.textPrimary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Button(action: { copyScanErrorBanner() }) {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(theme.textSecondary)
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.plain)
+                .help("复制诊断详情")
+                if !scanErrorBannerDetail.isEmpty {
+                    Button(action: { withAnimation(.easeInOut(duration: 0.2)) { scanErrorBannerExpanded.toggle() } }) {
+                        Image(systemName: scanErrorBannerExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(theme.textSecondary)
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.plain)
+                    .help(scanErrorBannerExpanded ? "收起诊断详情" : "展开诊断详情")
+                }
+                Button(action: { dismissScanErrorBanner() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(theme.textSecondary)
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.plain)
+                .help("关闭提示")
+            }
+
+            if scanErrorBannerExpanded {
+                ScrollView {
+                    Text(scanErrorBannerDetailText)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(theme.textSecondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 220)
+            } else {
+                Text(scanErrorMessage)
+                    .font(.caption)
+                    .foregroundColor(theme.textSecondary)
+                    .lineLimit(3)
+                    .accessibilityIdentifier("home.scanErrorBanner.message")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: 420, alignment: .leading)
+        .themeVibrant(theme, cornerRadius: 12)
+        .shadow(color: .black.opacity(0.16), radius: 10, y: 4)
+        .accessibilityIdentifier("home.scanErrorBanner")
+    }
+
+    // MARK: - 左上角 TMDB 连通提示
+    //
+    // 原先是一条居中模态：刚点同步就被拦住，三个选项还必须挑一个。改成左上角横幅后，
+    // 用户可以先去别处，回头再决定重试还是去设置；它要人拿主意，所以不自动收起。
+
+    private func showTMDBConnectionNotice(message: String) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            tmdbNoticeID = UUID()
+            tmdbConnectionMessage = message
+        }
+    }
+
+    private func dismissTMDBConnectionNotice() {
+        withAnimation(.easeInOut(duration: 0.2)) { tmdbNoticeID = nil }
+    }
+
+    /// 「本次不刮削」：元数据这次不追了，但缺失的分集剧照仍然要补抓。
+    private func skipTMDBScrapeFromNotice() {
+        dismissTMDBConnectionNotice()
+        Task { await enqueueEpisodeStillBackfill(runID: UUID(), movieIDs: [], forceRetry: true) }
+    }
+
+    private func tmdbConnectionNotice() -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "network")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(theme.warningColor)
+                Text("TMDB API 无法连接")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(theme.textPrimary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Button(action: skipTMDBScrapeFromNotice) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(theme.textSecondary)
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.plain)
+                .help("本次不刮削")
+            }
+
+            Text("检测到有待刮削的影视，但 TMDB 暂时无法连接。请添加自定义 TMDB API，或开启代理后在设置中重新检测。\n\(tmdbConnectionMessage)")
+                .font(.caption)
+                .foregroundColor(theme.textSecondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 10) {
+                Button("本次不刮削", action: skipTMDBScrapeFromNotice)
+                Button("重试扫描") {
+                    dismissTMDBConnectionNotice()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { triggerScanAndScrape(manual: true) }
+                }
+                Button("添加 API / 设置代理") {
+                    dismissTMDBConnectionNotice()
+                    settingsFocusTMDBApi = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { showSettings = true }
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: 460, alignment: .leading)
+        .themeVibrant(theme, cornerRadius: 12)
+        .shadow(color: .black.opacity(0.16), radius: 10, y: 4)
+        .accessibilityIdentifier("home.tmdbConnectionNotice")
     }
 
     // 统一入口：按首页显示顺序补抓缺失的分集剧照。
@@ -4559,6 +4863,8 @@ struct PosterWallView: View {
     ///   开机自动扫描传 false，已经放弃的目标不再自动重试。
     private func triggerScanAndScrape(sourceID: Int64? = nil, sourceIDs: [Int64]? = nil, skipTMDBScrape: Bool = false, manual: Bool = false) {
         guard !isProcessing else { return }
+        // 新一轮扫描开跑，上一条「TMDB 连不上」的提示就过期了，别留在左上角挡路
+        if tmdbNoticeID != nil { dismissTMDBConnectionNotice() }
         lastScanRunWasManual = manual
         if manual { ScrapeFailureTracker.shared.resetAll() }
         currentScanTask?.cancel()
@@ -4736,9 +5042,8 @@ struct PosterWallView: View {
                 if !tmdbConnection.isConnected {
                     await MainActor.run {
                         guard self.currentScanRunID == runID else { return }
-                        tmdbConnectionMessage = tmdbConnection.message
                         finishScanRun(runID: runID, reloadData: true)
-                        isShowingTMDBConnectionAlert = true
+                        showTMDBConnectionNotice(message: tmdbConnection.message)
                     }
                     return
                 }
@@ -4772,11 +5077,9 @@ struct PosterWallView: View {
             } catch {
                 await MainActor.run {
                     finishScanRun(runID: runID, reloadData: true)
-                    // 失败时弹窗显示错误，避免“点了没反应”却看不到原因
+                    // 失败时在左上角横幅里说清楚原因，避免「点了没反应」却看不到问题
                     if currentScanRunID == runID {
-                        scanErrorAlertTitle = "扫描刮削失败"
-                        scanErrorMessage = "扫描刮削失败：\(error.localizedDescription)"
-                        isShowingScanErrorAlert = true
+                        showScanErrorBanner(title: "扫描刮削失败", message: "扫描刮削失败：\(error.localizedDescription)")
                     }
                 }
             }

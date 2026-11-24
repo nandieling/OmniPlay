@@ -7,7 +7,10 @@ import ImageIO
 /// 海报目录在 iCloud 容器里时，未本地化的文件读一次要等云端下载；原先 `onAppear`
 /// 里同步读整张 JPEG 再解码，整库刷新能把指针卡住几十秒。这里改成后台读 + 只解到
 /// 显示尺寸 + 内存缓存，主线程只负责把成品贴上去。
-nonisolated final class PosterImageLoader {
+///
+/// 并发安全靠三样东西兜着：`NSCache` 自身线程安全、在途表用 `NSLock` 守住、
+/// 解码全在自有队列上跑，所以可以放心标 `@unchecked Sendable`。
+nonisolated final class PosterImageLoader: @unchecked Sendable {
     static let shared = PosterImageLoader()
 
     /// 卡片与详情页的海报都不超过约 320pt，640px 够覆盖 Retina。
@@ -15,10 +18,21 @@ nonisolated final class PosterImageLoader {
 
     private let cache = NSCache<NSString, CGImage>()
     private let queue = DispatchQueue(label: "nan.OmniPlay.poster-image-loader", attributes: .concurrent)
+    /// 同一张封面常被好几张卡片同时要（继续播放行与海报墙共用一张海报很常见），
+    /// 后进来的挂在同一个解码任务上，别各解一遍把队列挤满。
+    private let inFlightLock = NSLock()
+    private var inFlight: [String: [CheckedContinuation<CGImage?, Never>]] = [:]
+    /// 预取专用队列：优先级压在后台，永远给正在滚的那一屏让路。
+    private let prefetchQueue = DispatchQueue(
+        label: "nan.OmniPlay.poster-image-prefetch", qos: .background, attributes: .concurrent)
+    private let prefetchLock = NSLock()
+    private var prefetchGeneration = 0
 
     private init() {
-        cache.countLimit = 240
-        cache.totalCostLimit = 160 * 1024 * 1024
+        // 一张 640px 海报解出来约 1MB 位图。上限太紧时滚两屏就把早先的挤出去了，
+        // 回头再看又得重解一遍，表现就是「海报先空白几秒」。
+        cache.countLimit = 400
+        cache.totalCostLimit = 384 * 1024 * 1024
     }
 
     func cachedImage(for url: URL) -> CGImage? {
@@ -33,23 +47,66 @@ nonisolated final class PosterImageLoader {
         cache.removeAllObjects()
     }
 
+    /// 提前把即将入屏的海报读盘 + 解码进内存缓存。
+    ///
+    /// 海报墙是滚到那一屏才现解，慢机器（x64）和 iCloud 未落地的文件上就是「先一片灰，
+    /// 过几秒才出图」。整墙数据算好时就把前面这些排进后台优先级队列垫着，卡片真出现时
+    /// 基本直接命中内存缓存；换了排序或搜索，旧的一批按 generation 作废。
+    /// - Parameter posterPaths: 与 `Movie.posterPath` 同源的相对路径，重复的会被去掉。
+    func prefetchPosterPaths(_ posterPaths: [String], limit: Int = 240) {
+        prefetchLock.lock()
+        prefetchGeneration += 1
+        let generation = prefetchGeneration
+        prefetchLock.unlock()
+
+        var seen = Set<String>()
+        for path in posterPaths {
+            guard seen.insert(path).inserted else { continue }
+            if seen.count > limit { break }
+            prefetchQueue.async { [weak self] in
+                guard let self else { return }
+                self.prefetchLock.lock()
+                let current = self.prefetchGeneration
+                self.prefetchLock.unlock()
+                guard current == generation else { return }
+                guard let url = PosterManager.shared.getLocalPosterURL(for: path) else { return }
+                let key = url.path as NSString
+                if self.cache.object(forKey: key) != nil { return }
+                guard let decoded = Self.downsampledImage(at: url, maxPixelSize: Self.displayMaxPixelSize) else { return }
+                self.cache.setObject(decoded, forKey: key, cost: Self.byteCost(of: decoded))
+            }
+        }
+    }
+
     /// 后台读盘 + 降采样，已缓存时直接返回。读不到（例如云端还没下载完）返回 nil，
     /// 不动文件，等 `PosterUpdated` 广播再自愈。
     func image(
         at url: URL,
         maxPixelSize: CGFloat = PosterImageLoader.displayMaxPixelSize
     ) async -> CGImage? {
-        let key = url.path as NSString
-        if let cached = cache.object(forKey: key) { return cached }
-        let image = await withCheckedContinuation { (continuation: CheckedContinuation<CGImage?, Never>) in
+        let path = url.path
+        if let cached = cache.object(forKey: path as NSString) { return cached }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<CGImage?, Never>) in
+            inFlightLock.lock()
+            if inFlight[path] != nil {
+                inFlight[path]?.append(continuation)
+                inFlightLock.unlock()
+                return
+            }
+            inFlight[path] = [continuation]
+            inFlightLock.unlock()
+
             queue.async {
-                continuation.resume(returning: Self.downsampledImage(at: url, maxPixelSize: maxPixelSize))
+                let decoded = Self.downsampledImage(at: url, maxPixelSize: maxPixelSize)
+                if let decoded {
+                    self.cache.setObject(decoded, forKey: path as NSString, cost: Self.byteCost(of: decoded))
+                }
+                self.inFlightLock.lock()
+                let waiters = self.inFlight.removeValue(forKey: path) ?? []
+                self.inFlightLock.unlock()
+                for waiter in waiters { waiter.resume(returning: decoded) }
             }
         }
-        if let image {
-            cache.setObject(image, forKey: key, cost: Self.byteCost(of: image))
-        }
-        return image
     }
 
     /// 只解析头部信息判断是不是真图片，比整图 NSImage(data:) 省一大截 CPU。
@@ -82,7 +139,9 @@ nonisolated final class PosterImageLoader {
     }
 }
 
-class PosterManager {
+/// 只持有海报目录这一个不可变状态，成员方法都是无共享可变状态的 FileManager 调用，
+/// 所以预取队列在后台线程用它也安全。
+nonisolated final class PosterManager: @unchecked Sendable {
     static let shared = PosterManager()
     let cacheDirectory: URL
     
@@ -180,9 +239,20 @@ class PosterManager {
 // ==========================================
 struct CachedPosterView: View {
     let posterPath: String?
+    /// 广播名在 init 里算好：写在 body 里每次求值都换一个 publisher 实例，
+    /// SwiftUI 就拆掉重订一次，整墙滚动时每张海报都要来回摘装一遍。
+    private let updatedNotification: Notification.Name
+    /// 滚出屏幕的卡片别再占解码队列，等它回来时再解。
+    @State private var loadTask: Task<Void, Never>? = nil
     @State private var nsImage: NSImage? = nil
     @State private var loadedPosterPath: String? = nil
-    
+
+    init(posterPath: String?) {
+        self.posterPath = posterPath
+        self.updatedNotification = Notification.Name(
+            "PosterUpdated_\(PosterManager.shared.cacheFileName(for: posterPath ?? ""))")
+    }
+
     var body: some View {
         Group {
             if let img = nsImage {
@@ -199,13 +269,17 @@ struct CachedPosterView: View {
             }
         }
         .onAppear(perform: loadImage)
+        .onDisappear {
+            loadTask?.cancel()
+            loadTask = nil
+        }
         .onChange(of: posterPath) { _, _ in
             nsImage = nil
             loadedPosterPath = nil
             loadImage()
         }
         // 监听下载完成的广播，实现“无缝自愈”
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PosterUpdated_\(PosterManager.shared.cacheFileName(for: posterPath ?? ""))"))) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: updatedNotification)) { _ in
             loadImage()
         }
     }
@@ -233,8 +307,11 @@ struct CachedPosterView: View {
         // 读盘与解码交给后台队列：整库刷新时主线程只剩「把成品贴上来」这一件事。
         // @State 的写入是穿透到 box 的，所以这里拿一份视图副本就够用。
         let loaded = self
-        Task {
+        loadTask?.cancel()
+        loadTask = Task {
             let cgImage = await PosterImageLoader.shared.image(at: localURL)
+            // 解码期间卡片已经滚出屏幕就别再贴了，回来时 onAppear 会重新要
+            if Task.isCancelled { return }
             loaded.nsImage = cgImage.map { Self.posterImage(from: $0) }
             loaded.loadedPosterPath = cgImage == nil ? nil : path
             if cgImage == nil {

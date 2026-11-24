@@ -205,10 +205,35 @@ enum AppThemeResolver {
     /// 旧版本把液态玻璃当成一种「颜色」存进 appTheme
     private static let legacyGlassRaw = "liquidGlass"
 
+    /// 结果只由「配色 + 风格」两个字符串决定，缓存一份。
+    ///
+    /// 12 个视图都写成 `var theme: AppTheme { AppThemeResolver.theme(...) }`，也就是每写一次
+    /// `theme.textPrimary` 就重建一整个 AppTheme：5 个 `Color(hex:)` 走 Scanner，玻璃风格还要
+    /// 再跑几次 NSColor 往返并重建渐变与五团光斑。一次首页 body 求值就是上百次整套重建，
+    /// 滚动起停、hover、进度刷新都会触发；Intel 那台 x64 上这条最吃帧率。
     static func theme(colorRaw: String, styleRaw: String) -> AppTheme {
-        let (color, style) = selection(colorRaw: colorRaw, styleRaw: styleRaw)
-        let base = color.colors
-        return style == .liquidGlass ? base.applyingLiquidGlass() : base
+        themeCache.value(forKey: colorRaw + "|" + styleRaw) {
+            let (color, style) = selection(colorRaw: colorRaw, styleRaw: styleRaw)
+            let base = color.colors
+            return style == .liquidGlass ? base.applyingLiquidGlass() : base
+        }
+    }
+
+    private static let themeCache = AppThemeCache()
+
+    /// 按 key 缓存解析好的主题。键空间只有 5 套配色 × 2 种风格，不会涨。
+    private final class AppThemeCache {
+        private let lock = NSLock()
+        private var storage: [String: AppTheme] = [:]
+
+        func value(forKey key: String, build: () -> AppTheme) -> AppTheme {
+            lock.lock()
+            defer { lock.unlock() }
+            if let hit = storage[key] { return hit }
+            let built = build()
+            storage[key] = built
+            return built
+        }
     }
 
     /// 当前选中的颜色与风格。读到旧的「液态玻璃」配色值时按「晶透白 + 玻璃风格」解释，

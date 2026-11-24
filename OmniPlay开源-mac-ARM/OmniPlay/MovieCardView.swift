@@ -31,6 +31,8 @@ struct MovieCardView: View {
     @State private var sourcePairs: [(VideoFile, MediaSource?)] = []
     @State private var doubanMetadata: DoubanMetadata? = nil
     @State private var refreshTask: Task<Void, Never>? = nil
+    /// 滚动中压住的卡片状态刷新，等滚动停下再补
+    @State private var pendingCardRefresh = false
     
     /// 全墙共用一条 15 秒定时器，不再每张卡各起一条
     private var availabilityTimer: Publishers.Autoconnect<Timer.TimerPublisher> { PosterWallAvailabilityTicker.publisher }
@@ -98,7 +100,11 @@ struct MovieCardView: View {
                 if !isPosterWallScrolling { isHovering = hovering }
             }
             .onChange(of: isPosterWallScrolling) { _, scrolling in
-                if scrolling { isHovering = false }
+                if scrolling {
+                    isHovering = false
+                } else {
+                    refreshCardStateWhenIdle()
+                }
             }
             // 没有系统折射的系统上，几十张海报各糊一层背景模糊太贵，直接用平涂染色底
             .themeGlassMat(theme, simplified: isPosterWallScrolling || !AppGlassStyle.nativeRefractionAvailable)
@@ -158,17 +164,24 @@ struct MovieCardView: View {
             .frame(height: isContinueWatchingContext ? 20 : 18, alignment: .topLeading)
         }
         .frame(width: 160, height: isContinueWatchingContext ? 318 : 310, alignment: .topLeading)
-        .onAppear { refreshCardState() }
+        .onAppear { refreshCardStateWhenIdle() }
         .onDisappear {
             refreshTask?.cancel()
             refreshTask = nil
             availabilityTask?.cancel()
             availabilityTask = nil
+            pendingCardRefresh = false
         }
-        .onReceive(NotificationCenter.default.publisher(for: .libraryUpdated)) { _ in refreshCardState() }
+        .onReceive(NotificationCenter.default.publisher(for: .libraryUpdated)) { _ in
+            // 扫描刮削过程中的库广播很密，滚动中先记一笔，停下再统一补
+            if isPosterWallScrolling { pendingCardRefresh = true } else { refreshCardState() }
+        }
         .onReceive(cacheManager.$cachedFileKeys) { _ in refreshAvailabilityWithoutDB() }
         .onReceive(cacheManager.$cachedFileNames) { _ in refreshAvailabilityWithoutDB() }
-        .onReceive(availabilityTimer) { _ in refreshAvailabilityWithoutDB() }
+        .onReceive(availabilityTimer) { _ in
+            // 15 秒一次的兜底轮询别赶在滚动中间插一脚
+            if !isPosterWallScrolling { refreshAvailabilityWithoutDB() }
+        }
         .onReceive(cacheManager.objectWillChange) { _ in
             // 以前这里等价于 @ObservedObject：任何缓存状态变化都惊动整屏卡片。
             // 现在只有会显示进度与缓存状态的那批卡片（缓存模式）才跟着刷新。
@@ -277,6 +290,19 @@ struct MovieCardView: View {
         return min(max(progress / duration, 0), 1)
     }
     
+    /// 快速下滑时 LazyVGrid 会一次放出一整屏卡片，每张卡片都要读一次库拿文件与豆瓣评分；
+    /// 这些读全排在海报解码前面，慢机器上就表现为「先一片空白海报，过几秒才一起出来」。
+    /// 滚动中先把刷新压住，等滚动相位回落成 idle 再统一补上。
+    private func refreshCardStateWhenIdle() {
+        if isPosterWallScrolling {
+            pendingCardRefresh = true
+            return
+        }
+        guard pendingCardRefresh || movieFiles.isEmpty else { return }
+        pendingCardRefresh = false
+        refreshCardState()
+    }
+
     private func refreshCardState() {
         refreshTask?.cancel()
         refreshTask = Task {

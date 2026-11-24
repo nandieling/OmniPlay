@@ -11,12 +11,15 @@ import GRDB
 /// - 退出前再推送一次。
 /// - 本地未登录 iCloud / ad-hoc 签名导致容器不可用时，自动回退纯本地存储。
 /// 海报目录（独立小文件）直接存放在容器内，由 iCloud 原生文件同步处理。
+///
+/// 目标里默认隔离是 MainActor，海报的读盘/解码跑在后台队列，所以这两个目录解析显式
+/// 标成 nonisolated：只碰 FileManager 和常量，后台线程调用同样安全。
 enum OmniPlayICloudSync {
     static let dbFileName = "omniplay.sqlite"
-    static let posterDirectoryName = "OmniPlay/Posters"
+    nonisolated static let posterDirectoryName = "OmniPlay/Posters"
 
     /// iCloud 容器根目录（Application Support 内），不可用返回 nil
-    static func containerURL() -> URL? {
+    nonisolated static func containerURL() -> URL? {
         guard let url = FileManager.default
             .url(forUbiquityContainerIdentifier: "icloud.nan.OmniPlay") else { return nil }
         let fm = FileManager.default
@@ -30,7 +33,7 @@ enum OmniPlayICloudSync {
     }
 
     /// 海报目录：容器可用时直接放 iCloud（跨设备原生同步），否则放本地 Application Support
-    static func posterDirectory() -> URL {
+    nonisolated static func posterDirectory() -> URL {
         if let container = containerURL() {
             let dir = container.appendingPathComponent(posterDirectoryName, isDirectory: true)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

@@ -198,6 +198,14 @@ class AppDatabase {
             try db.execute(sql: #"CREATE INDEX IF NOT EXISTS "idx_videoFile_mediaKind" ON videoFile("mediaKind")"#)
         }
 
+        // v15: 海报墙每张卡片都按 movieId 查自己的文件，按源清理也按 sourceId 过滤，
+        // 这两列原先只有主键，EXPLAIN 是 SCAN videoFile。慢机器上快速滚动时，
+        // 这一整屏的串行全表扫正好压在海报解码前面。
+        migrator.registerMigration("v15") { db in
+            try db.execute(sql: #"CREATE INDEX IF NOT EXISTS "idx_videoFile_movieId" ON videoFile("movieId")"#)
+            try db.execute(sql: #"CREATE INDEX IF NOT EXISTS "idx_videoFile_sourceId" ON videoFile("sourceId")"#)
+        }
+
         var migrationError: Error?
         do {
             try migrator.migrate(dbQueue)

@@ -2498,6 +2498,9 @@ enum MediaSourceScanDiagnosticsFormatter {
 
     /// 扫描「成功」但一个视频文件都没有时的可读报告：缺了这一步，界面只会把状态条
     /// 闪一下就结束，用户完全看不出扫描其实已经跑完了。
+    ///
+    /// 左上角横幅收起时只放得下一行人话，完整报告留给展开状态和复制，所以这里再给一个
+    /// 只由用户可读原因拼成的摘要。
     static func emptyScanReport(sources: [MediaSource]) -> String {
         let header = "扫描完成，但没有发现任何视频文件。"
         let blocks = sources.map { source in
@@ -2506,6 +2509,18 @@ enum MediaSourceScanDiagnosticsFormatter {
         }
         let hint = "请确认该地址指向真正存放视频的文件夹（不是 WebDAV 服务根目录），并且该账号有权限列出这个目录。"
         return ([header] + blocks + [hint]).joined(separator: "\n\n")
+    }
+
+    /// 失败源的一行结论：逐条列出「“源名”连接失败：……」，超过两条就收个尾，
+    /// 剩下的引导用户展开横幅看完整诊断。
+    static func userFacingSummary(results: [MediaSourceScanResult]) -> String {
+        let messages = results
+            .filter { !$0.isSuccess }
+            .map { $0.userMessage.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard messages.count > 2 else { return messages.joined(separator: "\n") }
+        return messages.prefix(2).joined(separator: "\n")
+            + "\n另有 \(messages.count - 2) 个媒体源失败，展开查看完整诊断。"
     }
 
     static func sanitizedEndpoint(from raw: String) -> String {

@@ -388,6 +388,40 @@ struct WebDAVMockIntegrationTests {
         #expect(!report.contains("user:pass"))
     }
 
+    @Test("Scan failure summary leads with the human reason and caps at two sources")
+    func userFacingSummaryLeadsWithHumanReasonAndCapsLength() {
+        func failure(_ name: String, _ message: String) -> MediaSourceScanResult {
+            MediaSourceScanResult(
+                sourceId: nil,
+                sourceName: name,
+                protocolType: MediaSourceProtocol.webdav.rawValue,
+                scannedCount: 0,
+                insertedCount: 0,
+                removedCount: 0,
+                errorCategory: .network,
+                userMessage: message,
+                diagnostic: nil
+            )
+        }
+
+        let single = MediaSourceScanDiagnosticsFormatter.userFacingSummary(
+            results: [failure("NAS", "“NAS”连接失败：网络不可达或超时。")]
+        )
+        #expect(single == "“NAS”连接失败：网络不可达或超时。")
+
+        let many = MediaSourceScanDiagnosticsFormatter.userFacingSummary(
+            results: [
+                failure("NAS", "“NAS”连接失败：认证失败，请检查 WebDAV 用户名/密码。"),
+                failure("Plex", "“Plex”扫描失败：超时"),
+                failure("Emby", "“Emby”扫描失败：超时"),
+                failure("Jellyfin", "“Jellyfin”扫描失败：超时")
+            ]
+        )
+        #expect(many.contains("“NAS”连接失败：认证失败"))
+        #expect(many.contains("另有 2 个媒体源失败"))
+        #expect(!many.contains("Jellyfin"))
+    }
+
     @Test("WebDAV preflight checker should succeed on 207 and sanitize endpoint")
     func webDAVPreflightCheckerSucceeds() async {
         WebDAVMockURLProtocol.reset()
